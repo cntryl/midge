@@ -8,12 +8,12 @@
 //! commit is made visible immediately even when the local journal append must
 //! be retried during recovery.
 
+use crate::runtime::RuntimeState;
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_core::io::traits::{FsPath, OpenMode, OpenOptions};
 use cntryl_midge_core::io::FsError;
 use cntryl_midge_durability::metadata::manifest::FamilyLifecycleEdit;
 use cntryl_midge_durability::metadata::{ColumnFamilyMeta, Manifest, ManifestEdit};
-use crate::runtime::RuntimeState;
 use cntryl_midge_storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -34,7 +34,10 @@ pub(crate) struct DdlLeaseAuthority {
 }
 
 impl DdlLeaseAuthority {
-    pub(crate) fn validate(&self, deadline: &cntryl_midge_core::common::OperationDeadline) -> MidgeResult<()> {
+    pub(crate) fn validate(
+        &self,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> MidgeResult<()> {
         if deadline.is_expired() {
             return Err(MidgeError::Timeout(
                 "cloud DDL lease validation exceeded its deadline".to_string(),
@@ -233,7 +236,10 @@ impl DdlRegistry {
                 "remote DDL registry accepts only column-family edits".to_string(),
             )
         })?;
-        cntryl_midge_durability::metadata::manifest::apply_column_family_lifecycle(&mut self.column_families, edit)
+        cntryl_midge_durability::metadata::manifest::apply_column_family_lifecycle(
+            &mut self.column_families,
+            edit,
+        )
     }
 }
 
@@ -337,9 +343,9 @@ fn write_local_prepare(state: &RuntimeState, prepare: &DdlPrepare) -> MidgeResul
         return Ok(());
     }
     let bytes = serialize(prepare)?;
-    cntryl_midge_core::failpoints::fail_point!("midge::ddl::before_prepare", |_| Err(MidgeError::Internal(
-        "failpoint: DDL prepare failed".to_string()
-    )));
+    cntryl_midge_core::failpoints::fail_point!("midge::ddl::before_prepare", |_| Err(
+        MidgeError::Internal("failpoint: DDL prepare failed".to_string())
+    ));
     cntryl_midge_core::io::staging::stage_bytes(
         &state.fs,
         &FsPath::new(LOCAL_DDL_PREPARE_TEMP),
@@ -347,9 +353,9 @@ fn write_local_prepare(state: &RuntimeState, prepare: &DdlPrepare) -> MidgeResul
         &bytes,
         MidgeError::Internal,
     )?;
-    cntryl_midge_core::failpoints::fail_point!("midge::ddl::after_prepare", |_| Err(MidgeError::Internal(
-        "failpoint: DDL prepare completion failed".to_string()
-    )));
+    cntryl_midge_core::failpoints::fail_point!("midge::ddl::after_prepare", |_| Err(
+        MidgeError::Internal("failpoint: DDL prepare completion failed".to_string())
+    ));
     Ok(())
 }
 
@@ -366,7 +372,10 @@ fn clear_local_prepare(state: &RuntimeState, storage: Option<&HybridStorage>) ->
         .map_err(FsError::into_midge)?;
     state
         .fs
-        .sync_dir(&FsPath::new("."), cntryl_midge_core::io::traits::Durability::Durable)
+        .sync_dir(
+            &FsPath::new("."),
+            cntryl_midge_core::io::traits::Durability::Durable,
+        )
         .map_err(FsError::into_midge)
 }
 
@@ -374,8 +383,11 @@ fn clear_local_prepare(state: &RuntimeState, storage: Option<&HybridStorage>) ->
 fn read_remote_registry(
     storage: &HybridStorage,
 ) -> Result<(Option<DdlRegistry>, Option<RemoteObjectProof>), String> {
-    read_remote_registry_within(storage, &cntryl_midge_core::common::OperationDeadline::unbounded())
-        .map_err(|error| error.to_string())
+    read_remote_registry_within(
+        storage,
+        &cntryl_midge_core::common::OperationDeadline::unbounded(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn read_remote_registry_within(
@@ -410,9 +422,11 @@ fn write_remote_registry_within(
     deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> Result<RemoteObjectProof, cntryl_midge_storage::hybrid::backend::RemoteCasFailure> {
     cntryl_midge_core::failpoints::fail_point!("midge::ddl::before_remote_cas", |_| Err(
-        cntryl_midge_storage::hybrid::backend::RemoteCasFailure::not_committed(MidgeError::Internal(
-            "remote DDL CAS failed before submission: injected failure".to_string()
-        ))
+        cntryl_midge_storage::hybrid::backend::RemoteCasFailure::not_committed(
+            MidgeError::Internal(
+                "remote DDL CAS failed before submission: injected failure".to_string()
+            )
+        )
     ));
     let bytes = serialize_registry(registry)
         .map_err(cntryl_midge_storage::hybrid::backend::RemoteCasFailure::not_committed)?;
@@ -580,7 +594,11 @@ fn apply_remote_committed_visibility(
 /// manifest transition is prepared first so a failed journal append cannot mutate
 /// in-memory visibility.
 pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) -> MidgeResult<()> {
-    apply_local_edit_for(state, edit, cntryl_midge_durability::metadata::accounting::Origin::Ddl)
+    apply_local_edit_for(
+        state,
+        edit,
+        cntryl_midge_durability::metadata::accounting::Origin::Ddl,
+    )
 }
 
 fn apply_local_edit_for(
@@ -635,9 +653,12 @@ fn apply_local_edit_for(
 
 #[cfg(feature = "failpoints")]
 fn fail_after_local_journal_before_memory() -> MidgeResult<()> {
-    cntryl_midge_core::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
-        MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
-    ));
+    cntryl_midge_core::failpoints::fail_point!(
+        "midge::ddl::after_local_journal_before_memory",
+        |_| Err(MidgeError::Internal(
+            "failpoint: DDL local visibility failed".to_string(),
+        ))
+    );
     Ok(())
 }
 
@@ -666,7 +687,9 @@ fn reconcile_prepared_with_resolution(
     resolution: AmbiguousPrepareResolution,
 ) -> MidgeResult<()> {
     let origin = match resolution {
-        AmbiguousPrepareResolution::ObserveOnly => cntryl_midge_durability::metadata::accounting::Origin::Ddl,
+        AmbiguousPrepareResolution::ObserveOnly => {
+            cntryl_midge_durability::metadata::accounting::Origin::Ddl
+        }
         AmbiguousPrepareResolution::RedriveOnceOnStartup => {
             cntryl_midge_durability::metadata::accounting::Origin::Recovery
         }
@@ -823,7 +846,9 @@ pub(crate) fn reconcile_startup(
         state,
         storage,
         authority,
-        &cntryl_midge_core::common::DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded()),
+        &cntryl_midge_core::common::DeadlineScope::new(
+            cntryl_midge_core::common::OperationDeadline::unbounded(),
+        ),
     )
 }
 
@@ -1167,9 +1192,11 @@ mod tests {
             ));
             let _ = callback.send(cntryl_midge_storage::StorageEvent::WriteComplete {
                 key,
-                result: cntryl_midge_storage::StorageOutcome::Err(cntryl_midge_storage::storage_timeout_error(
-                    "registry callback lost after commit",
-                )),
+                result: cntryl_midge_storage::StorageOutcome::Err(
+                    cntryl_midge_storage::storage_timeout_error(
+                        "registry callback lost after commit",
+                    ),
+                ),
             });
         }
     }
@@ -1325,17 +1352,21 @@ mod tests {
         cloud: &Arc<cntryl_midge_storage::cloud::CloudStorage>,
         path: &std::path::Path,
     ) -> Arc<cntryl_midge_durability::lease::CloudStorageLease> {
-        Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-            cntryl_midge_durability::lease::CloudLeaseConfig {
-                bucket: "ddl-fence-test".to_string(),
-                prefix: "test/".to_string(),
-            },
-            path.to_path_buf(),
-            Arc::clone(cloud),
-        ))
+        Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "ddl-fence-test".to_string(),
+                    prefix: "test/".to_string(),
+                },
+                path.to_path_buf(),
+                Arc::clone(cloud),
+            ),
+        )
     }
 
-    fn provider_test_authority(lease: &cntryl_midge_durability::lease::CloudStorageLease) -> DdlLeaseAuthority {
+    fn provider_test_authority(
+        lease: &cntryl_midge_durability::lease::CloudStorageLease,
+    ) -> DdlLeaseAuthority {
         use cntryl_midge_durability::lease::PrimaryLease as _;
 
         DdlLeaseAuthority {
@@ -1366,8 +1397,9 @@ mod tests {
             .try_acquire()
             .expect("A acquires provider lease");
         let authority_a = provider_test_authority(&lease_a);
-        let deadline =
-            cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            std::time::Duration::from_secs(5),
+        );
         fence_remote_registry_on_startup(&storage, &authority_a, &deadline)?;
         let mut state_a = RuntimeState::new(temp.path().join("state-a"), false);
         if drop_existing {
@@ -1511,7 +1543,9 @@ mod tests {
         fence_remote_registry_on_startup(
             &storage,
             &authority,
-            &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+            &cntryl_midge_core::common::OperationDeadline::from_budget(
+                std::time::Duration::from_secs(5),
+            ),
         )?;
 
         // Assert: a second CAS was unnecessary because exact readback proved
@@ -1542,8 +1576,9 @@ mod tests {
             .try_acquire()
             .expect("A acquires provider lease");
         let authority_a = provider_test_authority(&lease_a);
-        let deadline =
-            cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            std::time::Duration::from_secs(5),
+        );
         fence_remote_registry_on_startup(&storage, &authority_a, &deadline)?;
         let state_path = temp.path().join("shared-state");
         let state_a = RuntimeState::new(state_path.clone(), false);
@@ -1599,8 +1634,9 @@ mod tests {
         let lease = provider_test_lease(&cloud, &temp.path().join("lease"));
         let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
         let authority = provider_test_authority(&lease);
-        let deadline =
-            cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            std::time::Duration::from_secs(5),
+        );
         fence_remote_registry_on_startup(&storage, &authority, &deadline)?;
         let mut state = RuntimeState::new(temp.path().join("state"), false);
         let create = create_edit(&state, "dropped-cf")?;
@@ -1663,12 +1699,14 @@ mod tests {
             cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT,
         ]
         .into_iter()
-        .map(|file_name| cntryl_midge_durability::lease::CloudMetadataObject {
-            file_name: file_name.to_string(),
-            object_key: format!("metadata/generations/{generation_id}/{file_name}"),
-            len: 1,
-            crc32c: 1,
-        })
+        .map(
+            |file_name| cntryl_midge_durability::lease::CloudMetadataObject {
+                file_name: file_name.to_string(),
+                object_key: format!("metadata/generations/{generation_id}/{file_name}"),
+                len: 1,
+                crc32c: 1,
+            },
+        )
         .collect();
         authority
             .store
@@ -1689,7 +1727,9 @@ mod tests {
         let error = fence_remote_registry_on_startup(
             &storage,
             &authority,
-            &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+            &cntryl_midge_core::common::OperationDeadline::from_budget(
+                std::time::Duration::from_secs(5),
+            ),
         )
         .expect_err("missing registry must fail closed");
 
@@ -1702,7 +1742,9 @@ mod tests {
     }
 
     /// A memory-mode state holding one empty column family, plus its id.
-    fn state_with_column_family(label: &str) -> (RuntimeState, cntryl_midge_core::types::ColumnFamilyId) {
+    fn state_with_column_family(
+        label: &str,
+    ) -> (RuntimeState, cntryl_midge_core::types::ColumnFamilyId) {
         let mut state = RuntimeState::new(std::path::PathBuf::from(label), true);
         let edit = create_edit(&state, "drop-me").expect("create edit");
         apply_local_edit(&mut state, &edit).expect("apply create");

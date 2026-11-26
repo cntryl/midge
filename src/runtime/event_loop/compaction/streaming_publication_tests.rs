@@ -1,15 +1,15 @@
 //! Corrupt streaming uploads must fail before compaction reaches manifest authority.
 
 use super::EventLoop;
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::{ResponseRouter, RuntimeConfig, RuntimeState};
-use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory as _};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::types::EntryType;
 use cntryl_midge_storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudHeadCapability, CloudReadCapability,
     CloudStorage, CloudWriteCapability, MockCloudBackend,
 };
 use cntryl_midge_storage::{StorageFileUpload, StorageWriteReceipt};
-use cntryl_midge_core::types::EntryType;
+use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory as _};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -104,7 +104,9 @@ impl CompactionOutputReadCountingFs {
             .iter()
             .next()
             .cloned()
-            .ok_or_else(|| cntryl_midge_core::io::FsError::Io("no finalized compaction output".into()))?;
+            .ok_or_else(|| {
+                cntryl_midge_core::io::FsError::Io("no finalized compaction output".into())
+            })?;
         let mut file = self.inner.open(
             &cntryl_midge_core::io::FsPath::new(output_path),
             cntryl_midge_core::io::OpenOptions {
@@ -129,7 +131,10 @@ impl cntryl_midge_core::io::ReadFs for CompactionOutputReadCountingFs {
         self.inner.open_read(path)
     }
 
-    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
@@ -149,7 +154,9 @@ impl cntryl_midge_core::io::ReadFs for CompactionOutputReadCountingFs {
 }
 
 impl cntryl_midge_core::io::Fs for CompactionOutputReadCountingFs {
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         Some(self)
     }
 
@@ -170,15 +177,24 @@ impl cntryl_midge_core::io::Fs for CompactionOutputReadCountingFs {
         self.inner.open(path, options)
     }
 
-    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 
@@ -428,8 +444,11 @@ fn event_loop_with_corrupting_storage(
     *backend.output_fs.lock() = Some(Arc::clone(&counting_fs));
     state.fs = counting_fs.clone();
     cntryl_midge_durability::metadata::ensure_or_create_format_marker(&state.fs, path)?;
-    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
-        .map_err(MidgeError::Internal)?;
+    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
+        &state.fs,
+        &state.manifest,
+    )
+    .map_err(MidgeError::Internal)?;
     let (wake_tx, _wake_rx) = crossbeam::channel::unbounded();
     let event_loop = EventLoop::new(
         state,
@@ -547,8 +566,9 @@ fn should_keep_compaction_manifest_unchanged_when_streaming_upload_corrupts_a_pa
     drop(uploaded);
     assert_eq!(manifest_names(&event_loop.state.manifest), initial_names);
     assert!(event_loop.state.intent_log.is_empty());
-    let persisted = cntryl_midge_durability::metadata::ManifestPersistence::load(&event_loop.state.db_path)
-        .map_err(MidgeError::Internal)?;
+    let persisted =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(&event_loop.state.db_path)
+            .map_err(MidgeError::Internal)?;
     assert_eq!(manifest_names(&persisted), initial_names);
     assert!(event_loop
         .state
@@ -604,8 +624,9 @@ fn should_reject_completed_sst_mutated_before_streaming_upload() -> MidgeResult<
     assert!(uploaded[0].1 > 2 * cntryl_midge_storage::FILE_UPLOAD_PART_BYTES);
     drop(uploaded);
     assert_eq!(manifest_names(&event_loop.state.manifest), initial_names);
-    let persisted = cntryl_midge_durability::metadata::ManifestPersistence::load(&event_loop.state.db_path)
-        .map_err(MidgeError::Internal)?;
+    let persisted =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(&event_loop.state.db_path)
+            .map_err(MidgeError::Internal)?;
     assert_eq!(manifest_names(&persisted), initial_names);
     assert!(event_loop.state.intent_log.is_empty());
     Ok(())

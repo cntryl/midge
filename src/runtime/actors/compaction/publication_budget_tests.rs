@@ -123,8 +123,9 @@ struct PublicationFixture {
 impl PublicationFixture {
     fn new(count: u32) -> MidgeResult<Self> {
         let directory = tempfile::tempdir()?;
-        let fs: Arc<dyn cntryl_midge_core::io::Fs> =
-            Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+        let fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        );
         let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(fs.clone(), 4096);
         let backend = Arc::new(HeldHeadBackend::default());
         let cloud: Arc<dyn cntryl_midge_storage::StorageBackend> =
@@ -145,7 +146,9 @@ impl PublicationFixture {
         let mut originals = Vec::new();
         for ordinal in 0..count {
             let name = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 3, ordinal);
-            let path = directory.path().join(cntryl_midge_table::sst::fs::sst_location(&name));
+            let path = directory
+                .path()
+                .join(cntryl_midge_table::sst::fs::sst_location(&name));
             let mut writer = factory.create()?;
             writer.add_with_meta(b"key", Some(b"exact value"), 9, EntryType::Put, None)?;
             cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &path)?;
@@ -178,7 +181,9 @@ impl PublicationFixture {
         &self,
         manual_deadline: Option<OperationDeadline>,
     ) -> MidgeResult<publication::CompactionPublishCompletion> {
-        cntryl_midge_core::failpoints::with_read_gate(|| self.run_fallback_in_read_scope(manual_deadline))
+        cntryl_midge_core::failpoints::with_read_gate(|| {
+            self.run_fallback_in_read_scope(manual_deadline)
+        })
     }
 
     fn run_fallback_in_read_scope(

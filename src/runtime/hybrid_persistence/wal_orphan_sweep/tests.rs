@@ -1,13 +1,13 @@
 use super::*;
-use cntryl_midge_durability::metadata::Manifest;
 use crate::runtime::hybrid_persistence::tests::{
     fixture_manifest_frontier, SharedRetirementFixture,
 };
-use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
-use cntryl_midge_storage::HybridStorage;
+use bytes::Bytes;
+use cntryl_midge_durability::metadata::Manifest;
 use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use cntryl_midge_durability::wal::format::segment::SegmentBuilder;
-use bytes::Bytes;
+use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
+use cntryl_midge_storage::HybridStorage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,7 +49,9 @@ impl Fixture {
             );
             let (bytes, link) = SegmentBuilder::new(id, 1, previous).record(&record).seal();
             let key = cntryl_midge_durability::wal::segment_object_key(id, 1);
-            let valid = cntryl_midge_durability::wal::cloud_segment::validate_segment_bytes(&key, &bytes).unwrap();
+            let valid =
+                cntryl_midge_durability::wal::cloud_segment::validate_segment_bytes(&key, &bytes)
+                    .unwrap();
             entries.push(CatalogEntry::describing(&valid, &bytes));
             io.put_with_headers(&key, bytes.clone(), Vec::new())
                 .unwrap();
@@ -60,7 +62,11 @@ impl Fixture {
         }
         catalog.append_run(2, &entries).unwrap();
         catalog
-            .retire_prefix(2, &entries[..3], cntryl_midge_durability::lease::SharedGenerationId::FIRST)
+            .retire_prefix(
+                2,
+                &entries[..3],
+                cntryl_midge_durability::lease::SharedGenerationId::FIRST,
+            )
             .unwrap();
         let fixture = Self {
             shared,

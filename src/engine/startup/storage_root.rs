@@ -7,8 +7,8 @@
 use super::super::OpenOptions;
 use super::super::IN_MEMORY_OPEN_COUNTER;
 use super::StartupStoragePath;
-use cntryl_midge_core::common::MidgeResult;
 use crate::config::Storage;
+use cntryl_midge_core::common::MidgeResult;
 use cntryl_midge_core::io::{Fs, FsError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -49,7 +49,10 @@ impl StartupStoragePath {
             // Create durably first so a failure keeps its operating-system
             // error kind; the root then already exists.
             cntryl_midge_core::io::durable_dir::create_path_durably(&db_path)?;
-            Arc::new(cntryl_midge_core::io::RealFs::open_existing(&db_path).map_err(FsError::into_midge)?)
+            Arc::new(
+                cntryl_midge_core::io::RealFs::open_existing(&db_path)
+                    .map_err(FsError::into_midge)?,
+            )
         };
         Ok(Self {
             db_path,
@@ -69,9 +72,11 @@ impl StartupStoragePath {
 pub(in crate::engine) fn existing_host_root(db_path: &Path) -> MidgeResult<Arc<dyn Fs>> {
     match cntryl_midge_core::io::RealFs::open_existing(db_path) {
         Ok(fs) => Ok(Arc::new(fs)),
-        Err(error) if !db_path.exists() => Err(cntryl_midge_core::common::MidgeError::CompatibilityError(
-            format!("failed to read FORMAT marker: database path is missing: {error}"),
-        )),
+        Err(error) if !db_path.exists() => {
+            Err(cntryl_midge_core::common::MidgeError::CompatibilityError(
+                format!("failed to read FORMAT marker: database path is missing: {error}"),
+            ))
+        }
         Err(error) => Err(error.into_midge()),
     }
 }

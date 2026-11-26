@@ -1,4 +1,4 @@
-//! Foundational, dependency-free building blocks shared by Midge crates.
+//! Foundational building blocks shared by Midge crates.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 

@@ -71,10 +71,11 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
             },
         )?;
     }
-    let observed = cntryl_midge_durability::wal::format::segment::records(&std::fs::read(wal_path)?)?
-        .into_iter()
-        .filter(|record| record.op == cntryl_midge_durability::wal::WalOpKind::Put)
-        .count();
+    let observed =
+        cntryl_midge_durability::wal::format::segment::records(&std::fs::read(wal_path)?)?
+            .into_iter()
+            .filter(|record| record.op == cntryl_midge_durability::wal::WalOpKind::Put)
+            .count();
     crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 9)?;
     let sequence = state.sequence;
     let mut frozen = Vec::new();
@@ -109,18 +110,22 @@ fn publish_frozen_family(
     state.complete_immutable_flush(cf_id, table).unwrap();
     state
         .manifest
-        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
-            cntryl_midge_durability::metadata::ManifestEdit::AddSst(cntryl_midge_durability::metadata::FileMeta {
-                name: format!("flushed-family-{cf_id}.sst"),
-                cf_id,
-                largest_seq: Some(sequence),
-                ..Default::default()
-            }),
-            cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
-                cf_id,
-                freeze_sequence: sequence,
-            },
-        ]))
+        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::Batch(
+            vec![
+                cntryl_midge_durability::metadata::ManifestEdit::AddSst(
+                    cntryl_midge_durability::metadata::FileMeta {
+                        name: format!("flushed-family-{cf_id}.sst"),
+                        cf_id,
+                        largest_seq: Some(sequence),
+                        ..Default::default()
+                    },
+                ),
+                cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
+                    cf_id,
+                    freeze_sequence: sequence,
+                },
+            ],
+        ))
 }
 
 fn retirable(state: &RuntimeState) -> Option<u64> {

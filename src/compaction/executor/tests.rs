@@ -13,7 +13,10 @@ impl cntryl_midge_core::io::ReadFs for MetadataFailFs {
             .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
@@ -49,13 +52,22 @@ impl cntryl_midge_core::io::Fs for MetadataFailFs {
     ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
         self.inner.open(path, opts)
     }
-    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
-    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
     fn sync_dir(
@@ -114,7 +126,10 @@ fn should_fail_partition_when_output_metadata_cannot_be_read() -> MidgeResult<()
     );
 
     // Assert
-    assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Io(_))));
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Io(_))
+    ));
     let name = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 1, 0);
     assert!(mock.get_file(&format!("output/{name}")).is_none());
     Ok(())
@@ -156,7 +171,10 @@ fn should_remove_partial_output_through_injected_fs_when_compaction_aborts() -> 
     );
 
     // Assert
-    assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Aborted(_))));
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Aborted(_))
+    ));
     assert!(mock.get_file("input.sst").is_some());
     let output = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 2, 0);
     assert!(mock.get_file(&format!("output/{output}")).is_none());
@@ -633,7 +651,9 @@ fn should_roll_only_after_a_written_partition_reaches_its_boundary() -> MidgeRes
     // Arrange
     let directory = tempfile::tempdir()?;
     let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
-        std::sync::Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+        std::sync::Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        ),
         4096,
     );
     let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(1024 * 1024);

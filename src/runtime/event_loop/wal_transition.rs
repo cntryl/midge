@@ -8,9 +8,9 @@
 //! Every seal and sync path in the event loop routes its failures through
 //! these two helpers so the actor and protocol views cannot diverge.
 
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::actors::wal::WalRotationReceipt;
 use crate::runtime::wal_transition::WalSealTicket;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 
 impl super::EventLoop {
     /// Fence the WAL actor and the transition protocol as one unit.
@@ -176,11 +176,11 @@ impl super::EventLoop {
 mod tests {
     use super::super::tests::create_test_state;
     use super::super::EventLoop;
-    use cntryl_midge_core::common::MidgeError;
-    use cntryl_midge_core::io::{Fs, MockFs};
     #[cfg(feature = "failpoints")]
     use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
     use crate::runtime::{ResponseRouter, RuntimeConfig};
+    use cntryl_midge_core::common::MidgeError;
+    use cntryl_midge_core::io::{Fs, MockFs};
     use std::sync::Arc;
 
     fn create_local_event_loop() -> EventLoop {

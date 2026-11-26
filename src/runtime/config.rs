@@ -98,7 +98,8 @@ pub struct RuntimeConfig {
     pub cloud_runtime_policy: CloudRuntimePolicy,
     pub(crate) retry_policy: RuntimeRetryPolicy,
     pub hybrid_storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
-    pub hybrid_storage_events: Option<crossbeam::channel::Receiver<cntryl_midge_storage::StorageEvent>>,
+    pub hybrid_storage_events:
+        Option<crossbeam::channel::Receiver<cntryl_midge_storage::StorageEvent>>,
     pub cloud_metadata_storage: Option<Arc<cntryl_midge_storage::cloud::CloudStorage>>,
     /// Provider-backed cloud requires a lease-epoch-fenced V2 DDL registry.
     /// Simulated cloud fixtures may attach metadata storage for mirror tests
@@ -113,7 +114,8 @@ pub struct RuntimeConfig {
     pub(crate) sst_read_fs: Option<Arc<dyn cntryl_midge_core::io::Fs>>,
     /// Remote WAL segments replayed during startup and still eligible for
     /// manifest-covered cleanup.
-    pub(crate) recovered_cloud_wal_entries: BTreeMap<u64, cntryl_midge_durability::wal::cloud_catalog::CatalogEntry>,
+    pub(crate) recovered_cloud_wal_entries:
+        BTreeMap<u64, cntryl_midge_durability::wal::cloud_catalog::CatalogEntry>,
     pub(crate) recovered_cloud_wal_anchor_sequence: u64,
     pub recovered_cloud_wal_segments: BTreeMap<u64, u64>,
     /// Writer epochs paired with `recovered_cloud_wal_segments` by segment id.

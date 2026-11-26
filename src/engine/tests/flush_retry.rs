@@ -4,9 +4,9 @@ use super::*;
 use crate::engine::startup::lease_selection::{
     create_lease_with_validity_and_timeout_and_ttl, test_lease_root, CreatedLease,
 };
-use cntryl_midge_durability::lease::LeaseHeartbeat;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::{RuntimeConfig, RuntimeState};
+use cntryl_midge_durability::lease::LeaseHeartbeat;
 use cntryl_midge_storage::{
     StorageBackend, StorageCallback, StorageEvent, StorageOutcome, StorageRequest,
 };
@@ -172,13 +172,16 @@ impl RetryFixture {
             &created,
             &storage,
         )?);
-        config.sst_read_fs = Some(Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
-            Arc::new(
-                cntryl_midge_core::io::RealFs::new(directory.path()).map_err(cntryl_midge_core::io::FsError::into_midge)?,
+        config.sst_read_fs = Some(Arc::new(
+            cntryl_midge_storage::remote_sst::RemoteSstFs::new(
+                Arc::new(
+                    cntryl_midge_core::io::RealFs::new(directory.path())
+                        .map_err(cntryl_midge_core::io::FsError::into_midge)?,
+                ),
+                storage.remote_sst_backend(),
+                options.storage_io_timeout(),
             ),
-            storage.remote_sst_backend(),
-            options.storage_io_timeout(),
-        )));
+        ));
         #[cfg(feature = "internal-testing")]
         let metadata_accounting = state.checkpoint_metrics();
         let (runtime, _) = Runtime::new();
@@ -225,14 +228,19 @@ fn fixture_metadata_storage(
     created: &CreatedLease,
     storage: &cntryl_midge_storage::HybridStorage,
 ) -> MidgeResult<Arc<cntryl_midge_storage::cloud::CloudStorage>> {
-    let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::from_object_store(
-        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
-            cntryl_midge_storage::simulated::simulated_cloud_root(directory),
-        )?),
-        WORKER_WAIT,
-    ));
-    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
-        .map_err(MidgeError::Internal)?;
+    let cloud = Arc::new(
+        cntryl_midge_storage::cloud::CloudStorage::from_object_store(
+            Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
+                cntryl_midge_storage::simulated::simulated_cloud_root(directory),
+            )?),
+            WORKER_WAIT,
+        ),
+    );
+    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
+        &state.fs,
+        &state.manifest,
+    )
+    .map_err(MidgeError::Internal)?;
     let store = created
         .lease
         .get_leader_store()
@@ -459,7 +467,10 @@ fn assert_one_publication(fixture: &RetryFixture) -> MidgeResult<()> {
         "barrier retry duplicated immutable ownership"
     );
     let file = &manifest.files[0];
-    assert_eq!(publication.key, cntryl_midge_core::cloud_layout::object_key(&file.name));
+    assert_eq!(
+        publication.key,
+        cntryl_midge_core::cloud_layout::object_key(&file.name)
+    );
     assert_eq!(publication.len, file.size_bytes);
     assert_eq!(Some(publication.crc32c), file.content_crc32c);
     let bytes = std::fs::read(

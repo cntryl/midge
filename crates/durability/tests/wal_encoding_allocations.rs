@@ -1,10 +1,10 @@
 //! The borrowed raw-value WAL encoder avoids the owned intermediate value
 //! allocation used by the previous construction path (#947).
 
-use cntryl_midge::__internal::codec::compress_wal_value;
-use cntryl_midge::__internal::wal::encoding::encode_into;
-use cntryl_midge::__internal::wal::{WalOpKind, WalRecord};
-use cntryl_midge::Bytes;
+use bytes::Bytes;
+use cntryl_midge_core::codec::compress_wal_value;
+use cntryl_midge_durability::wal::encoding::encode_into;
+use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};

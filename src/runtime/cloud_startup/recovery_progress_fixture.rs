@@ -1,11 +1,9 @@
 //! Actual recovery fixtures for the external watchdog's isolated child tests.
 
 use super::streaming_wal_plan::StreamingCloudWalRecovery;
+use bytes::Bytes;
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
-use cntryl_midge_durability::RecoveryPolicy;
 use cntryl_midge_core::io::{Fs, FsError, ReadFs};
-use cntryl_midge_table::memtable::SkipListMemtable;
-use cntryl_midge_storage::StorageBackend;
 use cntryl_midge_core::types::{EntryType, KeyState};
 use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use cntryl_midge_durability::wal::recovery::streaming::{
@@ -13,7 +11,9 @@ use cntryl_midge_durability::wal::recovery::streaming::{
 };
 use cntryl_midge_durability::wal::recovery::{RecoveryStats, ReplayPolicy};
 use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
-use bytes::Bytes;
+use cntryl_midge_durability::RecoveryPolicy;
+use cntryl_midge_storage::StorageBackend;
+use cntryl_midge_table::memtable::SkipListMemtable;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -185,7 +185,10 @@ fn prepare_recovery_progress_fixture_with_inventory_count(
                 Arc::new(cntryl_midge_core::io::RealFs::new(&local).map_err(FsError::into_midge)?);
             // A cache that joined the catalog: its first segment follows the
             // catalog's head, at its next id.
-            let local_wal = cntryl_midge_core::io::subdirectory(local_root, cntryl_midge_durability::wal::WAL_DIR);
+            let local_wal = cntryl_midge_core::io::subdirectory(
+                local_root,
+                cntryl_midge_durability::wal::WAL_DIR,
+            );
             if crate::runtime::wal_history::WalHistory::load(Arc::clone(&local_wal), SEGMENT_EPOCH)?
                 .is_none()
             {
@@ -260,8 +263,10 @@ fn wal_fixture(
     observations.set_phase("planner")?;
     let local_root: Arc<dyn Fs> =
         Arc::new(cntryl_midge_core::io::RealFs::new(local).map_err(FsError::into_midge)?);
-    let wal_dir: Arc<dyn ReadFs> =
-        cntryl_midge_core::io::subdirectory(Arc::clone(&local_root), cntryl_midge_durability::wal::WAL_DIR);
+    let wal_dir: Arc<dyn ReadFs> = cntryl_midge_core::io::subdirectory(
+        Arc::clone(&local_root),
+        cntryl_midge_durability::wal::WAL_DIR,
+    );
     let ledger = crate::runtime::wal_history::WalHistory::read(&wal_dir)?
         .ok_or_else(|| MidgeError::Internal("the prepared cache has no WAL ledger".into()))?;
     let recovered = StreamingCloudWalRecovery::build(
@@ -495,7 +500,9 @@ fn replay_fixture(
         memtables,
         ReplayPolicy::Strict,
         StreamingReplayLimits::local(),
-        ReplayOptions::new(cntryl_midge_durability::wal::replay::ReplaySelection::Frontiers(&frontiers)),
+        ReplayOptions::new(
+            cntryl_midge_durability::wal::replay::ReplaySelection::Frontiers(&frontiers),
+        ),
         &mut |_, _| Ok(()),
     )
 }
@@ -533,7 +540,9 @@ fn local_wal_state(local: &Path) -> MidgeResult<(u64, u64)> {
             continue;
         }
         let metadata = entry.metadata()?;
-        if metadata.is_file() && metadata.len() > cntryl_midge_durability::wal::format::HEADER_LEN as u64 {
+        if metadata.is_file()
+            && metadata.len() > cntryl_midge_durability::wal::format::HEADER_LEN as u64
+        {
             files += 1;
             bytes = bytes.saturating_add(metadata.len());
         }

@@ -3,8 +3,8 @@
 use super::*;
 use cntryl_midge_core::common::resource_budget::ResourceBudget;
 use cntryl_midge_core::io::FsError;
-use cntryl_midge_table::sst::SstStateReader;
 use cntryl_midge_core::types::EntryType;
+use cntryl_midge_table::sst::SstStateReader;
 
 struct ReadCountingFs {
     inner: cntryl_midge_core::io::MockFs,
@@ -21,7 +21,10 @@ impl cntryl_midge_core::io::ReadFs for ReadCountingFs {
         self.inner.open_read(path)
     }
 
-    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
@@ -41,7 +44,9 @@ impl cntryl_midge_core::io::ReadFs for ReadCountingFs {
 }
 
 impl cntryl_midge_core::io::Fs for ReadCountingFs {
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         Some(self)
     }
 
@@ -57,15 +62,24 @@ impl cntryl_midge_core::io::Fs for ReadCountingFs {
         self.inner.open(path, options)
     }
 
-    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 
@@ -174,7 +188,9 @@ struct InputEvidence {
 }
 
 fn deadline_input_case(asynchronous: bool, hold_on_open: usize) -> MidgeResult<InputEvidence> {
-    cntryl_midge_core::failpoints::with_read_gate(|| deadline_input_case_inner(asynchronous, hold_on_open))
+    cntryl_midge_core::failpoints::with_read_gate(|| {
+        deadline_input_case_inner(asynchronous, hold_on_open)
+    })
 }
 
 fn deadline_input_case_inner(
@@ -184,7 +200,10 @@ fn deadline_input_case_inner(
     let directory = tempfile::tempdir()?;
     let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
     let delegate = Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(
-        Arc::new(cntryl_midge_core::io::RealFs::new(state.host_sst_dir()).map_err(FsError::into_midge)?),
+        Arc::new(
+            cntryl_midge_core::io::RealFs::new(state.host_sst_dir())
+                .map_err(FsError::into_midge)?,
+        ),
         4096,
     ));
     let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(3);
@@ -199,7 +218,10 @@ fn deadline_input_case_inner(
         let name = format!("input-{index}.sst");
         let mut writer = delegate.create()?;
         writer.add_with_meta(key, Some(value), 10, EntryType::Put, None)?;
-        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &state.host_sst_dir().join(&name))?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(
+            writer,
+            &state.host_sst_dir().join(&name),
+        )?;
         let bytes = std::fs::read(state.host_sst_dir().join(&name))?;
         state
             .manifest
@@ -359,9 +381,11 @@ fn should_open_finalized_compaction_output_only_for_cloud_upload() -> MidgeResul
         read_opens: std::sync::atomic::AtomicUsize::new(0),
     });
     let mock_cloud = Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new());
-    let cloud: Arc<dyn cntryl_midge_storage::StorageBackend> = Arc::new(
-        cntryl_midge_storage::cloud::CloudStorage::new(mock_cloud.clone(), "compaction-test".into()),
-    );
+    let cloud: Arc<dyn cntryl_midge_storage::StorageBackend> =
+        Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+            mock_cloud.clone(),
+            "compaction-test".into(),
+        ));
     let hybrid = cntryl_midge_storage::HybridStorage::with_policy(
         cloud,
         cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -439,7 +463,9 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("partition.sst");
     let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
-        Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+        Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        ),
         4096,
     )
     .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::Fixed(
@@ -459,7 +485,9 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     let original = std::fs::read(&path)?;
     let cloud_path = directory.path().join("cloud");
     let hybrid = cntryl_midge_storage::HybridStorage::with_policy(
-        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(&cloud_path)?),
+        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
+            &cloud_path,
+        )?),
         cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
     hybrid.enable_ephemeral_sst_cache(1024 * 1024);
@@ -507,7 +535,11 @@ struct PendingUpload {
 impl cntryl_midge_storage::cloud::CloudReadCapability for PendingUpload {
     cntryl_midge_storage::cloud::unsupported_cloud_backend!(submit_get);
 
-    fn submit_get_with_metadata(&self, key: &str, callback: cntryl_midge_storage::cloud::CloudCallback) {
+    fn submit_get_with_metadata(
+        &self,
+        key: &str,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
+    ) {
         self.inner.submit_get_with_metadata(key, callback);
     }
 
@@ -569,7 +601,9 @@ fn upload_charge_case(manual: bool) -> MidgeResult<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("partition.sst");
     let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
-        Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+        Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        ),
         4096,
     );
     let mut writer = factory.create()?;
@@ -645,7 +679,10 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         let _failpoint_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let directory = tempfile::tempdir()?;
         let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
-            Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(directory.path())
+                    .map_err(FsError::into_midge)?,
+            ),
             4096,
         )
         .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::Fixed(
@@ -661,10 +698,15 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
                 None,
             )?;
         }
-        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &directory.path().join("input.sst"))?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(
+            writer,
+            &directory.path().join("input.sst"),
+        )?;
         let cloud_path = directory.path().join("cloud");
         let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
-            Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(&cloud_path)?),
+            Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
+                &cloud_path,
+            )?),
             cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         if ephemeral {
@@ -730,7 +772,8 @@ fn verify_rollover_partitions(
         actual.extend(reader.scan_range_state(None, None)?.into_iter().filter_map(
             |(key, state)| match state {
                 cntryl_midge_core::types::KeyState::Value(value, _, _, _) => Some((key, value)),
-                cntryl_midge_core::types::KeyState::Absent | cntryl_midge_core::types::KeyState::Tombstone(_) => None,
+                cntryl_midge_core::types::KeyState::Absent
+                | cntryl_midge_core::types::KeyState::Tombstone(_) => None,
             },
         ));
         let proof = prepared
@@ -792,8 +835,8 @@ fn should_not_start_upload_after_publication_deadline_is_spent_on_head() -> Midg
     );
     let budget = ResourceBudget::new(1024 * 1024);
 
-    let source =
-        cntryl_midge_core::io::RealFs::new(directory.path()).map_err(cntryl_midge_core::io::FsError::into_midge)?;
+    let source = cntryl_midge_core::io::RealFs::new(directory.path())
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?;
 
     // Act
     let result = hybrid.publish_immutable_file(
@@ -831,7 +874,9 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("partition.sst");
     let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
-        Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+        Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        ),
         4096,
     );
     let mut writer = factory.create()?;

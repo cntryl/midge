@@ -50,7 +50,7 @@ impl SharedGenerationId {
     pub const FIRST: Self = Self(1);
 
     /// A nonzero committed publication ordinal.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub const fn new(value: u64) -> Option<Self> {
         if value == 0 {
@@ -237,7 +237,7 @@ pub enum ConflictPolicy {
 ///
 /// This enum is for internal runtime durability tracking. Write-time
 /// durability decisions use `WriteOptions::DurabilityPolicy` instead.
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadDurability {
     /// Strict - fsync on every write.

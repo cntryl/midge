@@ -34,8 +34,10 @@ fn run_cloud_wal_retirement(
         Ok(results) => {
             for (id, result) in results {
                 match result {
-                    Ok(()) => storage
-                        .queue_cloud_wal_prune_complete(id, cntryl_midge_storage::StorageOutcome::Ok(())),
+                    Ok(()) => storage.queue_cloud_wal_prune_complete(
+                        id,
+                        cntryl_midge_storage::StorageOutcome::Ok(()),
+                    ),
                     Err(error) => {
                         storage.queue_cloud_wal_prune_attempt_failed(id, error.to_string());
                     }
@@ -62,7 +64,10 @@ impl EventLoop {
 
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
         // A cleanup omission retains native WAL authority for recovery fixtures.
-        cntryl_midge_core::failpoints::fail_point!("midge::cloud::defer_wal_prune_admission", |_| ());
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::cloud::defer_wal_prune_admission",
+            |_| ()
+        );
         // Shutdown must settle admitted durability work without admitting a
         // fresh optional retirement from flush/upload completion or maintenance.
         // Retain recovery authority for a later engine lifetime instead.

@@ -35,7 +35,11 @@ pub(super) fn eligible(plan: &CompactionPlan, files: &[FileMeta]) -> bool {
         return false;
     }
     matches!(
-        cntryl_midge_durability::metadata::manifest::validate_sst_move(files, &captured, plan.target_level),
+        cntryl_midge_durability::metadata::manifest::validate_sst_move(
+            files,
+            &captured,
+            plan.target_level
+        ),
         Ok(false)
     )
 }

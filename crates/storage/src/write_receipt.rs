@@ -2,7 +2,7 @@
 
 use super::{StorageBackend, StorageError, StorageEvent, StorageOutcome, StorageRequest};
 
-pub(crate) const FILE_UPLOAD_PART_BYTES: usize = 5 * 1024 * 1024;
+pub const FILE_UPLOAD_PART_BYTES: usize = 5 * 1024 * 1024;
 
 /// Identity of the written version and CRC32C validated by the provider.
 /// An `ETag` alone is an identity token, not an integrity checksum.
@@ -13,7 +13,7 @@ pub struct StorageWriteReceipt {
 }
 
 impl StorageWriteReceipt {
-    pub(crate) fn matches(&self, bytes: &[u8]) -> bool {
+    pub fn matches(&self, bytes: &[u8]) -> bool {
         self.matches_identity(bytes.len() as u64, crc32c::crc32c(bytes))
     }
 
@@ -42,10 +42,10 @@ pub type WriteReceiptCallback =
     allow(dead_code)
 )]
 pub struct StorageFileUpload {
-    pub(crate) file: std::sync::Arc<dyn cntryl_midge_core::io::File>,
-    pub(crate) size: u64,
-    pub(crate) content_crc32c: u32,
-    pub(crate) part_size: usize,
+    pub file: std::sync::Arc<dyn cntryl_midge_core::io::File>,
+    pub size: u64,
+    pub content_crc32c: u32,
+    pub part_size: usize,
 }
 
 pub(super) fn write_without_receipt(

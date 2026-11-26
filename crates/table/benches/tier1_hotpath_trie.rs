@@ -5,9 +5,6 @@
 use cntryl_midge_table::sst::trie::{TrieBuilder, TrieReader};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-#[path = "table_bench_support.rs"]
-mod stress_config;
-
 const FIND_BLOCK_BATCH_SIZE: usize = 65_536;
 const TRIE_FINDS_PER_LOGICAL_OPERATION: usize = 32;
 const PREFIX_RANGE_BATCH_SIZE: usize = 65_536;
@@ -51,7 +48,7 @@ fn measure_find_block(
     ctx.parameter("logical_unit", "trie_find_batch");
     ctx.parameter("batch_per_logical_operation", 1);
 
-    stress_config::measure_hot_path_batch(ctx, scenario, find_logical_operation_count(), || {
+    let _completed = ctx.measure_batch(scenario, find_logical_operation_count(), || {
         let mut found = 0u32;
         for i in 0..FIND_BLOCK_BATCH_SIZE {
             let (key, _) = &cases[i % cases.len()];
@@ -152,7 +149,7 @@ fn run_prefix_range(ctx: &mut StressContext, scenario: &'static str, prefixes: &
     ctx.parameter("logical_unit", "trie_prefix_range_batch");
     ctx.parameter("batch_per_logical_operation", 1);
 
-    stress_config::measure_hot_path_batch(ctx, scenario, prefix_logical_operation_count(), || {
+    let _completed = ctx.measure_batch(scenario, prefix_logical_operation_count(), || {
         let mut total = 0usize;
         for i in 0..PREFIX_RANGE_BATCH_SIZE {
             let prefix = &prefixes[i % prefixes.len()];

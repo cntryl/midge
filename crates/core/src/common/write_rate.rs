@@ -79,6 +79,13 @@ pub struct RateLimitedReader<R> {
     pub(crate) limiter: Option<Arc<BackgroundWriteLimiter>>,
 }
 
+impl<R> RateLimitedReader<R> {
+    /// Wrap a reader with the optional shared background write limiter.
+    pub fn new(inner: R, limiter: Option<Arc<BackgroundWriteLimiter>>) -> Self {
+        Self { inner, limiter }
+    }
+}
+
 impl<R: std::io::Read> std::io::Read for RateLimitedReader<R> {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         // Bound every reservation, including a caller with a very large read.

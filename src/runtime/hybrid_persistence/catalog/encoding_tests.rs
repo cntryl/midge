@@ -17,10 +17,11 @@ fn populated_catalog_with_segments(count: u64) -> WalPublicationCatalog {
                 Some(bytes::Bytes::from_static(b"value")),
                 segment_id,
             );
-            let (bytes, link) =
-                cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(segment_id, 7, prev)
-                    .record(&record)
-                    .seal();
+            let (bytes, link) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
+                segment_id, 7, prev,
+            )
+            .record(&record)
+            .seal();
             let entry = CatalogEntry::from_sealed_bytes(&bytes).expect("verified fixture segment");
             prev = link;
             entry
@@ -64,7 +65,11 @@ fn storage_fixture() -> (tempfile::TempDir, super::super::CloudPersistence) {
 }
 
 fn catalog_with_family_frontiers() -> WalPublicationCatalog {
-    let mut builder = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(1, 7, ChainLink::GENESIS);
+    let mut builder = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
+        1,
+        7,
+        ChainLink::GENESIS,
+    );
     for family in 1..=512_u32 {
         let mut record = cntryl_midge_durability::wal::WalRecord::new(
             cntryl_midge_durability::wal::WalOpKind::Put,
@@ -286,14 +291,15 @@ fn should_retain_only_decoded_capacity_when_decode_peak_is_released() {
 
 fn chained_entry(head: ChainLink, epoch: u64) -> CatalogEntry {
     let id = head.id + 1;
-    let (bytes, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(id, epoch, head)
-        .record(&cntryl_midge_durability::wal::WalRecord::new(
-            cntryl_midge_durability::wal::WalOpKind::Put,
-            bytes::Bytes::from_static(b"new"),
-            Some(bytes::Bytes::from_static(b"value")),
-            head.last_seq + 1,
-        ))
-        .seal();
+    let (bytes, _) =
+        cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(id, epoch, head)
+            .record(&cntryl_midge_durability::wal::WalRecord::new(
+                cntryl_midge_durability::wal::WalOpKind::Put,
+                bytes::Bytes::from_static(b"new"),
+                Some(bytes::Bytes::from_static(b"value")),
+                head.last_seq + 1,
+            ))
+            .seal();
     CatalogEntry::from_sealed_bytes(&bytes).unwrap()
 }
 

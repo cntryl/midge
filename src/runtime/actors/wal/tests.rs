@@ -1,15 +1,15 @@
 use super::*;
+use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
+#[cfg(feature = "failpoints")]
+use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+use crate::runtime::RuntimeState;
+use bytes::Bytes;
 use cntryl_midge_core::io::traits::{DirEntry, FsError, Metadata};
 use cntryl_midge_core::io::{
     Durability as FsDurability, File, Fs, FsPath, FsResult, MockFs, OpenOptions as FsOpenOptions,
     ReadFs,
 };
-use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
-#[cfg(feature = "failpoints")]
-use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::runtime::RuntimeState;
 use cntryl_midge_core::types::EntryType;
-use bytes::Bytes;
 use std::path::PathBuf;
 #[cfg(feature = "failpoints")]
 use std::sync::{Mutex, OnceLock};
@@ -131,7 +131,10 @@ fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_em
     let local = tempfile::tempdir()?;
     let remote = tempfile::tempdir()?;
     let mut state = RuntimeState::new(local.path().to_path_buf(), false);
-    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 4096);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(cntryl_midge_core::io::MockFs::new()),
+        4096,
+    );
     let mut writer = factory.create()?;
     writer.add_with_meta(b"asserted", Some(b"value"), 9, EntryType::Put, None)?;
     let bytes = writer.finish_bytes()?;
@@ -155,11 +158,14 @@ fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_em
         });
     // Validation reads through the event loop's resources, which in
     // ephemeral-cache cloud mode sit over the remote SST store.
-    let remote_fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
-        Arc::clone(&state.fs),
-        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(remote.path())?),
-        Duration::from_secs(5),
-    ));
+    let remote_fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
+            Arc::clone(&state.fs),
+            Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
+                remote.path(),
+            )?),
+            Duration::from_secs(5),
+        ));
     let resources = Arc::new(
         crate::runtime::read_resources::ReadResources::new_with_diagnostics(
             remote_fs,
@@ -436,7 +442,9 @@ impl Fs for SegmentCreateFailingFs {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
             .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
@@ -531,7 +539,9 @@ impl Fs for SegmentWriterOpenFailingFs {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
             .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
@@ -614,7 +624,9 @@ impl Fs for RotationPreflightFailingOnceFs {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
             .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
@@ -769,8 +781,10 @@ fn should_fence_rotation_when_open_segment_is_missing_with_pending_records() -> 
     )?;
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     assert!(wal_actor.has_pending_data());
-    mock.remove_file(&FsPath::new(cntryl_midge_durability::wal::segment_file_name(4)))
-        .map_err(FsError::into_midge)?;
+    mock.remove_file(&FsPath::new(
+        cntryl_midge_durability::wal::segment_file_name(4),
+    ))
+    .map_err(FsError::into_midge)?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
 
     // Act
@@ -821,7 +835,9 @@ fn should_fence_rotation_when_seal_ticket_disagrees_with_actor_state() -> MidgeR
         .join(cntryl_midge_durability::wal::segment_file_name(segment_id))
         .exists());
     assert!(!wal_dir
-        .join(cntryl_midge_durability::wal::segment_file_name(segment_id + 1))
+        .join(cntryl_midge_durability::wal::segment_file_name(
+            segment_id + 1
+        ))
         .exists());
     Ok(())
 }
@@ -839,8 +855,8 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
         cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
-    let inner =
-        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?;
+    let inner = FsWalFactoryIo::new(Arc::clone(&fs))
+        .create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?;
     wal_actor.replace_writer_for_test(Box::new(FsyncFailingWriter { inner }));
     let prepared = prepare_put_transaction(
         &mut wal_actor,
@@ -1696,7 +1712,9 @@ fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
 
     // Assert
     assert!(
-        wal_dir.join(cntryl_midge_durability::wal::segment_file_name(1)).exists(),
+        wal_dir
+            .join(cntryl_midge_durability::wal::segment_file_name(1))
+            .exists(),
         "rotated WAL segments should use the canonical lex-sortable segment name"
     );
     assert!(
@@ -1726,7 +1744,8 @@ fn should_fail_rotate_without_advancing_segment_when_next_segment_creation_fails
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let max_sequence = wal_actor.open_segment_max_sequence();
     let segment = FsPath::new(cntryl_midge_durability::wal::segment_file_name(7));
-    let before = cntryl_midge_core::io::read_all(fs.as_ref(), &segment).map_err(FsError::into_midge)?;
+    let before =
+        cntryl_midge_core::io::read_all(fs.as_ref(), &segment).map_err(FsError::into_midge)?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
 
     // Act
@@ -1803,7 +1822,9 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
             assert_eq!(ledger_open, Some(segment_id));
             assert_eq!(
                 wal_dir
-                    .join(cntryl_midge_durability::wal::segment_file_name(segment_id + 1))
+                    .join(cntryl_midge_durability::wal::segment_file_name(
+                        segment_id + 1
+                    ))
                     .exists(),
                 boundary == WalTransitionBoundary::AfterSegmentCreate
             );
@@ -1931,7 +1952,9 @@ fn should_fence_rotation_before_overwriting_a_next_segment_that_holds_data() -> 
         cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let segment_id = state.wal.open_segment();
-    let next_path = wal_dir.join(cntryl_midge_durability::wal::segment_file_name(segment_id + 1));
+    let next_path = wal_dir.join(cntryl_midge_durability::wal::segment_file_name(
+        segment_id + 1,
+    ));
     // Longer than a segment header, so it may hold records.
     let existing = [
         vec![0xa5; cntryl_midge_durability::wal::format::HEADER_LEN],
@@ -2082,7 +2105,9 @@ fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate()
         "rejected write must not mutate the memtable"
     );
     assert!(fs
-        .exists(&FsPath::new(cntryl_midge_durability::wal::segment_file_name(7)))
+        .exists(&FsPath::new(
+            cntryl_midge_durability::wal::segment_file_name(7)
+        ))
         .map_err(FsError::into_midge)?);
     assert_eq!(
         Some(state.wal.open_segment()),
@@ -2217,7 +2242,9 @@ impl Fs for DurableSyncCountingFs {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
             .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
@@ -2270,7 +2297,8 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let syncs_before_seal = durable_syncs.load(std::sync::atomic::Ordering::SeqCst);
     let ticket = seal_ticket_for_test(&wal_actor, &state);
-    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(1));
+    let deadline =
+        cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(1));
     assert!(deadline.remaining() < wal_actor.storage_io_timeout);
 
     // Act
@@ -2315,7 +2343,8 @@ fn should_answer_fenced_when_lease_lapses_before_unlogged_unit_applies() -> Midg
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(fs)
+            .create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
     let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity.activate(1, Instant::now() + Duration::from_mins(1))?;
@@ -2376,7 +2405,8 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(fs)
+            .create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
     let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
@@ -2437,7 +2467,8 @@ fn should_report_discard_on_restart_when_best_effort_spill_partly_applies() -> M
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(fs)
+            .create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
     let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
@@ -3033,7 +3064,10 @@ impl cntryl_midge_core::io::ReadFs for SstOpenCountingFs {
             .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
@@ -3074,13 +3108,22 @@ impl cntryl_midge_core::io::Fs for SstOpenCountingFs {
         }
         self.inner.open(path, opts)
     }
-    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
-    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
     fn sync_dir(
@@ -3112,7 +3155,10 @@ fn sst_opens_to_validate(keys_per_file: usize) -> MidgeResult<usize> {
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
     state.fs = counting.clone();
     std::fs::create_dir_all(temp.path().join("sst"))?;
-    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 4096);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(cntryl_midge_core::io::MockFs::new()),
+        4096,
+    );
     let mut keys = Vec::new();
     for file in 0..4_u64 {
         let mut writer = factory.create()?;
@@ -3629,7 +3675,9 @@ fn should_stamp_transaction_batch_with_its_family() -> MidgeResult<()> {
     // Assert: the batch frame and every operation in it name the family.
     let segment = state
         .host_wal_dir()
-        .join(cntryl_midge_durability::wal::segment_file_name(state.wal.open_segment()));
+        .join(cntryl_midge_durability::wal::segment_file_name(
+            state.wal.open_segment(),
+        ));
     let records = cntryl_midge_durability::wal::format::segment::records(&std::fs::read(segment)?)?;
     let [batch] = records.as_slice() else {
         panic!("one transaction frame: {records:?}");
@@ -3651,7 +3699,9 @@ fn should_reject_transaction_spanning_families_before_allocating() -> MidgeResul
     let sequence_before = state.sequence;
     let segment = state
         .host_wal_dir()
-        .join(cntryl_midge_durability::wal::segment_file_name(state.wal.open_segment()));
+        .join(cntryl_midge_durability::wal::segment_file_name(
+            state.wal.open_segment(),
+        ));
     let bytes_before = std::fs::read(&segment)?;
 
     // Act

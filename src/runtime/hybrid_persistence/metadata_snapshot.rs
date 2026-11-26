@@ -3,7 +3,9 @@
 use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
 use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use cntryl_midge_core::io::{FsError, FsPath};
-use cntryl_midge_durability::lease::{CloudMetadataGeneration, CloudMetadataHead, LeaderStore, SharedGenerationId};
+use cntryl_midge_durability::lease::{
+    CloudMetadataGeneration, CloudMetadataHead, LeaderStore, SharedGenerationId,
+};
 use cntryl_midge_durability::metadata::{files, Manifest, ManifestPersistence};
 use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
 use std::collections::BTreeMap;
@@ -127,7 +129,9 @@ impl SharedRetirementAuthority {
     pub(crate) fn writer_epoch(&self) -> u64 {
         self.writer_epoch
     }
-    pub(crate) fn frontiers(&self) -> &cntryl_midge_durability::metadata::frontiers::FlushFrontiers {
+    pub(crate) fn frontiers(
+        &self,
+    ) -> &cntryl_midge_durability::metadata::frontiers::FlushFrontiers {
         self.manifest.flush_frontiers()
     }
 
@@ -289,7 +293,9 @@ pub(super) fn read_committed_metadata_bodies_reserved_within(
                 )));
             }
         }
-        if bodies[files::FORMAT] != cntryl_midge_durability::metadata::format::current_format_marker_bytes() {
+        if bodies[files::FORMAT]
+            != cntryl_midge_durability::metadata::format::current_format_marker_bytes()
+        {
             return Err(MidgeError::CompatibilityError(
                 "cloud manifest FORMAT differs from the current format".into(),
             ));
@@ -345,7 +351,9 @@ pub(super) fn read_committed_metadata_bodies_reserved_within(
             )));
         }
     }
-    if bodies[files::FORMAT] != cntryl_midge_durability::metadata::format::current_format_marker_bytes() {
+    if bodies[files::FORMAT]
+        != cntryl_midge_durability::metadata::format::current_format_marker_bytes()
+    {
         return Err(MidgeError::CompatibilityError(
             "committed cloud FORMAT differs from the current format".into(),
         ));
@@ -395,7 +403,7 @@ fn read_format_10_bodies(
             "cloud FORMAT 10 HEAD differs from the selected manifest horizon".into(),
         ));
     }
-    crate::runtime::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
     Ok(bodies)
 }
 
@@ -483,7 +491,9 @@ pub(super) fn capture_local_metadata(
             Err(error) => return Err(error.into_midge()),
         }
     }
-    if local.get(files::FORMAT) != Some(&cntryl_midge_durability::metadata::format::current_format_marker_bytes()) {
+    if local.get(files::FORMAT)
+        != Some(&cntryl_midge_durability::metadata::format::current_format_marker_bytes())
+    {
         return Err(MidgeError::Corruption(
             "cannot commit cloud metadata without current FORMAT".into(),
         ));
@@ -909,7 +919,8 @@ mod tests {
         use cntryl_midge_durability::metadata::{codec, local_authority::LocalMetadataAuthority};
         use cntryl_midge_storage::StoragePrecondition;
 
-        let root: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
+        let root: Arc<dyn cntryl_midge_core::io::Fs> =
+            Arc::new(cntryl_midge_core::io::MockFs::new());
         let manifest = codec::encode(codec::MANIFEST, &Manifest::default())?;
         let local =
             LocalMetadataAuthority::initialize(Arc::clone(&root), "test-cut", &manifest, b"[]")?;
@@ -975,18 +986,22 @@ mod tests {
         // Arrange
         let mut manifest = Manifest::default();
         manifest
-            .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily {
-                id: 1,
-                name: "retired-family".into(),
-                created_at: 7,
-            })
+            .apply_edit(
+                &cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily {
+                    id: 1,
+                    name: "retired-family".into(),
+                    created_at: 7,
+                },
+            )
             .unwrap();
         for sequence in 1..=64 {
-            manifest.files.push(cntryl_midge_durability::metadata::FileMeta {
-                name: cntryl_midge_core::cloud_layout::file_name(1, 0, sequence),
-                cf_id: 1,
-                ..cntryl_midge_durability::metadata::FileMeta::default()
-            });
+            manifest
+                .files
+                .push(cntryl_midge_durability::metadata::FileMeta {
+                    name: cntryl_midge_core::cloud_layout::file_name(1, 0, sequence),
+                    cf_id: 1,
+                    ..cntryl_midge_durability::metadata::FileMeta::default()
+                });
             let retired = cntryl_midge_durability::metadata::FileMeta {
                 name: cntryl_midge_core::cloud_layout::file_name(0, 0, sequence),
                 ..cntryl_midge_durability::metadata::FileMeta::default()
@@ -994,15 +1009,17 @@ mod tests {
             manifest.retired_ssts.insert(retired.name.clone(), retired);
         }
         manifest
-            .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::DropColumnFamilyAt {
-                id: 1,
-                drop_sequence: 9,
-                dropped_sst_names: manifest
-                    .files
-                    .iter()
-                    .map(|file| file.name.clone())
-                    .collect(),
-            })
+            .apply_edit(
+                &cntryl_midge_durability::metadata::ManifestEdit::DropColumnFamilyAt {
+                    id: 1,
+                    drop_sequence: 9,
+                    dropped_sst_names: manifest
+                        .files
+                        .iter()
+                        .map(|file| file.name.clone())
+                        .collect(),
+                },
+            )
             .unwrap();
         manifest.next_sst_seqs.insert(1, 65);
         manifest.edit_checkpoint_id = 17;
@@ -1040,7 +1057,11 @@ mod tests {
         fn with_cloud(cloud: Arc<CloudStorage>) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let fs = cntryl_midge_core::io::real::test_root(directory.path());
-            cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+            cntryl_midge_durability::metadata::ensure_or_create_format_marker(
+                &fs,
+                directory.path(),
+            )
+            .unwrap();
             ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
             let store = Arc::new(FsLeaderStore::new(
                 Arc::clone(&fs),
@@ -1102,8 +1123,10 @@ mod tests {
         // Arrange: replace the local metadata authority with a validated
         // FORMAT 10 HEAD and immutable manifest/intent bases.
         let fixture = Fixture::new();
-        let manifest =
-            cntryl_midge_durability::metadata::codec::encode(cntryl_midge_durability::metadata::codec::MANIFEST, &Manifest::default())?;
+        let manifest = cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &Manifest::default(),
+        )?;
         cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::initialize(
             Arc::clone(&fixture.fs),
             "runtime-selected-generation",
@@ -1163,12 +1186,14 @@ mod tests {
 
         // Act
         for sequence in 1..=20 {
-            crate::runtime::IntentPersistence::save_with_fs(
+            cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_with_fs(
                 &fixture.fs,
-                &[crate::runtime::IntentLogEntry::SeqnoAllocated {
-                    seqno: sequence,
-                    cf_id: 0,
-                }],
+                &[
+                    cntryl_midge_durability::metadata::intent::IntentLogEntry::SeqnoAllocated {
+                        seqno: sequence,
+                        cf_id: 0,
+                    },
+                ],
             )
             .unwrap();
             fixture.mirror().unwrap();
@@ -1191,12 +1216,16 @@ mod tests {
         assert!(generation.objects.len() < 16);
         assert_eq!(
             bodies[files::MANIFEST_SNAPSHOT],
-            cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::MANIFEST_SNAPSHOT))
-                .unwrap()
+            cntryl_midge_core::io::read_all(
+                fixture.fs.as_ref(),
+                &FsPath::new(files::MANIFEST_SNAPSHOT)
+            )
+            .unwrap()
         );
         assert_eq!(
             bodies[files::INTENT_LOG],
-            cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG)).unwrap()
+            cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG))
+                .unwrap()
         );
     }
 

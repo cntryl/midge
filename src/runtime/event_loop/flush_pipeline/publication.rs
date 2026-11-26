@@ -64,7 +64,9 @@ impl EventLoop {
             ));
         }
         match (&flush.sst_name, flush.sst_seq) {
-            (Some(name), Some(seq)) if *name == cntryl_midge_core::cloud_layout::file_name(cf_id, 0, seq) => {
+            (Some(name), Some(seq))
+                if *name == cntryl_midge_core::cloud_layout::file_name(cf_id, 0, seq) =>
+            {
                 return Ok((name.clone(), seq));
             }
             (None, None) => {}
@@ -99,7 +101,7 @@ impl EventLoop {
         identity: FlushIdentity,
         staging_path: std::path::PathBuf,
         reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
-        file_meta: crate::runtime::FileMeta,
+        file_meta: cntryl_midge_durability::metadata::intent::FileMeta,
     ) {
         let (sst_name, sst_seq) = match self.ensure_flush_sst_identity(identity) {
             Ok(identity) => identity,
@@ -164,7 +166,8 @@ impl EventLoop {
             // is unknown, not lost.
             if matches!(
                 error,
-                cntryl_midge_core::common::MidgeError::Busy(_) | cntryl_midge_core::common::MidgeError::Timeout(_)
+                cntryl_midge_core::common::MidgeError::Busy(_)
+                    | cntryl_midge_core::common::MidgeError::Timeout(_)
             ) && self
                 .state
                 .immutable_flush_by_id(completion.identity.flush_id)
@@ -266,7 +269,9 @@ impl EventLoop {
             delta.identity.sequence,
             &delta.file_meta,
         )?;
-        cntryl_midge_core::failpoints::fail_point!("midge::flush::after_publication_intent_before_manifest");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::flush::after_publication_intent_before_manifest"
+        );
         self.check_lease_health()?;
         let publication = FlushManifestPublication {
             origin,

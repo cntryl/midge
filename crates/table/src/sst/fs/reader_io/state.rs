@@ -181,7 +181,7 @@ impl SstFileIo {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(super) fn key_state_from_encoded_block(
         &self,
         block_data: &Bytes,
@@ -192,7 +192,7 @@ impl SstFileIo {
             .map(|(state, _)| state)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(super) fn key_state_from_encoded_block_with_stats(
         &self,
         block_data: &Bytes,

@@ -11,9 +11,7 @@
 use super::streaming_wal_fs::{validate_wal_source, StreamingWalFs};
 use super::CloudStartupRecovery;
 use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
-use cntryl_midge_durability::RecoveryPolicy;
 use cntryl_midge_core::io::{Fs, FsError, FsPath, ReadFs};
-use cntryl_midge_storage::{StorageBackend, StorageEvent, StorageOutcome};
 use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use cntryl_midge_durability::wal::ledger::{SegmentId, WalLedger};
 use cntryl_midge_durability::wal::planner::{
@@ -22,7 +20,11 @@ use cntryl_midge_durability::wal::planner::{
 use cntryl_midge_durability::wal::recovery::streaming::{
     inspect_sealed_wal_file, inspect_wal_file, max_verified_suffix_sequence, StreamingReplayLimits,
 };
-use cntryl_midge_durability::wal::recovery::{open_tail_action, ReplayErrorAction, ReplayPolicy, ReplaySegments};
+use cntryl_midge_durability::wal::recovery::{
+    open_tail_action, ReplayErrorAction, ReplayPolicy, ReplaySegments,
+};
+use cntryl_midge_durability::RecoveryPolicy;
+use cntryl_midge_storage::{StorageBackend, StorageEvent, StorageOutcome};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -259,10 +261,9 @@ impl PublishedObject<'_> {
             )
             .with_deadline(scope.deadline()),
         );
-        let fs = cntryl_midge_core::telemetry::recovery_progress::observe_reads(cntryl_midge_core::io::scope_fs(
-            fs,
-            scope.clone(),
-        ));
+        let fs = cntryl_midge_core::telemetry::recovery_progress::observe_reads(
+            cntryl_midge_core::io::scope_fs(fs, scope.clone()),
+        );
         self.inspect(entry, &key, fs)
     }
 
@@ -519,9 +520,16 @@ fn assemble_planned_sources(
                 cntryl_midge_durability::wal::segment_key(planned.id),
             ),
         };
-        replay_fs.insert(cntryl_midge_durability::wal::segment_file_name(planned.id), fs, path)?;
+        replay_fs.insert(
+            cntryl_midge_durability::wal::segment_file_name(planned.id),
+            fs,
+            path,
+        )?;
         if let Some(cut) = plan.open_cut.filter(|cut| cut.id == planned.id) {
-            replay_fs.limit_prefix(&cntryl_midge_durability::wal::segment_file_name(planned.id), cut.valid_bytes)?;
+            replay_fs.limit_prefix(
+                &cntryl_midge_durability::wal::segment_file_name(planned.id),
+                cut.valid_bytes,
+            )?;
         }
     }
     let segments = ReplaySegments::from_plan(plan.anchor, &plan.replay, |id| {

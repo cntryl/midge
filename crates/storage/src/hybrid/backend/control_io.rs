@@ -11,7 +11,7 @@ use std::time::Duration;
 const RANGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
-pub(crate) struct ControlObject {
+pub struct ControlObject {
     bytes: Vec<u8>,
     metadata: StorageObjectMetadata,
     confirmed_write: bool,
@@ -20,10 +20,10 @@ pub(crate) struct ControlObject {
 }
 
 impl ControlObject {
-    pub(crate) fn into_metadata(self) -> StorageObjectMetadata {
+    pub fn into_metadata(self) -> StorageObjectMetadata {
         self.metadata
     }
-    pub(crate) fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
     /// The object store's identity and size for this control object.
@@ -32,20 +32,20 @@ impl ControlObject {
         &self.metadata
     }
 
-    pub(crate) fn has_write_receipt(&self) -> bool {
+    pub fn has_write_receipt(&self) -> bool {
         self.confirmed_write
     }
 }
 
 /// Internal provenance preserves authority rejection through provider error context.
 #[derive(Debug)]
-pub(crate) enum ControlWriteFailure {
+pub enum ControlWriteFailure {
     Authority(MidgeError),
     Operation(MidgeError),
 }
 
 impl ControlWriteFailure {
-    pub(crate) fn into_error(self) -> MidgeError {
+    pub fn into_error(self) -> MidgeError {
         match self {
             Self::Authority(error) | Self::Operation(error) => error,
         }
@@ -53,7 +53,7 @@ impl ControlWriteFailure {
 }
 
 impl HybridStorage {
-    pub(crate) fn read_control_object(
+    pub fn read_control_object(
         &self,
         key: &str,
         budget: &ResourceBudget,
@@ -68,7 +68,7 @@ impl HybridStorage {
         )
     }
 
-    pub(crate) fn read_control_from_backend(
+    pub fn read_control_from_backend(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
         budget: &ResourceBudget,
@@ -124,8 +124,8 @@ impl HybridStorage {
         }))
     }
 
-    #[cfg(test)]
-    pub(crate) fn write_control_object(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn write_control_object(
         &self,
         key: &str,
         expected: Option<&StorageObjectMetadata>,
@@ -137,7 +137,7 @@ impl HybridStorage {
             .map_err(ControlWriteFailure::into_error)
     }
 
-    pub(crate) fn write_control_object_with_authority(
+    pub fn write_control_object_with_authority(
         &self,
         key: &str,
         expected: Option<&StorageObjectMetadata>,

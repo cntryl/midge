@@ -6,9 +6,13 @@ use super::cloud_format_upgrade::{
     stage_source_descriptor, CloudFormatGateResolution,
 };
 use super::{epoch_floor::StartupEpochFloor, StartupLease, StartupStoragePath};
-use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::config::Storage;
 use crate::engine::OpenOptions;
+use crate::runtime::hybrid_persistence::{
+    publish_format10_closure, read_committed_metadata_bodies_within,
+};
+use crate::runtime::{IntentPersistence, MetadataPublicationLock};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use cntryl_midge_core::io::{Fs, FsError, FsPath};
 use cntryl_midge_durability::lease::{
     CloudFormatMigrationCandidate, CloudFormatMigrationPending, CloudMetadataGeneration,
@@ -16,10 +20,6 @@ use cntryl_midge_durability::lease::{
 };
 use cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority;
 use cntryl_midge_durability::metadata::{codec, files, ManifestPersistence};
-use crate::runtime::hybrid_persistence::{
-    publish_format10_closure, read_committed_metadata_bodies_within,
-};
-use crate::runtime::{IntentPersistence, MetadataPublicationLock};
 use cntryl_midge_storage::cloud::CloudStorage;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -44,9 +44,11 @@ pub(super) fn upgrade_cloud(opts: &OpenOptions, timeout: Duration) -> MidgeResul
     check_legacy_closure_budget(&source)?;
     let bodies = read_committed_metadata_bodies_within(&cloud, &source, &deadline)?;
     let memory = MetadataPublicationLock::default();
-    memory.configure_capture_memory(cntryl_midge_core::common::resource_budget::ResourceBudget::new(
-        opts.compaction_memory_pool_size(),
-    ));
+    memory.configure_capture_memory(
+        cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+            opts.compaction_memory_pool_size(),
+        ),
+    );
     let admission = memory.reserve_metadata_body_memory(encoded_size(&bodies)?)?;
     let source_sha256 = source_payload_sha256(&bodies);
     let candidate_bodies = prepare_candidate(bodies, &source_sha256, &scope)?;
@@ -87,9 +89,11 @@ pub(super) fn upgrade_cloud(opts: &OpenOptions, timeout: Duration) -> MidgeResul
     store
         .install_format_10_pending(&holder, epoch, pending, deadline.remaining())
         .map_err(|error| error.into_validation_error("install pending cloud FORMAT 10 gate"))?;
-    cntryl_midge_core::failpoints::fail_point!("midge::format10::after_pending_cloud_gate", |_| Err(
-        MidgeError::Internal("interrupted after durable pending FORMAT 10 gate".into())
-    ));
+    cntryl_midge_core::failpoints::fail_point!("midge::format10::after_pending_cloud_gate", |_| {
+        Err(MidgeError::Internal(
+            "interrupted after durable pending FORMAT 10 gate".into(),
+        ))
+    });
     if reconcile_cloud_format_gate(&cloud, store, &holder, epoch, &deadline)?
         != CloudFormatGateResolution::Format10Selected
     {
@@ -182,8 +186,10 @@ fn prepare_candidate(
         MidgeError::Internal(format!("decode cloud upgrade source digest: {error}"))
     })?;
     let scratch = tempfile::tempdir()?;
-    let fs: Arc<dyn Fs> =
-        Arc::new(cntryl_midge_core::io::RealFs::open_existing(scratch.path()).map_err(FsError::into_midge)?);
+    let fs: Arc<dyn Fs> = Arc::new(
+        cntryl_midge_core::io::RealFs::open_existing(scratch.path())
+            .map_err(FsError::into_midge)?,
+    );
     let fs = cntryl_midge_core::io::scope_fs(fs, scope.clone());
     cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, scratch.path())?;
     let base = codec::encode(codec::MANIFEST, &manifest)?;
@@ -205,8 +211,8 @@ fn prepare_candidate(
     )]);
     for name in staged.selected_relative_paths() {
         scope.check("capture staged cloud FORMAT 10 metadata")?;
-        let data =
-            cntryl_midge_core::io::read_all(fs.as_ref(), &FsPath::new(&name)).map_err(FsError::into_midge)?;
+        let data = cntryl_midge_core::io::read_all(fs.as_ref(), &FsPath::new(&name))
+            .map_err(FsError::into_midge)?;
         candidate.insert(name, data.to_vec());
     }
     Ok(candidate)

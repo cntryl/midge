@@ -1,11 +1,11 @@
 //! Immutable local control cuts and bounded, exact coalescence witnesses.
 
 use super::MetadataPublicationLock;
+use crate::runtime::{IntentLogEntry, IntentPersistence, PublicationPhase};
 use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
 use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use cntryl_midge_core::io::{Fs, FsError, FsPath, MockFs, OpenOptions};
 use cntryl_midge_durability::metadata::{files, Manifest, ManifestPersistence};
-use crate::runtime::{IntentLogEntry, IntentPersistence, PublicationPhase};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -473,7 +473,9 @@ impl MetadataPublicationLock {
             .get(files::FORMAT)
             .is_some_and(|format| format == b"midge-format-version=10\n")
         {
-            use cntryl_midge_durability::metadata::local_authority::{LocalMetadataAuthority, Stream};
+            use cntryl_midge_durability::metadata::local_authority::{
+                LocalMetadataAuthority, Stream,
+            };
             let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Manifest)?;
             ManifestPersistence::decode_format_10_stream(
                 stream.base,
@@ -793,9 +795,10 @@ fn prune_intent_receipts(registry: &mut CutRegistry, current: &PublicationIntent
 
 fn publication_intents(fs: &Arc<dyn Fs>) -> MidgeResult<PublicationIntentBoundary> {
     let mut boundary = PublicationIntentBoundary::default();
-    for mut intent in
-        IntentPersistence::load_with_fs_and_policy_typed(fs, cntryl_midge_durability::RecoveryPolicy::Strict)?
-    {
+    for mut intent in IntentPersistence::load_with_fs_and_policy_typed(
+        fs,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
+    )? {
         let published = match &mut intent {
             IntentLogEntry::FlushPublish { phase, .. }
             | IntentLogEntry::CompactionPublish { phase, .. }
@@ -858,7 +861,9 @@ fn copy_control_files(
             .map_err(FsError::into_midge)?;
         bodies.insert((*name).into(), bytes.to_vec());
     }
-    if bodies.get(files::FORMAT) != Some(&cntryl_midge_durability::metadata::format::current_format_marker_bytes()) {
+    if bodies.get(files::FORMAT)
+        != Some(&cntryl_midge_durability::metadata::format::current_format_marker_bytes())
+    {
         return Err(MidgeError::Corruption(
             "metadata cut lacks current FORMAT".into(),
         ));

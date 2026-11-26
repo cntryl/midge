@@ -7,6 +7,7 @@
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
 #[cfg(test)]
 use cntryl_midge_durability::metadata::{FileMeta, Manifest};
+use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 #[cfg(test)]
 use cntryl_midge_storage::cloud::CloudStorage;
 #[cfg(test)]
@@ -14,7 +15,6 @@ use cntryl_midge_storage::hybrid::backend::GuardedObjectProof;
 use cntryl_midge_storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
 #[cfg(test)]
 use cntryl_midge_storage::{StorageBackend, StorageObjectMetadata};
-use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use std::sync::Arc;
 
 mod catalog;
@@ -31,10 +31,10 @@ mod orphan_sweep;
 mod wal_orphan_sweep;
 pub(crate) use wal_orphan_sweep::sweep_retired_wal_within;
 mod retired_sst;
-use cntryl_midge_storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::refusal_error;
 pub(crate) use catalog::AdmittedCatalog;
 use catalog::{load_and_repair_catalog_within, mutate_wal_catalog_within, Missing, Mutation};
+use cntryl_midge_storage::hybrid::backend::ControlObject;
 pub(crate) use metadata_retention::INTERVAL as METADATA_RETENTION_INTERVAL;
 pub(crate) use metadata_retention::{collect_selected_metadata_within, MetadataRetentionState};
 pub(crate) use metadata_snapshot::{
@@ -229,9 +229,12 @@ impl CloudPersistence {
         let bytes = source
             .read_all()
             .map_err(|error| MidgeError::Io(error.into_io()))?;
-        let readback =
-            cntryl_midge_durability::wal::cloud_segment::validate_bytes(&source.to_string(), &bytes, max_sequence)
-                .map_err(MidgeError::Corruption)?;
+        let readback = cntryl_midge_durability::wal::cloud_segment::validate_bytes(
+            &source.to_string(),
+            &bytes,
+            max_sequence,
+        )
+        .map_err(MidgeError::Corruption)?;
         // The object is named for the epoch of the writer that wrote it,
         // which its header records (#843).
         let entry = CatalogEntry::describing(&readback, &bytes);
@@ -454,9 +457,9 @@ impl CloudPersistence {
         let mut targets = Vec::new();
         let covered_count = catalog
             .retirable_prefix(|cf, sequence| match authority.frontiers().get(cf) {
-                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence }) => {
-                    sequence <= through_sequence
-                }
+                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live {
+                    through_sequence,
+                }) => sequence <= through_sequence,
                 Ok(cntryl_midge_durability::metadata::FamilyFrontier::Dropped) => true,
                 Err(_) => false,
             })
@@ -522,7 +525,10 @@ impl CloudPersistence {
             match identity {
                 Some(_) => {}
                 None => {
-                    self.queue_cloud_wal_prune_complete(id, cntryl_midge_storage::StorageOutcome::Ok(()));
+                    self.queue_cloud_wal_prune_complete(
+                        id,
+                        cntryl_midge_storage::StorageOutcome::Ok(()),
+                    );
                 }
             }
         }

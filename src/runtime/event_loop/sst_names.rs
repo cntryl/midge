@@ -63,7 +63,10 @@ impl EventLoop {
 
     /// Flush and compaction share one per-family creation order. Data/WAL
     /// sequence numbers are independent from immutable filename generations.
-    pub(super) fn next_sst_name(&mut self, cf_id: u32) -> cntryl_midge_core::common::MidgeResult<u64> {
+    pub(super) fn next_sst_name(
+        &mut self,
+        cf_id: u32,
+    ) -> cntryl_midge_core::common::MidgeResult<u64> {
         if let Some(next) = self.state.sst_names.cursor.get(&cf_id) {
             return Ok(*next);
         }
@@ -115,7 +118,9 @@ impl EventLoop {
             ));
         }
         let next = name.checked_add(1).ok_or_else(|| {
-            cntryl_midge_core::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
+            cntryl_midge_core::common::MidgeError::ResourceLimit(
+                "SST filename allocation exhausted".into(),
+            )
         })?;
         self.state.sst_names.cursor.insert(cf_id, next);
         if self.actors.cloud_coordinator.hybrid_storage.is_none() {
@@ -298,7 +303,9 @@ impl EventLoop {
         let next_seq = sst_seq
             .checked_add(SST_NAME_RESERVATION_BLOCK)
             .ok_or_else(|| {
-                cntryl_midge_core::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
+                cntryl_midge_core::common::MidgeError::ResourceLimit(
+                    "SST filename allocation exhausted".into(),
+                )
             })?
             .max(durable_next);
         let edit_id = self.state.manifest_store.append_for(

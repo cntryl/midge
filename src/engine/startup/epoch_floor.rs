@@ -12,8 +12,8 @@
 
 use super::super::OpenOptions;
 use super::StartupStoragePath;
-use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult};
 use crate::config::Storage;
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult};
 use cntryl_midge_core::io::FsError;
 use std::sync::Arc;
 
@@ -130,8 +130,9 @@ impl StartupEpochFloor {
         opts: &OpenOptions,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<u64> {
-        let budget =
-            cntryl_midge_core::common::resource_budget::ResourceBudget::new(opts.compaction_memory_pool_size());
+        let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+            opts.compaction_memory_pool_size(),
+        );
         let deadline = scope.map_or_else(
             cntryl_midge_core::common::OperationDeadline::unbounded,
             DeadlineScope::deadline,
@@ -152,7 +153,9 @@ impl StartupEpochFloor {
                 continue;
             };
             if let Ok(catalog) =
-                cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(object.bytes())
+                cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
+                    object.bytes(),
+                )
             {
                 floor = floor.max(catalog.fencing_epoch());
             }
@@ -165,7 +168,9 @@ impl StartupEpochFloor {
 mod tests {
     use super::StartupEpochFloor;
     use cntryl_midge_core::common::MidgeResult;
-    use cntryl_midge_core::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
+    use cntryl_midge_core::simulation::crash_fs::{
+        CrashDevice, Fault, FaultEffect, FaultError, FaultOp,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -174,7 +179,10 @@ mod tests {
         // every open of that segment's file fails.
         let device = CrashDevice::new();
         let root: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(device.fs());
-        let wal = cntryl_midge_core::io::subdirectory(Arc::clone(&root), cntryl_midge_durability::wal::WAL_DIR);
+        let wal = cntryl_midge_core::io::subdirectory(
+            Arc::clone(&root),
+            cntryl_midge_durability::wal::WAL_DIR,
+        );
         drop(crate::runtime::wal_history::WalHistory::open(wal, 1, 7)?);
         let segment_open = device.inject(Fault {
             op: FaultOp::Open,

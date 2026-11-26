@@ -3,8 +3,8 @@ use crate::runtime::event_loop::manifest::ManifestCoordinator;
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use crate::runtime::event_loop::wal::{ApplyTransactionRequest, WalCoordinator};
 use crate::runtime::{ConflictPolicy, RuntimeResponse, TransactionOp};
-use cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy;
 use bytes::Bytes;
+use cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,13 +14,14 @@ fn should_refuse_v10_maintenance_mirror_when_metadata_reload_is_required() -> Mi
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(StorageBudgetPolicy::default())?;
     let format_10 = cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1;
-    event_loop.state.manifest_store =
-        Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new_with_format(
+    event_loop.state.manifest_store = Arc::new(
+        cntryl_midge_durability::metadata::store::ManifestStore::new_with_format(
             Arc::clone(&event_loop.state.fs),
             cntryl_midge_durability::metadata::accounting::Owner::new(),
             cntryl_midge_durability::metadata::accounting::Medium::Persistent,
             format_10,
-        ));
+        ),
+    );
     event_loop.state.fence_metadata_until_reloaded();
     let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
 
@@ -28,7 +29,10 @@ fn should_refuse_v10_maintenance_mirror_when_metadata_reload_is_required() -> Mi
     let result = event_loop.start_metadata_mirror(MirrorContinuation::Retention, deadline);
 
     // Assert
-    assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+    ));
     assert!(!event_loop
         .actors
         .cloud_coordinator
@@ -110,7 +114,12 @@ impl cntryl_midge_storage::inventory::ObjectInventory for HeldMetadataObjectStor
         page: cntryl_midge_storage::cloud::CloudListPageRequest,
         scope: Option<&cntryl_midge_core::common::DeadlineScope>,
     ) -> MidgeResult<Option<cntryl_midge_storage::cloud::CloudListPage>> {
-        cntryl_midge_storage::inventory::ObjectInventory::keys_page(&*self.inner, prefix, page, scope)
+        cntryl_midge_storage::inventory::ObjectInventory::keys_page(
+            &*self.inner,
+            prefix,
+            page,
+            scope,
+        )
     }
 
     fn object_size(
@@ -461,10 +470,10 @@ fn should_reconcile_an_admitted_mirror_once_when_its_caller_abandons_the_result(
         cf_id: 0,
         next_seq: 64,
     };
-    let edit_id = event_loop
-        .state
-        .manifest_store
-        .append_for(cntryl_midge_durability::metadata::accounting::Origin::Administration, &edit)?;
+    let edit_id = event_loop.state.manifest_store.append_for(
+        cntryl_midge_durability::metadata::accounting::Origin::Administration,
+        &edit,
+    )?;
     event_loop.state.manifest.set_next_sst_seq(0, 64);
     event_loop.state.manifest.note_applied_journal_edit(edit_id);
     let store = event_loop.authority.fencing.leader_store.clone().unwrap();
@@ -880,7 +889,7 @@ fn should_mark_reclamation_anomaly_when_metadata_cut_admission_fails() -> MidgeR
         .iter()
         .find(|file| file.name == flush_name)
         .unwrap();
-    let flush_file = crate::runtime::FileMeta::from(flush_file);
+    let flush_file = cntryl_midge_durability::metadata::intent::FileMeta::from(flush_file);
     event_loop
         .state
         .record_flush_publication_intent(0, 9, &flush_file)?;
@@ -916,7 +925,9 @@ fn should_mark_reclamation_anomaly_when_metadata_cut_admission_fails() -> MidgeR
     Ok(())
 }
 
-fn read_selected_manifest(event_loop: &EventLoop) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
+fn read_selected_manifest(
+    event_loop: &EventLoop,
+) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
     let deadline = event_loop.event_loop_cloud_deadline();
     let store = event_loop.authority.fencing.leader_store.as_ref().unwrap();
     let head = store.read_committed_metadata(deadline.remaining())?;

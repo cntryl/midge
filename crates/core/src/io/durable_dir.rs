@@ -13,15 +13,15 @@ use std::sync::LazyLock;
 static DURABLE_DIRS: LazyLock<parking_lot::Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashSet::new()));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 thread_local! {
     /// Directories this thread fsynced through [`sync_dir_path`].
     static SYNCED_DIRS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Take the directories this thread has fsynced since the last call.
-#[cfg(test)]
-pub(crate) fn take_synced_dirs() -> Vec<PathBuf> {
+#[cfg(any(test, feature = "internal-testing"))]
+pub fn take_synced_dirs() -> Vec<PathBuf> {
     SYNCED_DIRS.with(|synced| std::mem::take(&mut *synced.borrow_mut()))
 }
 
@@ -44,7 +44,7 @@ pub(crate) fn remove_dir_all_and_forget(
 /// # Errors
 ///
 /// Fails when any directory cannot be created or its parent cannot be synced.
-pub(crate) fn create_path_durably(path: &Path) -> std::io::Result<()> {
+pub fn create_path_durably(path: &Path) -> std::io::Result<()> {
     let mut durable_dirs = DURABLE_DIRS.lock();
     let requested = if path.is_absolute() {
         path.to_path_buf()
@@ -149,7 +149,7 @@ pub(crate) fn create_path_durably(path: &Path) -> std::io::Result<()> {
 /// Fails when the directory cannot be opened or synced, or the platform has
 /// no durable directory sync.
 pub(crate) fn sync_dir_path(path: &Path) -> std::io::Result<()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     SYNCED_DIRS.with(|synced| synced.borrow_mut().push(path.to_path_buf()));
     #[cfg(unix)]
     {
@@ -192,7 +192,7 @@ pub(crate) fn sync_dir_path(path: &Path) -> std::io::Result<()> {
 ///
 /// Fails when a directory cannot be created or synced, or `dir` is not
 /// inside `root`.
-pub(crate) fn create_dir_all_durably(root: &Path, dir: &Path) -> std::io::Result<()> {
+pub fn create_dir_all_durably(root: &Path, dir: &Path) -> std::io::Result<()> {
     let mut durable_dirs = DURABLE_DIRS.lock();
     let relative = dir.strip_prefix(root).map_err(|_| {
         std::io::Error::new(

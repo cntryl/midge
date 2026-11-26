@@ -167,19 +167,14 @@ fn run_decompress_raw(ctx: &mut StressContext, name: &'static str, algo: Compres
     ctx.parameter("logical_unit", "block");
 
     let measurement_name = format!("decompress_raw_{name}");
-    ctx.measure_batch(
-        ctx,
-        measurement_name,
-        RAW_DECOMPRESS_BATCH_SIZE as u64,
-        || {
-            let mut bytes = 0usize;
-            for _ in 0..RAW_DECOMPRESS_BATCH_SIZE {
-                let out = decompress_block(black_box(&compressed.0), algo).unwrap();
-                bytes = bytes.wrapping_add(out.len());
-            }
-            black_box(bytes);
-        },
-    );
+    let _completed = ctx.measure_batch(measurement_name, RAW_DECOMPRESS_BATCH_SIZE as u64, || {
+        let mut bytes = 0usize;
+        for _ in 0..RAW_DECOMPRESS_BATCH_SIZE {
+            let out = decompress_block(black_box(&compressed.0), algo).unwrap();
+            bytes = bytes.wrapping_add(out.len());
+        }
+        black_box(bytes);
+    });
 }
 
 #[stress(
@@ -219,19 +214,15 @@ fn run_compress_trailer(ctx: &mut StressContext, name: &'static str, policy: &Co
     ctx.parameter("logical_unit", "block");
 
     let measurement_name = format!("compress_trailer_{name}");
-    ctx.measure_batch(
-        ctx,
-        measurement_name,
-        TRAILER_COMPRESS_BATCH_SIZE as u64,
-        || {
+    let _completed =
+        ctx.measure_batch(measurement_name, TRAILER_COMPRESS_BATCH_SIZE as u64, || {
             let mut bytes = 0usize;
             for _ in 0..TRAILER_COMPRESS_BATCH_SIZE {
                 let out = compress_block_with_trailer(black_box(&data), policy).unwrap();
                 bytes = bytes.wrapping_add(out.len());
             }
             black_box(bytes);
-        },
-    );
+        });
 }
 
 fn run_compress_trailer_zstd_window(ctx: &mut StressContext, policy: &CompressionPolicy) {
@@ -287,8 +278,7 @@ fn run_decompress_trailer(ctx: &mut StressContext, name: &'static str, policy: &
     ctx.parameter("logical_unit", "block");
 
     let measurement_name = format!("decompress_trailer_{name}");
-    ctx.measure_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         measurement_name,
         TRAILER_DECOMPRESS_BATCH_SIZE as u64,
         || {
@@ -337,7 +327,7 @@ fn wal_compress_skip_128b(ctx: &mut StressContext) {
     ctx.parameter("batch_size", WAL_SKIP_BATCH_SIZE);
     ctx.parameter("logical_unit", "wal_value");
 
-    ctx.measure_batch(ctx, "wal_compress_skip_128b", WAL_SKIP_BATCH_OPS, || {
+    let _completed = ctx.measure_batch("wal_compress_skip_128b", WAL_SKIP_BATCH_OPS, || {
         let mut bytes = 0usize;
         for _ in 0..WAL_SKIP_BATCH_SIZE {
             let (out, marker) = compress_wal_value(black_box(&small_val));
@@ -357,19 +347,14 @@ fn wal_compress_lz4_1kb(ctx: &mut StressContext) {
     ctx.parameter("batch_size", WAL_LZ4_BATCH_SIZE);
     ctx.parameter("logical_unit", "wal_value");
 
-    ctx.measure_batch(
-        ctx,
-        "wal_compress_lz4_1kb",
-        WAL_LZ4_BATCH_SIZE as u64,
-        || {
-            let mut bytes = 0usize;
-            for _ in 0..WAL_LZ4_BATCH_SIZE {
-                let (out, marker) = compress_wal_value(black_box(&medium_val));
-                bytes = bytes.wrapping_add(out.len() + usize::from(marker.is_some()));
-            }
-            black_box(bytes);
-        },
-    );
+    let _completed = ctx.measure_batch("wal_compress_lz4_1kb", WAL_LZ4_BATCH_SIZE as u64, || {
+        let mut bytes = 0usize;
+        for _ in 0..WAL_LZ4_BATCH_SIZE {
+            let (out, marker) = compress_wal_value(black_box(&medium_val));
+            bytes = bytes.wrapping_add(out.len() + usize::from(marker.is_some()));
+        }
+        black_box(bytes);
+    });
 }
 
 #[stress(
@@ -388,8 +373,7 @@ fn wal_decompress_passthrough_128b(ctx: &mut StressContext) {
     ctx.parameter("batch_size", WAL_PASSTHROUGH_DECOMPRESS_BATCH_SIZE);
     ctx.parameter("logical_unit", "wal_value");
 
-    ctx.measure_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "wal_decompress_passthrough_128b",
         WAL_PASSTHROUGH_DECOMPRESS_BATCH_SIZE as u64,
         || {
@@ -414,8 +398,7 @@ fn wal_decompress_lz4_1kb(ctx: &mut StressContext) {
     ctx.parameter("batch_size", WAL_LZ4_DECOMPRESS_BATCH_SIZE);
     ctx.parameter("logical_unit", "wal_value");
 
-    ctx.measure_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "wal_decompress_lz4_1kb",
         WAL_LZ4_DECOMPRESS_BATCH_SIZE as u64,
         || {

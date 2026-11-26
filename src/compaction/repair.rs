@@ -235,8 +235,9 @@ mod tests {
     fn should_find_native_capacity_when_real_filesystem_root_is_canonical() -> MidgeResult<()> {
         // Arrange: real bytes and independently observed canonical native mounts.
         let directory = tempfile::tempdir()?;
-        let fs: Arc<dyn Fs> =
-            Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+        let fs: Arc<dyn Fs> = Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        );
         let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(fs.clone(), 4096);
         let root = fs.host_addressing().expect("real host identity").root;
         let retained = directory.path().join("retained");
@@ -270,7 +271,10 @@ mod tests {
     #[test]
     fn should_refuse_capacity_when_filesystem_has_no_host_identity() {
         // Arrange: this filesystem deliberately exposes no host path capability.
-        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 4096);
+        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+            Arc::new(cntryl_midge_core::io::MockFs::new()),
+            4096,
+        );
 
         // Act: native disk enumeration cannot establish this backend's identity.
         let result = RepairScratch::local_capacity(&factory);

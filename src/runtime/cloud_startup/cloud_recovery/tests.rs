@@ -18,7 +18,10 @@ impl cntryl_midge_core::io::ReadFs for RemoveRefusingFs {
             .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
@@ -55,7 +58,9 @@ impl cntryl_midge_core::io::Fs for RemoveRefusingFs {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
             .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
@@ -69,18 +74,27 @@ impl cntryl_midge_core::io::Fs for RemoveRefusingFs {
         self.inner.open(path, opts)
     }
 
-    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         Err(FsError::Io(format!(
             "injected removal failure for {}",
             path.0
         )))
     }
 
-    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 

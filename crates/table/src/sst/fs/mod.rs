@@ -46,10 +46,7 @@ pub fn sst_key(name: &str) -> FsPath {
 /// Classify a failure to reach an SST the engine itself wrote. A missing
 /// file is an engine fault, never a caller asking for something absent.
 pub fn engine_sst_error(error: FsError) -> MidgeError {
-    match error {
-        FsError::NotFound(path) => MidgeError::Internal(format!("engine SST is missing: {path}")),
-        error => error.into_midge(),
-    }
+    error.into_midge_for_existing_file("engine SST")
 }
 
 /// Compute an SST identity through the same filesystem that published it.

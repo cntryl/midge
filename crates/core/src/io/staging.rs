@@ -12,14 +12,14 @@ use std::io::Read;
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]
-pub(crate) enum StagingSyncEvent {
+pub enum StagingSyncEvent {
     FileAttempt,
     FileComplete,
     DirectoryAttempt,
     DirectoryComplete,
 }
 
-pub(crate) type StagingSyncObserver<'a> = &'a dyn Fn(StagingSyncEvent);
+pub type StagingSyncObserver<'a> = &'a dyn Fn(StagingSyncEvent);
 
 fn observe_sync(observer: Option<StagingSyncObserver<'_>>, event: StagingSyncEvent) {
     if let Some(observer) = observer {
@@ -39,7 +39,7 @@ fn cleanup_temp_file(fs: &Arc<dyn Fs>, temp_path: &FsPath) {
 
 /// Stage a byte buffer to `temp_path`, sync it, rename it into `target_path`,
 /// sync the target's parent directory, and remove the temp file on failure.
-pub(crate) fn stage_bytes<E, M>(
+pub fn stage_bytes<E, M>(
     fs: &Arc<dyn Fs>,
     temp_path: &FsPath,
     target_path: &FsPath,
@@ -143,7 +143,7 @@ where
 
 /// Stage a byte buffer with a hook that runs after the temp file is synced and
 /// before the atomic rename.
-pub(crate) fn stage_bytes_with_hook<E, F, M>(
+pub fn stage_bytes_with_hook<E, F, M>(
     fs: &Arc<dyn Fs>,
     temp_path: &FsPath,
     target_path: &FsPath,
@@ -168,7 +168,7 @@ where
 
 /// [`stage_bytes_with_hook`] that keeps the filesystem error's kind, so a
 /// full disk reports `NoSpace` rather than an internal defect.
-pub(crate) fn stage_bytes_typed<F>(
+pub fn stage_bytes_typed<F>(
     fs: &Arc<dyn Fs>,
     temp_path: &FsPath,
     target_path: &FsPath,
@@ -181,7 +181,7 @@ where
     stage_bytes_typed_observed(fs, temp_path, target_path, data, before_rename, None)
 }
 
-pub(crate) fn stage_bytes_typed_observed<F>(
+pub fn stage_bytes_typed_observed<F>(
     fs: &Arc<dyn Fs>,
     temp_path: &FsPath,
     target_path: &FsPath,

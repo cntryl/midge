@@ -27,7 +27,7 @@ impl HybridStorage {
                 source.path,
                 OpenOptions::READ_ONLY,
             )
-            .map_err(cntryl_midge_core::io::engine_sst_error)?,
+            .map_err(|error| error.into_midge_for_existing_file("engine SST"))?,
         );
         if file.len().map_err(FsError::into_midge)? != source.size {
             return Err(MidgeError::Corruption(

@@ -1,14 +1,14 @@
 //! Source-history preservation through remote compute and conditional publication.
 
 use super::*;
-use cntryl_midge_core::common::resource_budget::ResourceBudget;
 use crate::compaction::strategy::CompactionPurpose;
 use crate::compaction::LeveledCompactionConfig;
 use crate::runtime::actors::compaction::CompactionActor;
 use crate::runtime::RuntimeState;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::types::RangeTombstone;
 use cntryl_midge_table::sst::traits::{DynSstWriter, RawSstVersion};
 use cntryl_midge_table::sst::SstFactory as _;
-use cntryl_midge_core::types::RangeTombstone;
 use std::path::Path;
 
 const POOL: usize = 8 * 1024 * 1024;
@@ -20,7 +20,9 @@ struct SourceHistory {
     ranges: Vec<RangeTombstone>,
 }
 
-fn seed_fragment_layout(el: &mut EventLoop) -> MidgeResult<Vec<cntryl_midge_durability::metadata::FileMeta>> {
+fn seed_fragment_layout(
+    el: &mut EventLoop,
+) -> MidgeResult<Vec<cntryl_midge_durability::metadata::FileMeta>> {
     let writer = source_writer(el)?;
     let mut files = vec![publish_seed(el, 1, 100, writer)?];
     for (index, key) in [b"a1", b"b1", b"c1", b"d1", b"e1", b"f1"]
@@ -92,7 +94,8 @@ fn publish_seed(
         Arc::clone(&el.state.fs),
         ResourceBudget::new(POOL),
     )?;
-    let (_, checksum) = cntryl_midge_table::sst::fs::file_identity_with_fs(&el.state.fs, Path::new(&path.0))?;
+    let (_, checksum) =
+        cntryl_midge_table::sst::fs::file_identity_with_fs(&el.state.fs, Path::new(&path.0))?;
     let hybrid = el.actors.cloud_coordinator.hybrid_storage.as_ref().unwrap();
     hybrid.publish_immutable_file(
         cntryl_midge_storage::hybrid::backend::ImmutableFileSource {

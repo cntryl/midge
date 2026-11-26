@@ -4,7 +4,7 @@
 /// Mirrors `crate::cloud::forward_cloud_backend` for the
 /// `StorageBackend` trait. `$inner` names a field holding the delegate; both
 /// `T` and `Arc<T>` work, because forwarding uses method-call syntax.
-pub(crate) trait StorageBackendTestExt: super::StorageBackend {
+pub trait StorageBackendTestExt: super::StorageBackend {
     fn write_for_test(&self, key: &str, data: Vec<u8>, callback: super::StorageCallback) {
         self.submit_write_request(
             super::StorageRequest::new(
@@ -35,8 +35,8 @@ pub(crate) trait StorageBackendTestExt: super::StorageBackend {
 
 impl<T: super::StorageBackend + ?Sized> StorageBackendTestExt for T {}
 
-#[cfg(test)]
-pub(crate) fn dispatch_test_write_request(
+#[cfg(any(test, feature = "internal-testing"))]
+pub fn dispatch_test_write_request(
     request: super::StorageRequest,
     data: Vec<u8>,
     callback: super::StorageCallback,
@@ -65,7 +65,7 @@ pub(crate) fn dispatch_test_write_request(
     };
     submit(&request.key, request.precondition, data, callback);
 }
-pub(crate) fn dispatch_test_delete_request(
+pub fn dispatch_test_delete_request(
     request: super::StorageRequest,
     callback: super::StorageCallback,
     submit: impl FnOnce(&str, super::StoragePrecondition, super::StorageCallback),
@@ -147,3 +147,5 @@ macro_rules! forward_storage_backend {
         }
     };
 }
+#[cfg(feature = "sqrzl-tests")]
+pub mod sqrzl;

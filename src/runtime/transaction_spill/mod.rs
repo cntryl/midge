@@ -4,10 +4,10 @@
 //! runtime can therefore replay a spilled transaction in caller order without
 //! reconstructing its complete write set in memory.
 use super::TransactionOp;
+use bytes::Bytes;
 use cntryl_midge_core::common::resource_budget::ResourceBudget;
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_core::io::{Fs, FsError, FsPath};
-use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -390,7 +390,10 @@ impl TransactionWriteSet {
             TransactionOp::DeleteRange {
                 start_key, end_key, ..
             } => {
-                cntryl_midge_table::sst::types::validate_range_tombstone_size(start_key.len(), end_key.len())?;
+                cntryl_midge_table::sst::types::validate_range_tombstone_size(
+                    start_key.len(),
+                    end_key.len(),
+                )?;
             }
         }
         let ordinal_op = OrdinalOp {
@@ -656,7 +659,9 @@ impl TransactionOpSource {
         Ok(latest.map(|(_, lookup)| lookup))
     }
 
-    pub(crate) fn touched_cf_ids(&self) -> MidgeResult<Vec<cntryl_midge_core::types::ColumnFamilyId>> {
+    pub(crate) fn touched_cf_ids(
+        &self,
+    ) -> MidgeResult<Vec<cntryl_midge_core::types::ColumnFamilyId>> {
         let mut cfs = Vec::new();
         self.for_each(|_, op| {
             let cf_id = op_cf_id(&op);

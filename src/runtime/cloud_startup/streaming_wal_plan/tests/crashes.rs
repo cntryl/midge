@@ -1,8 +1,8 @@
 //! Actual aborts at salvage floor, ledger set-aside, and catalog boundaries.
 use super::*;
 use crate::runtime::hybrid_persistence::CloudPersistence;
-use cntryl_midge_storage::HybridStorage;
 use cntryl_midge_durability::wal::cloud_catalog::CatalogEntry;
+use cntryl_midge_storage::HybridStorage;
 use std::path::PathBuf;
 
 #[allow(dead_code)]
@@ -28,7 +28,9 @@ fn commit(
         crate::runtime::cloud_startup::CacheHistory::Existing(history),
         None,
         &|| Ok(()),
-        &cntryl_midge_core::common::DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded()),
+        &cntryl_midge_core::common::DeadlineScope::new(
+            cntryl_midge_core::common::OperationDeadline::unbounded(),
+        ),
     )
 }
 
@@ -53,9 +55,9 @@ fn should_abort_salvage_when_child_requested() -> MidgeResult<()> {
         return Ok(());
     };
     let case: Case = serde_json::from_slice(&std::fs::read(path)?).unwrap();
-    let cloud: Arc<dyn StorageBackend> = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
-        case.root.join("cloud"),
-    )?);
+    let cloud: Arc<dyn StorageBackend> = Arc::new(
+        cntryl_midge_storage::filesystem::FileSystem::new(case.root.join("cloud"))?,
+    );
     let catalog = WalPublicationCatalog::decode(&std::fs::read(
         case.root
             .join("cloud")
@@ -66,8 +68,10 @@ fn should_abort_salvage_when_child_requested() -> MidgeResult<()> {
         Arc::clone(&cloud),
         cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
-    let wal: Arc<dyn Fs> =
-        Arc::new(cntryl_midge_core::io::RealFs::new(case.root.join("local/wal")).map_err(FsError::into_midge)?);
+    let wal: Arc<dyn Fs> = Arc::new(
+        cntryl_midge_core::io::RealFs::new(case.root.join("local/wal"))
+            .map_err(FsError::into_midge)?,
+    );
     // Startup opens the ledger under its lease, epoch 9.
     let history = crate::runtime::wal_history::WalHistory::open(wal, 1, 9)?;
     let recovered = StreamingCloudWalRecovery::build(
@@ -274,7 +278,9 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
                 .map(|_| ())
                 .map_err(|error| error.into_validation_error("salvage writer validity"))
         },
-        &cntryl_midge_core::common::DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded()),
+        &cntryl_midge_core::common::DeadlineScope::new(
+            cntryl_midge_core::common::OperationDeadline::unbounded(),
+        ),
     );
 
     // Assert: the expired writer stops before touching its ledger, so the

@@ -9,9 +9,9 @@ use super::{
     TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_DISABLED_REQUEST_ID,
     TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID,
 };
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_durability::wal::DurabilityPolicy;
 #[cfg(all(test, feature = "failpoints"))]
 use std::sync::atomic::Ordering;
@@ -304,7 +304,9 @@ impl WalActor {
                     };
                 }
             }
-            cntryl_midge_core::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::wal::before_prepared_transaction_apply"
+            );
             // Every unit in the group is in the WAL and `state.sequence` is
             // past every commit; the earlier units are applied. A lease that
             // lapsed since is a failed apply of this unit and the rest, none
@@ -498,7 +500,9 @@ impl WalActor {
 
         let mut intents = Vec::with_capacity(ops.len());
         let mut key_exists_after_intents =
-            |cf_id: cntryl_midge_core::types::ColumnFamilyId, key: &[u8], intents: &[TransactionIntent<'_>]| {
+            |cf_id: cntryl_midge_core::types::ColumnFamilyId,
+             key: &[u8],
+             intents: &[TransactionIntent<'_>]| {
                 for intent in intents.iter().rev() {
                     match intent {
                         TransactionIntent::Point {
@@ -684,8 +688,10 @@ impl WalActor {
             )));
         }
 
-        let decoded_bound =
-            cntryl_midge_durability::wal::encoding::txn_batch_decoded_bound(payload_len, apply_ops.len());
+        let decoded_bound = cntryl_midge_durability::wal::encoding::txn_batch_decoded_bound(
+            payload_len,
+            apply_ops.len(),
+        );
         // Replay rejects the batch if either its frame or its decoded
         // allocation exceeds the budget; check the larger of the two.
         let frame_bound = unit.frame_size_bound()?;
@@ -725,7 +731,9 @@ impl WalActor {
         }
 
         let admitted = self.admit_wal_records(&records)?;
-        let previous_position = self.writer().map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
+        let previous_position = self
+            .writer()
+            .map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
 
         if let Err(error) = self.ensure_lease_validity() {
             self.settle_wal_append(admitted, previous_position);
@@ -755,7 +763,9 @@ impl WalActor {
                 self.fence_transition(state, error.to_string());
                 return Err(Self::appended_unit_error(error));
             }
-            cntryl_midge_core::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::wal::after_append_batch_before_sync"
+            );
         }
 
         state.wal.pending_writes += pending_wal_records;
@@ -786,7 +796,9 @@ impl WalActor {
                 "failpoint: no space on transaction batch append".into()
             ))
         );
-        cntryl_midge_core::failpoints::fail_point!("midge::wal::txn_after_ops_append_before_commit");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::txn_after_ops_append_before_commit"
+        );
         Ok(())
     }
 

@@ -57,6 +57,9 @@ pub mod gcs;
 mod gcs_resolver;
 #[cfg(all(test, feature = "cloud-all"))]
 mod list_page_contract_tests;
+#[cfg(all(any(test, feature = "internal-testing"), feature = "cloud-all"))]
+#[doc(hidden)]
+pub mod multipart_contract_tests;
 pub(crate) mod preflight;
 #[cfg(all(test, feature = "cloud-all", feature = "sqrzl-tests"))]
 pub mod qualification;
@@ -80,6 +83,19 @@ mod s3_resolver;
     feature = "cloud-gcp"
 ))]
 pub(crate) mod xml;
+
+#[cfg(all(feature = "cloud-azure", any(test, feature = "internal-testing")))]
+#[doc(hidden)]
+pub use azure::contract_test_backend as azure_contract_backend;
+#[cfg(all(feature = "cloud-gcp", any(test, feature = "internal-testing")))]
+#[doc(hidden)]
+pub use gcs::contract_test_xml_backend as gcs_xml_contract_backend;
+#[cfg(all(feature = "cloud-aws", any(test, feature = "internal-testing")))]
+#[doc(hidden)]
+pub use s3::contract_test_backend as s3_contract_backend;
+#[cfg(all(feature = "cloud-aws", any(test, feature = "internal-testing")))]
+#[doc(hidden)]
+pub use s3_resolver::try_resolve as resolve_s3_for_test;
 
 #[cfg(all(test, feature = "cloud-common"))]
 pub(crate) mod test_support {
@@ -535,7 +551,7 @@ pub(crate) fn build_cloud_storage(
 }
 
 #[cfg(feature = "cloud-common")]
-pub(crate) fn build_cloud_storage_with_timeout(
+pub fn build_cloud_storage_with_timeout(
     provider: &CloudProviderConfig,
     prefix: &str,
     timeout: std::time::Duration,
@@ -550,7 +566,7 @@ pub(crate) fn build_cloud_storage_with_timeout(
 
 /// Build the store for one cloud storage class. A test-injected backend
 /// stands in for the configured provider; the prefix still namespaces it.
-pub(crate) fn build_class_store(
+pub fn build_class_store(
     provider: &CloudProviderConfig,
     prefix: &str,
     timeout: std::time::Duration,

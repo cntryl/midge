@@ -79,7 +79,11 @@ fn retain_real_sst_blocks(reader: &SstFileIo, seed: u64) -> MidgeResult<()> {
     retain_seed("sst_data_block_decode", &name, &blocks.data);
     retain_seed("sst_index_decode", &name, &blocks.index);
     retain_seed("sst_filter_decode", &name, &blocks.block_bloom);
-    retain_seed("sst_block_decode", &format!("{name}-ranges"), &blocks.range_tombstones);
+    retain_seed(
+        "sst_block_decode",
+        &format!("{name}-ranges"),
+        &blocks.range_tombstones,
+    );
     retain_seed(
         "sst_block_decode",
         &format!("{name}-footer"),
@@ -103,8 +107,7 @@ fn retain_real_journal(seed: u64, input: &[u8]) -> MidgeResult<()> {
     let scope = DeadlineScope::new(OperationDeadline::unbounded());
     // Sync timestamps vary. Strict production replay validates both frame
     // CRCs and durable marker cuts before comparing exact edit identities.
-    let actual =
-        metadata::journal::replay_identified_edits_from_bytes(&input[1..], 0, &scope)?;
+    let actual = metadata::journal::replay_identified_edits_from_bytes(&input[1..], 0, &scope)?;
     let expected =
         metadata::journal::replay_identified_edits_from_bytes(&expected[1..], 0, &scope)?;
     assert_eq!(actual.len(), 1);
@@ -119,8 +122,7 @@ fn retain_real_journal(seed: u64, input: &[u8]) -> MidgeResult<()> {
 fn retain_real_metadata(directory: &Path, fs: &Arc<dyn Fs>, seed: u64) -> MidgeResult<()> {
     let mut manifest = Manifest::default();
     manifest.next_sst_seqs.insert(0, seed + 2);
-    ManifestPersistence::save_with_fs(fs, &manifest)
-        .map_err(MidgeError::Internal)?;
+    ManifestPersistence::save_with_fs(fs, &manifest).map_err(MidgeError::Internal)?;
     metadata::append_edit(
         directory,
         &ManifestEdit::BumpNextSstSeq {
@@ -152,9 +154,7 @@ fn should_match_eight_real_file_seeds_per_persisted_decoder() -> MidgeResult<()>
         let directory = tempfile::tempdir()?;
         let fs = test_root(directory.path());
         let factory = FsSstFactoryIo::new(fs.clone(), 64 * 1024)
-            .with_compression_policy(CompressionPolicy::Fixed(
-                CompressionAlgo::None,
-            ));
+            .with_compression_policy(CompressionPolicy::Fixed(CompressionAlgo::None));
         let mut writer = factory.create()?;
         add_seed_entries(writer.as_mut(), seed)?;
         // Act: publish the writer's exact bytes through the production format.
@@ -171,9 +171,8 @@ fn write_current_fixture(directory: &Path) -> MidgeResult<()> {
     let fs = test_root(directory);
     std::fs::create_dir_all(directory.join("sst"))?;
     metadata::ensure_or_create_format_marker(&fs, directory)?;
-    let factory = FsSstFactoryIo::new(fs.clone(), 64 * 1024).with_compression_policy(
-        CompressionPolicy::Fixed(CompressionAlgo::Lz4),
-    );
+    let factory = FsSstFactoryIo::new(fs.clone(), 64 * 1024)
+        .with_compression_policy(CompressionPolicy::Fixed(CompressionAlgo::Lz4));
     let mut writer = factory.create()?;
     writer.add_sorted_with_meta(
         b"fixture/alpha",
@@ -207,9 +206,12 @@ fn write_current_fixture(directory: &Path) -> MidgeResult<()> {
     file.smallest_seq = Some(summary.smallest_seq);
     file.largest_seq = Some(summary.largest_seq);
     file.earliest_expiration_millis = summary.earliest_expiration_millis;
-    ManifestPersistence::save_with_fs(&fs, &manifest)
-        .map_err(MidgeError::Internal)?;
-    crate::runtime::IntentPersistence::save_with_fs(&fs, &[]).map_err(MidgeError::Internal)?;
+    ManifestPersistence::save_with_fs(&fs, &manifest).map_err(MidgeError::Internal)?;
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_with_fs(
+        &fs,
+        &[],
+    )
+    .map_err(MidgeError::Internal)?;
     Ok(())
 }
 

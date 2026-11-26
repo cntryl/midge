@@ -5,17 +5,17 @@
 //! accounting; they do not establish native socket cancellation or public ACKs.
 
 use super::EventLoop;
-use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
-use cntryl_midge_durability::lease::{CloudMetadataHead, LeaseGuard, PrimaryLease as _};
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use crate::runtime::RuntimeState;
-use cntryl_midge_table::sst::SstFactory as _;
+use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::types::{EntryType, KeyState};
+use cntryl_midge_durability::lease::{CloudMetadataHead, LeaseGuard, PrimaryLease as _};
 use cntryl_midge_storage::cloud::CloudReadCapability;
 use cntryl_midge_storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
-use cntryl_midge_core::types::{EntryType, KeyState};
-use bytes::Bytes;
+use cntryl_midge_table::sst::SstFactory as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -209,21 +209,26 @@ fn seed_actual_sst(el: &mut EventLoop) -> MidgeResult<(String, Vec<u8>)> {
         ..Default::default()
     };
     manifest
-        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
-            cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
-                cf_id: 0,
-                next_seq: 2,
-            },
-            cntryl_midge_durability::metadata::ManifestEdit::AddSst(file),
-            cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
-                cf_id: 0,
-                freeze_sequence: 7,
-            },
-        ]))
+        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::Batch(
+            vec![
+                cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
+                    cf_id: 0,
+                    next_seq: 2,
+                },
+                cntryl_midge_durability::metadata::ManifestEdit::AddSst(file),
+                cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
+                    cf_id: 0,
+                    freeze_sequence: 7,
+                },
+            ],
+        ))
         .unwrap();
     el.state.sequence = 7;
-    cntryl_midge_durability::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(MidgeError::Internal)?;
+    cntryl_midge_durability::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(MidgeError::Internal)?;
     Ok((name, bytes))
 }
 
@@ -240,14 +245,16 @@ impl NameFixture {
             String::new(),
             PROVIDER_CAP,
         ));
-        let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-            cntryl_midge_durability::lease::CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: "name-budget".into(),
-            },
-            el.state.db_path.clone(),
-            Arc::clone(&cloud),
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "test".into(),
+                    prefix: "name-budget".into(),
+                },
+                el.state.db_path.clone(),
+                Arc::clone(&cloud),
+            ),
+        );
         let guard = Arc::clone(&lease)
             .try_acquire()
             .map_err(|error| error.into_validation_error("name fixture lease acquisition"))?;
@@ -294,7 +301,8 @@ impl NameFixture {
             directory.path(),
             cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
-        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).map_err(MidgeError::Internal)
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path())
+            .map_err(MidgeError::Internal)
     }
 
     fn exact_data(&self) -> MidgeResult<DataEvidence> {
@@ -383,7 +391,8 @@ fn should_keep_name_reservation_uncovered_when_actual_metadata_write_outlives_or
         let after_uploads = fixture.backend.inner.get_uploads();
         let puts = fixture.backend.puts.lock().unwrap()[before_puts..].to_vec();
         let bound = fixture.el.state.sst_names.reserved_through.get(&0).copied();
-        let local = cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
+        let local =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
         let recovered =
             RuntimeState::new_in_epoch(&fixture.el.state.db_path, false, fixture.lease.epoch());
         let mut recovered_loop = EventLoop::new(
@@ -507,7 +516,8 @@ fn should_cover_reserved_name_when_real_metadata_mirror_fits_original_budget() -
         let covered = fixture.el.state.sst_names.reserved_through.get(&0).copied();
         let head = fixture.committed_head();
         let manifest = fixture.committed_manifest();
-        let local = cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
+        let local =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
         let data = fixture.exact_data();
         let healthy = fixture.el.check_lease_health();
         let cleanup = fixture.stop();

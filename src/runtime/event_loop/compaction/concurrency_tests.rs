@@ -1,9 +1,9 @@
 //! Real loop-owned compute, publication and recovery with independent jobs.
 use super::*;
-use cntryl_midge_durability::lease::PrimaryLease as _;
 use crate::runtime::{ResponseRouter, RuntimeConfig, RuntimeMsg, RuntimeState};
-use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory as _};
 use cntryl_midge_core::types::EntryType;
+use cntryl_midge_durability::lease::PrimaryLease as _;
+use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory as _};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 mod capture_queue_tests;
@@ -29,7 +29,10 @@ impl ConcurrentFixture {
             &cntryl_midge_durability::metadata::Manifest::default(),
         )
         .map_err(MidgeError::Internal)?;
-        let lease = Arc::new(cntryl_midge_durability::lease::FileSystemLease::new(directory.path(), false)?);
+        let lease = Arc::new(cntryl_midge_durability::lease::FileSystemLease::new(
+            directory.path(),
+            false,
+        )?);
         let guard = Arc::clone(&lease).try_acquire()?;
         let state = RuntimeState::new_in_epoch(directory.path(), false, lease.epoch());
         let (completed, workers) = crossbeam::channel::unbounded();
@@ -99,12 +102,8 @@ impl ConcurrentFixture {
             .finish_to_path_with_summary(std::path::Path::new(&name))?
             .unwrap();
         let summary = finalized.summary.unwrap();
-        self.event_loop
-            .state
-            .manifest
-            .test_mut()
-            .files
-            .push(cntryl_midge_durability::metadata::FileMeta {
+        self.event_loop.state.manifest.test_mut().files.push(
+            cntryl_midge_durability::metadata::FileMeta {
                 name: name.clone(),
                 level,
                 cf_id: 0,
@@ -117,7 +116,8 @@ impl ConcurrentFixture {
                 largest_seq: Some(summary.largest_seq),
                 key_bounds_complete: true,
                 ..Default::default()
-            });
+            },
+        );
         Ok(name)
     }
 

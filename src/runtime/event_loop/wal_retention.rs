@@ -23,9 +23,9 @@ impl EventLoop {
             .history
             .ledger()
             .retirable_prefix(|cf, sequence| match frontiers.get(cf) {
-                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence }) => {
-                    sequence <= through_sequence
-                }
+                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live {
+                    through_sequence,
+                }) => sequence <= through_sequence,
                 Ok(cntryl_midge_durability::metadata::FamilyFrontier::Dropped) => true,
                 Err(_) => false,
             });
@@ -106,7 +106,9 @@ impl EventLoop {
         true
     }
 
-    pub(super) fn validate_runtime_lease_for_wal_prune(&self) -> cntryl_midge_core::common::MidgeResult<()> {
+    pub(super) fn validate_runtime_lease_for_wal_prune(
+        &self,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.check_lease_health()?;
         if let Some(store) = &self.authority.fencing.leader_store {
             store

@@ -105,7 +105,10 @@ impl GrandparentOverlap {
 pub(super) struct OverlapTracker<'a> {
     policy: &'a GrandparentOverlap,
     budget: &'a ResourceBudget,
-    lower: Option<(Vec<u8>, cntryl_midge_core::common::resource_budget::ResourceReservation)>,
+    lower: Option<(
+        Vec<u8>,
+        cntryl_midge_core::common::resource_budget::ResourceReservation,
+    )>,
     previous_bytes: u64,
 }
 

@@ -7,7 +7,7 @@ use cntryl_midge_core::MidgeError;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -22,7 +22,7 @@ pub struct MockCloudBackend {
     mutation_lock: Arc<Mutex<()>>,
     uploads: Arc<Mutex<Vec<(String, u64)>>>,
     downloads: Arc<Mutex<Vec<String>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     get_timeouts: Arc<Mutex<Vec<std::time::Duration>>>,
     range_downloads: Arc<Mutex<Vec<String>>>,
 }
@@ -35,7 +35,7 @@ impl MockCloudBackend {
             mutation_lock: Arc::new(Mutex::new(())),
             uploads: Arc::new(Mutex::new(Vec::new())),
             downloads: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "internal-testing"))]
             get_timeouts: Arc::new(Mutex::new(Vec::new())),
             range_downloads: Arc::new(Mutex::new(Vec::new())),
         }
@@ -51,8 +51,8 @@ impl MockCloudBackend {
         self.downloads.lock().clone()
     }
 
-    #[cfg(test)]
-    pub(crate) fn get_request_timeouts(&self) -> Vec<std::time::Duration> {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn get_request_timeouts(&self) -> Vec<std::time::Duration> {
         self.get_timeouts.lock().clone()
     }
 
@@ -64,7 +64,7 @@ impl MockCloudBackend {
     pub fn clear_history(&self) {
         self.uploads.lock().clear();
         self.downloads.lock().clear();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "internal-testing"))]
         self.get_timeouts.lock().clear();
         self.range_downloads.lock().clear();
     }
@@ -77,7 +77,7 @@ impl Default for MockCloudBackend {
 }
 
 impl crate::cloud::CloudReadCapability for MockCloudBackend {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn submit_get_with_timeout(
         &self,
         key: &str,
@@ -169,7 +169,7 @@ impl crate::cloud::CloudReadCapability for MockCloudBackend {
         });
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let result = self

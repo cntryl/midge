@@ -3,8 +3,8 @@
 //! owes it (#841).
 
 use super::super::EventLoop;
-use cntryl_midge_core::common::{MidgeError, OperationDeadline};
 use crate::runtime::hybrid_persistence::{CloudPersistence, PublicationError};
+use cntryl_midge_core::common::{MidgeError, OperationDeadline};
 use cntryl_midge_durability::wal::cloud_catalog::CatalogEntry;
 use cntryl_midge_durability::wal::publish::OwedSegment;
 

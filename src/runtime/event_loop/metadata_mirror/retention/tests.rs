@@ -1,7 +1,7 @@
 use super::*;
+use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use cntryl_midge_core::common::{MidgeResult, OperationDeadline};
 use cntryl_midge_durability::lease::CloudMetadataHead;
-use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use cntryl_midge_storage::cloud::BlockingCloud;
 
 #[test]
@@ -11,12 +11,14 @@ fn should_reclaim_bounded_backlog_on_idle_turns_without_new_metadata_writes() ->
         cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     for sequence in 1..=25 {
-        crate::runtime::IntentPersistence::save_with_fs(
+        cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_with_fs(
             &event_loop.state.fs,
-            &[crate::runtime::IntentLogEntry::CloudUploadComplete {
-                resource: format!("{sequence}:{}", "x".repeat(32 * 1024)),
-                seqno: sequence,
-            }],
+            &[
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CloudUploadComplete {
+                    resource: format!("{sequence}:{}", "x".repeat(32 * 1024)),
+                    seqno: sequence,
+                },
+            ],
         )
         .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
         event_loop.mirror_metadata_to_authoritative_cloud()?;

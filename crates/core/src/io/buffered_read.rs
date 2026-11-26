@@ -9,7 +9,7 @@ struct ReadWindow {
     bytes: Bytes,
 }
 
-pub(crate) struct BufferedReadFile<'a> {
+pub struct BufferedReadFile<'a> {
     inner: Box<dyn ReadFile + 'a>,
     file_len: u64,
     range_buffer_bytes: usize,
@@ -17,7 +17,7 @@ pub(crate) struct BufferedReadFile<'a> {
 }
 
 impl<'a> BufferedReadFile<'a> {
-    pub(crate) fn new(inner: Box<dyn ReadFile + 'a>, range_buffer_bytes: usize) -> FsResult<Self> {
+    pub fn new(inner: Box<dyn ReadFile + 'a>, range_buffer_bytes: usize) -> FsResult<Self> {
         if range_buffer_bytes == 0 {
             return Err(FsError::Io("read window must be positive".into()));
         }

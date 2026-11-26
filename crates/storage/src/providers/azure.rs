@@ -734,10 +734,8 @@ struct AzureBackend {
 
 /// A path-style backend against a test HTTP endpoint, for the provider
 /// contract table.
-#[cfg(test)]
-pub(super) fn contract_test_backend(
-    endpoint: String,
-) -> std::sync::Arc<dyn crate::cloud::CloudBackend> {
+#[cfg(any(test, feature = "internal-testing"))]
+pub fn contract_test_backend(endpoint: String) -> std::sync::Arc<dyn crate::cloud::CloudBackend> {
     std::sync::Arc::new(AzureBackend::new(
         "account".into(),
         "container".into(),
@@ -1107,7 +1105,7 @@ impl crate::cloud::CloudReadCapability for AzureBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let url = self.object_url(&key);

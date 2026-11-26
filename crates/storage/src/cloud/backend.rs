@@ -16,8 +16,7 @@ use std::time::Duration;
 pub struct CloudRequestOptions {
     deadline: Option<cntryl_midge_core::OperationDeadline>,
     pub(crate) headers: Vec<(String, String)>,
-    pub(crate) reservation:
-        Option<Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
+    pub reservation: Option<Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
 }
 
 impl CloudRequestOptions {
@@ -52,7 +51,7 @@ impl CloudRequestOptions {
         self.deadline.map(|deadline| deadline.remaining())
     }
 
-    pub(crate) fn headers_with_deadline(&self) -> Vec<(String, String)> {
+    pub fn headers_with_deadline(&self) -> Vec<(String, String)> {
         let mut headers = self.headers.clone();
         if let Some(deadline) = self
             .deadline
@@ -503,7 +502,7 @@ pub trait CloudReadCapability: Send + Sync {
     }
 
     /// Submit a ranged GET for provider tests. `end` is an exclusive byte offset.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback);
 }
 

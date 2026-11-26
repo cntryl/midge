@@ -1,0 +1,292 @@
+//! Shared bounded binary metadata frames for local and cloud authority.
+//!
+//! `MessagePack` maps preserve explicit field names and optional fields while
+//! encoding integers and key bytes compactly. CRC32C covers the header, kind,
+//! length and exact payload, so a frame cannot be reinterpreted as another kind.
+
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+
+const MAGIC: &[u8; 8] = b"MDGEMD09";
+const HEADER_BYTES: usize = 13;
+const CHECKSUM_BYTES: usize = 4;
+const MAX_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
+mod framing;
+pub mod manifest_workspace;
+pub(crate) mod workspace;
+pub const MANIFEST: u8 = 1;
+pub const JOURNAL: u8 = 2;
+pub const INTENT: u8 = 3;
+
+pub fn encode<T: Serialize + ?Sized>(kind: u8, value: &T) -> MidgeResult<Vec<u8>> {
+    let payload = rmp_serde::to_vec_named(value)
+        .map_err(|error| MidgeError::Internal(format!("encode binary metadata: {error}")))?;
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Err(MidgeError::ResourceLimit(
+            "metadata frame exceeds 256 MiB".into(),
+        ));
+    }
+    let length = u32::try_from(payload.len())
+        .map_err(|_| MidgeError::ResourceLimit("metadata frame length overflow".into()))?;
+    let mut bytes = Vec::with_capacity(HEADER_BYTES + payload.len() + CHECKSUM_BYTES);
+    bytes.extend_from_slice(MAGIC);
+    bytes.push(kind);
+    bytes.extend_from_slice(&length.to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    let checksum = crc32c::crc32c(&bytes);
+    bytes.extend_from_slice(&checksum.to_be_bytes());
+    Ok(bytes)
+}
+
+/// Complete frame extent, or None for a genuine partial EOF. Invalid headers
+/// and oversized announcements are corruption even when their body is absent.
+pub(crate) fn frame_len(bytes: &[u8]) -> MidgeResult<Option<usize>> {
+    if !MAGIC.starts_with(&bytes[..bytes.len().min(MAGIC.len())]) {
+        return Err(MidgeError::CompatibilityError(
+            "unsupported metadata encoding; format 9 binary metadata is required".into(),
+        ));
+    }
+    if bytes.len() < HEADER_BYTES {
+        return Ok(None);
+    }
+    let mut length = [0_u8; 4];
+    length.copy_from_slice(&bytes[9..13]);
+    let length = u32::from_le_bytes(length) as usize;
+    if length > MAX_PAYLOAD_BYTES {
+        return Err(MidgeError::Corruption(
+            "metadata frame exceeds decoder limit".into(),
+        ));
+    }
+    let extent = HEADER_BYTES + length + CHECKSUM_BYTES;
+    Ok((bytes.len() >= extent).then_some(extent))
+}
+
+/// Frame extent at the end of an append-only log's verified prefix, or `None`
+/// for a torn final append. A torn append is the only unacknowledged state, so
+/// the bytes after the verified prefix are classified:
+/// an all-zero remainder (an unsynced append that persisted its length but not
+/// its bytes) is torn; a frame whose announced extent overruns the end is
+/// corruption if a complete, checksum-valid frame of `kind` sits inside the
+/// bytes it would swallow (durable history follows), or if the frame verifies
+/// when its length is corrected to run exactly to the end (only the length
+/// field is damaged). Otherwise it is a torn append. A multi-field damage to a
+/// final frame remains indistinguishable from a torn append.
+pub(crate) fn tail_frame_len(bytes: &[u8], kind: u8) -> MidgeResult<Option<usize>> {
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Ok(None);
+    }
+    let extent = frame_len(bytes)?;
+    if extent.is_none()
+        && (contains_complete_frame(&bytes[1..], kind) || frame_runs_to_end(bytes, kind))
+    {
+        return Err(MidgeError::Corruption(
+            "metadata frame length overruns EOF but a verified frame is present".into(),
+        ));
+    }
+    Ok(extent)
+}
+
+fn frame_crc_valid(frame: &[u8]) -> bool {
+    let (signed, checksum) = frame.split_at(frame.len() - CHECKSUM_BYTES);
+    checksum == crc32c::crc32c(signed).to_be_bytes()
+}
+
+/// Whether `bytes` verify as one complete frame of `kind` whose length field
+/// is replaced by the one that makes it end exactly at the end of `bytes`.
+/// The CRC covers the header and length, so the candidate length is
+/// substituted before it is recomputed.
+fn frame_runs_to_end(bytes: &[u8], kind: u8) -> bool {
+    let Some(length) = bytes
+        .len()
+        .checked_sub(HEADER_BYTES + CHECKSUM_BYTES)
+        .filter(|length| *length <= MAX_PAYLOAD_BYTES)
+    else {
+        return false;
+    };
+    let Ok(length) = u32::try_from(length) else {
+        return false;
+    };
+    let mut candidate = bytes.to_vec();
+    candidate[9..13].copy_from_slice(&length.to_le_bytes());
+    candidate[8] == kind && frame_crc_valid(&candidate)
+}
+
+/// Whether `bytes` contain a complete frame of `kind` with a valid CRC32C. A
+/// candidate whose announced extent does not fit is skipped before any CRC work.
+fn contains_complete_frame(bytes: &[u8], kind: u8) -> bool {
+    bytes
+        .windows(MAGIC.len())
+        .enumerate()
+        .filter(|(_, window)| *window == MAGIC)
+        .any(|(start, _)| {
+            let candidate = &bytes[start..];
+            if candidate.len() < HEADER_BYTES + CHECKSUM_BYTES || candidate[8] != kind {
+                return false;
+            }
+            let mut length = [0_u8; 4];
+            length.copy_from_slice(&candidate[9..13]);
+            let length = u32::from_le_bytes(length) as usize;
+            let Some(extent) = HEADER_BYTES
+                .checked_add(length)
+                .and_then(|end| end.checked_add(CHECKSUM_BYTES))
+            else {
+                return false;
+            };
+            candidate.get(..extent).is_some_and(frame_crc_valid)
+        })
+}
+
+pub fn decode<T: DeserializeOwned>(kind: u8, bytes: &[u8]) -> MidgeResult<T> {
+    let extent = frame_len(bytes)?
+        .ok_or_else(|| MidgeError::Corruption("truncated metadata frame".into()))?;
+    if extent != bytes.len() || bytes[8] != kind {
+        return Err(MidgeError::Corruption(
+            "metadata kind or frame extent mismatch".into(),
+        ));
+    }
+    let payload_end = extent - CHECKSUM_BYTES;
+    let mut checksum = [0_u8; 4];
+    checksum.copy_from_slice(&bytes[payload_end..]);
+    if crc32c::crc32c(&bytes[..payload_end]) != u32::from_be_bytes(checksum) {
+        return Err(MidgeError::Corruption("metadata CRC32C mismatch".into()));
+    }
+    let payload = &bytes[HEADER_BYTES..payload_end];
+    framing::validate(payload)?;
+    // ReadRefReader checks str/bin extents against its remaining slice before
+    // exposing borrowed bytes, without allocating an announced-length buffer.
+    let mut decoder = rmp_serde::Deserializer::from_read_ref(payload);
+    decoder.set_max_depth(64);
+    let value = T::deserialize(&mut decoder)
+        .map_err(|error| MidgeError::Corruption(format!("decode binary metadata: {error}")))?;
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn should_round_trip_binary_manifest_when_bounds_and_sequences_vary(
+            key in proptest::collection::vec(any::<u8>(), 0..4096),
+            sequence in any::<u64>(),
+        ) {
+            // Arrange
+            let mut manifest = crate::metadata::Manifest::default();
+            manifest.files.push(crate::metadata::FileMeta {
+                name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
+                smallest_key: Some(key.clone()),
+                largest_key: Some(key.clone()),
+                largest_seq: Some(sequence),
+                ..Default::default()
+            });
+
+            // Act
+            let encoded = encode(MANIFEST, &manifest).expect("encode manifest");
+            let decoded: crate::metadata::Manifest = decode(MANIFEST, &encoded).expect("decode manifest");
+
+            // Assert
+            prop_assert_eq!(&decoded.files[0].smallest_key, &Some(key));
+            prop_assert_eq!(decoded.files[0].largest_seq, Some(sequence));
+        }
+    }
+
+    #[test]
+    fn should_reject_metadata_frames_when_integrity_fields_are_corrupted() {
+        // Arrange
+        let encoded = encode(MANIFEST, &crate::metadata::Manifest::default()).expect("encode");
+
+        // Act
+        for offset in [0, 8, 9, HEADER_BYTES, encoded.len() - 1] {
+            let mut corrupt = encoded.clone();
+            corrupt[offset] ^= 1;
+            // Assert: no corrupted identity field can produce a manifest.
+            assert!(decode::<crate::metadata::Manifest>(MANIFEST, &corrupt).is_err());
+        }
+        for length in 0..encoded.len() {
+            assert!(decode::<crate::metadata::Manifest>(MANIFEST, &encoded[..length]).is_err());
+        }
+        assert!(decode::<crate::metadata::Manifest>(JOURNAL, &encoded).is_err());
+    }
+
+    #[test]
+    fn should_reject_malformed_metadata_payload_extents_before_allocation() {
+        // Arrange: these small, correctly checksummed frames announce 4 GiB
+        // strings, byte buffers, arrays or maps, or contain two root values.
+        let payloads: &[&[u8]] = &[
+            &[0xdb, 0xff, 0xff, 0xff, 0xff],
+            &[0xc6, 0xff, 0xff, 0xff, 0xff],
+            &[0xdd, 0xff, 0xff, 0xff, 0xff],
+            &[0xdf, 0xff, 0xff, 0xff, 0xff],
+            &[0xc0, 0xc0],
+        ];
+
+        // Act
+        for payload in payloads {
+            let mut encoded = MAGIC.to_vec();
+            encoded.push(MANIFEST);
+            encoded.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+            encoded.extend_from_slice(payload);
+            let checksum = crc32c::crc32c(&encoded);
+            encoded.extend_from_slice(&checksum.to_be_bytes());
+            // Assert: even checksum-valid malformed extents fail before decoding.
+            assert!(matches!(
+                decode::<serde_json::Value>(MANIFEST, &encoded),
+                Err(MidgeError::Corruption(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn should_distinguish_object_checksums_when_valid_metadata_frames_have_equal_length() {
+        // Arrange
+        let first_value = [1_u64];
+        let second_value = [2_u64];
+        // Act
+        let first = encode(MANIFEST, &first_value).expect("encode first frame");
+        let second = encode(MANIFEST, &second_value).expect("encode second frame");
+
+        // Assert: the appended checksum must not make the checksum over the
+        // complete encoded object a constant residue for equal-length frames.
+        assert_eq!(first.len(), second.len());
+        assert_eq!(decode::<Vec<u64>>(MANIFEST, &first).unwrap(), vec![1]);
+        assert_eq!(decode::<Vec<u64>>(MANIFEST, &second).unwrap(), vec![2]);
+        assert_ne!(crc32c::crc32c(&first), crc32c::crc32c(&second));
+    }
+
+    #[test]
+    fn should_reduce_manifest_bytes_when_encoding_twenty_thousand_bounded_files() {
+        // Arrange
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.files = (0..20_000)
+            .map(|ordinal| crate::metadata::FileMeta {
+                name: cntryl_midge_core::cloud_layout::file_name(0, 1, ordinal),
+                level: 1,
+                size_bytes: 32 * 1024 * 1024,
+                smallest_key: Some(format!("key/{ordinal:020}/a").into_bytes()),
+                largest_key: Some(format!("key/{ordinal:020}/z").into_bytes()),
+                smallest_seq: Some(ordinal),
+                largest_seq: Some(ordinal + 10),
+                key_bounds_complete: true,
+                ..Default::default()
+            })
+            .collect();
+
+        // Act
+        let json = serde_json::to_vec(&manifest).expect("encode prior JSON representation");
+        let binary = encode(MANIFEST, &manifest).expect("encode binary manifest");
+        let decoded: crate::metadata::Manifest =
+            decode(MANIFEST, &binary).expect("decode manifest");
+
+        // Assert: record exact footprint evidence when qualification executes.
+        assert_eq!(decoded.files.len(), 20_000);
+        assert!(binary.len() < json.len());
+        println!(
+            "manifest_20000_files json_bytes={} binary_bytes={}",
+            json.len(),
+            binary.len()
+        );
+    }
+}

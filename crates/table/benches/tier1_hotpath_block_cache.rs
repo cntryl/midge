@@ -2,9 +2,6 @@
 //!
 //! Covers single lookups, batch hit/miss probes, and bounded insert patterns.
 
-#[path = "table_bench_support.rs"]
-mod stress_config;
-
 use bytes::Bytes;
 use cntryl_midge_table::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
@@ -62,20 +59,16 @@ fn get_hot_single_4k(ctx: &mut StressContext) {
     assert!(cache.get(&hot_key).is_some());
     ctx.parameter("block_size", 4096);
     ctx.parameter("batch_size", HOT_GET_BATCH_SIZE);
-    stress_config::mark_validated_micro(ctx, "cache_block_hit");
+    ctx.parameter("logical_unit", "cache_block_hit");
+    ctx.metadata("validated_micro", "true");
 
-    stress_config::measure_hot_path_batch(
-        ctx,
-        "get_hot_single_4k",
-        HOT_GET_BATCH_SIZE as u64,
-        || {
-            let mut hits = 0usize;
-            for _ in 0..HOT_GET_BATCH_SIZE {
-                hits += usize::from(cache.get(black_box(&hot_key)).is_some());
-            }
-            black_box(hits);
-        },
-    );
+    let _completed = ctx.measure_batch("get_hot_single_4k", HOT_GET_BATCH_SIZE as u64, || {
+        let mut hits = 0usize;
+        for _ in 0..HOT_GET_BATCH_SIZE {
+            hits += usize::from(cache.get(black_box(&hot_key)).is_some());
+        }
+        black_box(hits);
+    });
 }
 
 #[stress(
@@ -104,8 +97,7 @@ fn get_batch_hit_1000(ctx: &mut StressContext) {
     ctx.parameter("batch_per_logical_operation", 1);
     ctx.parameter("lookups_per_batch", num_blocks);
 
-    stress_config::measure_hot_path_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "get_batch_hit_1000",
         usize_to_u64(CACHE_BATCH_LOOKUP_REPEATS),
         || {
@@ -148,8 +140,7 @@ fn get_batch_miss_1000(ctx: &mut StressContext) {
     ctx.parameter("batch_per_logical_operation", 1);
     ctx.parameter("lookups_per_batch", num_blocks);
 
-    stress_config::measure_hot_path_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "get_batch_miss_1000",
         usize_to_u64(CACHE_BATCH_LOOKUP_REPEATS),
         || {
@@ -183,8 +174,7 @@ fn insert_batch_100(ctx: &mut StressContext) {
     ctx.parameter("batch_per_logical_operation", 1);
     ctx.parameter("inserts_per_batch", num_blocks);
 
-    stress_config::measure_hot_path_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "insert_batch_100",
         usize_to_u64(INSERT_BATCH_ROUNDS),
         || {

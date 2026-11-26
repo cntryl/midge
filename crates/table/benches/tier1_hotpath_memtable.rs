@@ -2,9 +2,6 @@
 //!
 //! Covers insert, lookup, delete, and size accounting on the in-memory memtable.
 
-#[path = "table_bench_support.rs"]
-mod stress_config;
-
 use cntryl_midge_table::memtable::SkipListMemtable;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
@@ -55,7 +52,8 @@ fn run_put_single(ctx: &mut StressContext, scenario: &'static str, value_size: u
     ctx.parameter("scenario", scenario);
     ctx.parameter("value_size", value_size);
     ctx.parameter("batch_size", PUT_SINGLE_BATCH_SIZE);
-    stress_config::mark_validated_micro(ctx, "memtable_put");
+    ctx.parameter("logical_unit", "memtable_put");
+    ctx.metadata("validated_micro", "true");
 
     ctx.benchmark(scenario)
         .measure_batch(PUT_SINGLE_BATCH_OPS, || {
@@ -92,28 +90,23 @@ fn put_batch_100(ctx: &mut StressContext) {
     ctx.parameter("batch_per_logical_operation", 1);
     ctx.parameter("items_per_batch", keys.len());
 
-    stress_config::measure_hot_path_batch(
-        ctx,
-        "put_batch_100",
-        usize_to_u64(PUT_BATCH_ROUNDS),
-        || {
-            let mut inserted = 0usize;
-            for _ in 0..PUT_BATCH_ROUNDS {
-                let memtable = SkipListMemtable::new();
-                for (sequence, key) in keys.iter().enumerate() {
-                    let _ = memtable.put_with_seq(
-                        black_box(key.clone()),
-                        black_box(value.clone()),
-                        sequence as u64 + 1,
-                        None,
-                    );
-                    inserted = inserted.wrapping_add(1);
-                }
-                black_box(memtable);
+    let _completed = ctx.measure_batch("put_batch_100", usize_to_u64(PUT_BATCH_ROUNDS), || {
+        let mut inserted = 0usize;
+        for _ in 0..PUT_BATCH_ROUNDS {
+            let memtable = SkipListMemtable::new();
+            for (sequence, key) in keys.iter().enumerate() {
+                let _ = memtable.put_with_seq(
+                    black_box(key.clone()),
+                    black_box(value.clone()),
+                    sequence as u64 + 1,
+                    None,
+                );
+                inserted = inserted.wrapping_add(1);
             }
-            black_box(inserted);
-        },
-    );
+            black_box(memtable);
+        }
+        black_box(inserted);
+    });
 }
 
 const TOMBSTONE_LOOKUP_BATCH_SIZE: usize = 4096;
@@ -132,7 +125,8 @@ fn measure_covering_tombstone_lookup(ctx: &mut StressContext, scenario: &str, to
     let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
     ctx.parameter("range_tombstones", tombstones);
     ctx.parameter("lookup_batch_size", TOMBSTONE_LOOKUP_BATCH_SIZE);
-    stress_config::mark_validated_micro(ctx, "memtable_covering_tombstone_lookup");
+    ctx.parameter("logical_unit", "memtable_covering_tombstone_lookup");
+    ctx.metadata("validated_micro", "true");
 
     ctx.benchmark(scenario)
         .measure_batch(TOMBSTONE_LOOKUP_BATCH_OPS, || {
@@ -177,7 +171,8 @@ fn get_hit(ctx: &mut StressContext) {
     let hit_keys: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
     ctx.parameter("lookup_batch_size", LOOKUP_HIT_BATCH_SIZE);
     ctx.parameter("lookup_key_count", hit_keys.len());
-    stress_config::mark_validated_micro(ctx, "memtable_get_hit");
+    ctx.parameter("logical_unit", "memtable_get_hit");
+    ctx.metadata("validated_micro", "true");
 
     ctx.benchmark("get_hit")
         .measure_batch(LOOKUP_HIT_BATCH_OPS, || {
@@ -214,8 +209,10 @@ fn get_miss(ctx: &mut StressContext) {
         .collect();
     ctx.parameter("lookup_batch_size", LOOKUP_MISS_BATCH_SIZE);
     ctx.parameter("lookup_key_count", miss_keys.len());
-    stress_config::mark_validated_micro(ctx, "memtable_get_miss");
-    stress_config::mark_local_rsd_diagnostic(ctx);
+    ctx.parameter("logical_unit", "memtable_get_miss");
+    ctx.metadata("validated_micro", "true");
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     ctx.benchmark("get_miss")
         .measure_batch(LOOKUP_MISS_BATCH_OPS, || {
@@ -249,7 +246,7 @@ fn delete(ctx: &mut StressContext) {
     ctx.parameter("batch_size", DELETE_BATCH_SIZE);
     ctx.parameter("logical_unit", "memtable_delete");
 
-    stress_config::measure_hot_path_batch(ctx, "delete", usize_to_u64(DELETE_BATCH_SIZE), || {
+    let _completed = ctx.measure_batch("delete", usize_to_u64(DELETE_BATCH_SIZE), || {
         let mut deleted = 0usize;
         for _ in 0..DELETE_BATCH_SIZE {
             let idx = key_index % keys.len();
@@ -284,8 +281,7 @@ fn size_bytes(ctx: &mut StressContext) {
     ctx.parameter("logical_unit", "memtable_size_bytes_batch");
     ctx.parameter("batch_per_logical_operation", 1);
 
-    stress_config::measure_hot_path_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "size_bytes",
         usize_to_u64(SIZE_BYTES_BATCH_SIZE / SIZE_BYTES_PER_LOGICAL_OPERATION),
         || {

@@ -24,9 +24,9 @@ pub struct MockFs {
     /// Directories created explicitly. A directory also exists implicitly
     /// while some file lies below it, as on a real filesystem.
     directories: Arc<Mutex<std::collections::BTreeSet<String>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     sync_dir_calls: Arc<Mutex<Vec<(FsPath, Durability)>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fail_sync_dir: Arc<AtomicBool>,
 }
 
@@ -56,19 +56,19 @@ impl MockFs {
     }
 
     /// Get file contents for testing
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn get_file(&self, path: &str) -> Option<Vec<u8>> {
         self.files.lock().get(path).map(|f| f.data.clone())
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_sync_dir_failure(&self, fail: bool) {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn set_sync_dir_failure(&self, fail: bool) {
         self.fail_sync_dir.store(fail, Ordering::Relaxed);
     }
 
-    #[cfg(test)]
-    pub(crate) fn sync_dir_calls(&self) -> Vec<(FsPath, Durability)> {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn sync_dir_calls(&self) -> Vec<(FsPath, Durability)> {
         self.sync_dir_calls.lock().clone()
     }
 }
@@ -253,7 +253,7 @@ impl Fs for MockFs {
     }
 
     fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "internal-testing"))]
         {
             self.sync_dir_calls.lock().push((path.clone(), dur));
             if self.fail_sync_dir.load(Ordering::Relaxed) {

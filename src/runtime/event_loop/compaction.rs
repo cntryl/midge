@@ -2,7 +2,6 @@ use super::cloud_maintenance::MaintenanceTask;
 use super::{
     EventLoop, HandleOutcome, BACKGROUND_COMPACTION_CHECK_INTERVAL, STARTUP_CLOUD_MAINTENANCE_DELAY,
 };
-use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::actors::compaction::publication::{
     CompactionPublicationToken, CompactionPublishCompletion, CompactionPublishPhase,
     CompactionPublishTask,
@@ -10,6 +9,7 @@ use crate::runtime::actors::compaction::publication::{
 use crate::runtime::actors::compaction::PreparedCompactionOutput;
 #[cfg(test)]
 use crate::runtime::CompactionPlan;
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 mod moves;
 use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
@@ -94,7 +94,9 @@ impl EventLoop {
         Ok(plan)
     }
 
-    pub(super) fn available_compaction_memory(&self) -> cntryl_midge_core::common::MidgeResult<usize> {
+    pub(super) fn available_compaction_memory(
+        &self,
+    ) -> cntryl_midge_core::common::MidgeResult<usize> {
         if self
             .actors
             .cloud_coordinator
@@ -287,14 +289,17 @@ impl EventLoop {
         // pressure recovery at startup, after flush, and during live maintenance.
         let background_enabled = self.state.compaction_enabled();
         if !background_enabled && !manual {
-            cntryl_midge_core::failpoints::fail_point!("midge::compaction::defer_pressure_recovery", |_| {
-                // Recheck held fixtures promptly when released. This hook and
-                // its scheduling override are absent from ordinary builds.
-                self.pipeline
-                    .background_compaction_schedule
-                    .defer_for(Duration::from_millis(10));
-                Ok(false)
-            });
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::compaction::defer_pressure_recovery",
+                |_| {
+                    // Recheck held fixtures promptly when released. This hook and
+                    // its scheduling override are absent from ordinary builds.
+                    self.pipeline
+                        .background_compaction_schedule
+                        .defer_for(Duration::from_millis(10));
+                    Ok(false)
+                }
+            );
         }
         if !background_enabled && !manual && !self.state.has_any_critical_l0_debt() {
             return Ok(false);
@@ -448,7 +453,7 @@ pub(crate) struct PendingCompactionPublication {
     manual_deadline: Option<OperationDeadline>,
     token: CompactionPublicationToken,
     outputs: Vec<PreparedCompactionOutput>,
-    added: Vec<crate::runtime::FileMeta>,
+    added: Vec<cntryl_midge_durability::metadata::intent::FileMeta>,
     /// Outputs of an earlier intent for the same inputs. They are deleted only
     /// after the worker has mirrored the replacement intent.
     superseded_outputs: Vec<String>,
@@ -847,7 +852,7 @@ impl CompactionCoordinator {
     ) -> cntryl_midge_core::common::MidgeResult<(
         u64,
         Vec<PreparedCompactionOutput>,
-        Vec<crate::runtime::FileMeta>,
+        Vec<cntryl_midge_durability::metadata::intent::FileMeta>,
     )> {
         event_loop
             .actors
@@ -926,14 +931,15 @@ impl CompactionCoordinator {
     fn validate_repair_replacement_level(
         event_loop: &EventLoop,
         input_ssts: &[String],
-        added: &[crate::runtime::FileMeta],
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
         cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
     ) -> cntryl_midge_core::common::MidgeResult<()> {
         let removed: std::collections::HashSet<_> = input_ssts.iter().map(String::as_str).collect();
         let added_names: std::collections::HashSet<_> =
             added.iter().map(|file| file.name.as_str()).collect();
-        let added_metadata: Vec<cntryl_midge_durability::metadata::FileMeta> = added.iter().map(Into::into).collect();
+        let added_metadata: Vec<cntryl_midge_durability::metadata::FileMeta> =
+            added.iter().map(Into::into).collect();
         let level: Vec<_> = event_loop
             .state
             .manifest
@@ -964,7 +970,7 @@ impl CompactionCoordinator {
     fn validate_fragment_replacement(
         event_loop: &EventLoop,
         input_ssts: &[String],
-        added: &[crate::runtime::FileMeta],
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
         cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
     ) -> cntryl_midge_core::common::MidgeResult<()> {
@@ -1028,11 +1034,13 @@ impl CompactionCoordinator {
         let mut generation = None;
         for (expected_partition, name) in output_ssts.iter().enumerate() {
             let (name_cf, name_level, name_generation, name_partition) =
-                cntryl_midge_core::cloud_layout::parse_compaction_file_name(name).ok_or_else(|| {
-                    cntryl_midge_core::common::MidgeError::Corruption(format!(
-                        "compaction output has non-canonical partition name: {name}"
-                    ))
-                })?;
+                cntryl_midge_core::cloud_layout::parse_compaction_file_name(name).ok_or_else(
+                    || {
+                        cntryl_midge_core::common::MidgeError::Corruption(format!(
+                            "compaction output has non-canonical partition name: {name}"
+                        ))
+                    },
+                )?;
             let expected_partition = u32::try_from(expected_partition).map_err(|_| {
                 cntryl_midge_core::common::MidgeError::ResourceLimit(
                     "compaction output count exceeds partition identity capacity".to_string(),
@@ -1057,7 +1065,10 @@ impl CompactionCoordinator {
         target_level: u32,
         output_ssts: &[String],
         outputs: &[PreparedCompactionOutput],
-    ) -> Result<Vec<crate::runtime::FileMeta>, cntryl_midge_core::common::MidgeError> {
+    ) -> Result<
+        Vec<cntryl_midge_durability::metadata::intent::FileMeta>,
+        cntryl_midge_core::common::MidgeError,
+    > {
         if outputs.len() != output_ssts.len() {
             return Err(cntryl_midge_core::common::MidgeError::Corruption(
                 "compaction publication output metadata count changed".to_string(),
@@ -1427,16 +1438,20 @@ impl CompactionCoordinator {
             event_loop.state.transition_compaction_publication_intent(
                 &pending.token.input_ssts,
                 &pending.token.output_ssts,
-                crate::runtime::PublicationPhase::ManifestPublished,
+                cntryl_midge_durability::metadata::intent::PublicationPhase::ManifestPublished,
             )?;
         } else {
             event_loop.state.update_sst_move_intent(
                 &pending.move_sources,
                 pending.token.target_level,
-                Some(crate::runtime::PublicationPhase::ManifestPublished),
+                Some(
+                    cntryl_midge_durability::metadata::intent::PublicationPhase::ManifestPublished,
+                ),
             )?;
         }
-        cntryl_midge_core::failpoints::fail_point!("slice6::after_compaction_update_before_manifest_persist");
+        cntryl_midge_core::failpoints::fail_point!(
+            "slice6::after_compaction_update_before_manifest_persist"
+        );
         event_loop.check_lease_health()?;
         Self::check_manual_deadline(pending.manual_deadline)?;
         Self::submit_publication_phase(event_loop, CompactionPublishPhase::ManifestPublished)
@@ -1721,7 +1736,10 @@ impl CompactionCoordinator {
         event_loop.wake_write_stall_waiters();
     }
 
-    fn finish_failed_publication(event_loop: &mut EventLoop, error: &cntryl_midge_core::common::MidgeError) {
+    fn finish_failed_publication(
+        event_loop: &mut EventLoop,
+        error: &cntryl_midge_core::common::MidgeError,
+    ) {
         // Settling releases the gate here; nothing below reads it before the
         // deferred messages are restored.
         let Some(pending) = event_loop
@@ -1805,7 +1823,10 @@ impl CompactionCoordinator {
     /// The manifest is published, inputs were handed to GC, and the local
     /// intent is cleared; only its mirror failed. Everything is settled except
     /// the remote record, so degrade instead of re-running the failure settle.
-    fn finish_failed_intent_clear(event_loop: &mut EventLoop, error: &cntryl_midge_core::common::MidgeError) {
+    fn finish_failed_intent_clear(
+        event_loop: &mut EventLoop,
+        error: &cntryl_midge_core::common::MidgeError,
+    ) {
         Self::record_compaction_failure(event_loop);
         tracing::error!(
             ?error,

@@ -1,0 +1,974 @@
+//! Lease heartbeat and monitoring.
+//!
+//! Manages periodic lease renewal in a background thread.
+//! Monitors lease health and triggers shutdown if renewal fails.
+
+use super::traits::{LeaseError, LeaseValidityState, PrimaryLease};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+#[cfg(test)]
+std::thread_local! {
+    static WATCHDOG_SNAPSHOT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Heartbeat manager for lease renewal.
+///
+/// Runs a background thread that periodically renews the lease.
+/// If renewal fails, sets a flag that the engine can monitor.
+pub struct LeaseHeartbeat {
+    lease: Arc<dyn PrimaryLease>,
+    validity: Option<Arc<super::traits::LeaseValidity>>,
+    running: Arc<AtomicBool>,
+    healthy: Arc<AtomicBool>,
+    renewal_handle: Option<JoinHandle<()>>,
+    watchdog_handle: Option<JoinHandle<()>>,
+    spawn_failed: bool,
+    loss_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    loss_notified: Arc<AtomicBool>,
+}
+
+fn mark_unhealthy(
+    healthy: &AtomicBool,
+    loss_notified: &AtomicBool,
+    loss_hook: Option<&(dyn Fn() + Send + Sync)>,
+) {
+    healthy.store(false, Ordering::Release);
+    if loss_notified
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        if let Some(hook) = loss_hook {
+            hook();
+        }
+    }
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(ttl_secs = ttl.as_secs()))]
+fn run_renewal_worker(
+    lease: &dyn PrimaryLease,
+    validity: Option<&super::traits::LeaseValidity>,
+    running: &AtomicBool,
+    healthy: &AtomicBool,
+    ttl: Duration,
+    loss_notified: &AtomicBool,
+    loss_hook: Option<&(dyn Fn() + Send + Sync)>,
+) {
+    let renewal_interval = ttl / 3;
+    tracing::info!(
+        ttl_secs = ttl.as_secs(),
+        renewal_interval_secs = renewal_interval.as_secs(),
+        "lease heartbeat started"
+    );
+
+    while running.load(Ordering::Acquire) {
+        if let Some(validity) = validity {
+            let observed = validity.snapshot();
+            match observed {
+                LeaseValidityState::Inactive => {
+                    let _ = validity.wait_for_change(observed, renewal_interval, running);
+                    continue;
+                }
+                LeaseValidityState::Fenced { .. } => {
+                    mark_unhealthy(healthy, loss_notified, loss_hook);
+                    break;
+                }
+                LeaseValidityState::Active { valid_until, .. } => {
+                    let renewal_at = valid_until
+                        .checked_sub(ttl.saturating_mul(2) / 3)
+                        .unwrap_or(valid_until);
+                    let wait = renewal_at.saturating_duration_since(std::time::Instant::now());
+                    if !wait.is_zero()
+                        && validity.wait_for_change(observed, wait, running) != observed
+                    {
+                        continue;
+                    }
+                }
+            }
+        } else {
+            thread::park_timeout(renewal_interval);
+        }
+
+        if !running.load(Ordering::Acquire) {
+            break;
+        }
+        match lease.renew() {
+            Ok(()) => {
+                if validity.is_some_and(|validity| {
+                    matches!(validity.snapshot(), LeaseValidityState::Fenced { .. })
+                }) {
+                    mark_unhealthy(healthy, loss_notified, loss_hook);
+                    break;
+                }
+                tracing::trace!("lease renewed successfully");
+            }
+            Err(error)
+                if matches!(
+                    error,
+                    LeaseError::IoError(_) | LeaseError::Indeterminate(_) | LeaseError::Timeout(_)
+                ) && validity.is_some_and(|validity| {
+                    matches!(validity.snapshot(), LeaseValidityState::Active { valid_until, .. }
+                            if valid_until > std::time::Instant::now())
+                }) =>
+            {
+                // The provider could not answer, but this writer's lease is
+                // still valid. Retry within the remaining validity; the lease
+                // is fenced only if it runs out or ownership is actually lost.
+                tracing::warn!(%error, "lease renewal failed transiently; retrying");
+                let pause = (ttl / 20).clamp(Duration::from_millis(10), Duration::from_secs(1));
+                if let Some(validity) = validity {
+                    let observed = validity.snapshot();
+                    let _ = validity.wait_for_change(observed, pause, running);
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "lease renewal failed; marking unhealthy");
+                mark_unhealthy(healthy, loss_notified, loss_hook);
+                if let Some(validity) = validity {
+                    if let LeaseValidityState::Active { epoch, .. } = validity.snapshot() {
+                        validity.fence(epoch);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    tracing::info!("lease heartbeat stopped");
+}
+
+fn run_watchdog_worker(
+    validity: &super::traits::LeaseValidity,
+    running: &AtomicBool,
+    healthy: &AtomicBool,
+    loss_notified: &AtomicBool,
+    loss_hook: Option<&(dyn Fn() + Send + Sync)>,
+) {
+    while running.load(Ordering::Acquire) {
+        let observed = validity.snapshot();
+        #[cfg(test)]
+        WATCHDOG_SNAPSHOT_HOOK.with(|hook| {
+            let hook = hook.borrow_mut().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+        match observed {
+            LeaseValidityState::Inactive => {
+                let _ = validity.wait_for_change(observed, Duration::from_secs(30), running);
+            }
+            LeaseValidityState::Fenced { .. } => {
+                mark_unhealthy(healthy, loss_notified, loss_hook);
+                break;
+            }
+            LeaseValidityState::Active { epoch, valid_until } => {
+                let wait = valid_until.saturating_duration_since(std::time::Instant::now());
+                if wait.is_zero() {
+                    if validity.fence_if_expired(epoch) {
+                        mark_unhealthy(healthy, loss_notified, loss_hook);
+                        break;
+                    }
+                    continue;
+                }
+                let current = validity.wait_for_change(observed, wait, running);
+                if current == observed
+                    && std::time::Instant::now() >= valid_until
+                    && validity.fence_if_expired(epoch)
+                {
+                    mark_unhealthy(healthy, loss_notified, loss_hook);
+                    break;
+                }
+            }
+        }
+    }
+    tracing::info!("lease expiry watchdog stopped");
+}
+
+impl LeaseHeartbeat {
+    /// Create a new heartbeat manager.
+    ///
+    /// Does not start the heartbeat loop automatically.
+    /// Call `start()` to begin renewal.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn new(lease: Arc<dyn PrimaryLease>) -> Self {
+        Self::new_with_healthy_and_validity(lease, Arc::new(AtomicBool::new(true)), None)
+    }
+
+    #[cfg(test)]
+    fn new_with_validity(
+        lease: Arc<dyn PrimaryLease>,
+        validity: Arc<super::traits::LeaseValidity>,
+    ) -> Self {
+        Self::new_with_healthy_and_validity(lease, Arc::new(AtomicBool::new(true)), Some(validity))
+    }
+
+    pub fn new_with_healthy_and_validity(
+        lease: Arc<dyn PrimaryLease>,
+        healthy: Arc<AtomicBool>,
+        validity: Option<Arc<super::traits::LeaseValidity>>,
+    ) -> Self {
+        Self {
+            lease,
+            validity,
+            running: Arc::new(AtomicBool::new(false)),
+            healthy,
+            renewal_handle: None,
+            watchdog_handle: None,
+            spawn_failed: false,
+            loss_hook: None,
+            loss_notified: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn set_loss_hook(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.loss_hook = Some(hook);
+    }
+
+    /// Return a shared reference to the healthy flag.
+    /// Start the heartbeat loop.
+    ///
+    /// Spawns a background thread that renews the lease at intervals
+    /// of `ttl / 3` (conservative to handle clock skew and latency).
+    pub fn start(&mut self) {
+        if self.running.load(Ordering::Acquire) {
+            tracing::warn!("lease heartbeat already running");
+            return;
+        }
+
+        let lease = Arc::clone(&self.lease);
+        let running = Arc::clone(&self.running);
+        let healthy = Arc::clone(&self.healthy);
+        let validity = self.validity.as_ref().map(Arc::clone);
+
+        running.store(true, Ordering::Release);
+        healthy.store(true, Ordering::Release);
+        self.loss_notified.store(false, Ordering::Release);
+
+        let ttl = lease.ttl();
+
+        let renewal_validity = validity.as_ref().map(Arc::clone);
+        let renewal_loss_notified = Arc::clone(&self.loss_notified);
+        let renewal_loss_hook = self.loss_hook.as_ref().map(Arc::clone);
+        let handle = if cntryl_midge_core::failpoints::is_active(
+            "midge::lease::inject_renewal_thread_spawn_failure",
+        ) {
+            Err(std::io::Error::other(
+                "failpoint: lease renewal thread spawn failed",
+            ))
+        } else {
+            thread::Builder::new()
+                .name("midge-lease-renewal".to_string())
+                .spawn(move || {
+                    run_renewal_worker(
+                        lease.as_ref(),
+                        renewal_validity.as_deref(),
+                        &running,
+                        &healthy,
+                        ttl,
+                        &renewal_loss_notified,
+                        renewal_loss_hook.as_deref(),
+                    );
+                })
+        };
+
+        match handle {
+            Ok(h) => {
+                self.renewal_handle = Some(h);
+                self.spawn_failed = false;
+            }
+            Err(e) => {
+                tracing::error!("Failed to spawn lease heartbeat thread: {}", e);
+                self.healthy.store(false, Ordering::Release);
+                self.spawn_failed = true;
+                self.running.store(false, Ordering::Release);
+                return;
+            }
+        }
+
+        let Some(validity) = validity else {
+            return;
+        };
+        let running = Arc::clone(&self.running);
+        let healthy = Arc::clone(&self.healthy);
+        let watchdog_validity = Arc::clone(&validity);
+        let watchdog_loss_notified = Arc::clone(&self.loss_notified);
+        let watchdog_loss_hook = self.loss_hook.as_ref().map(Arc::clone);
+        match thread::Builder::new()
+            .name("midge-lease-watchdog".to_string())
+            .spawn(move || {
+                run_watchdog_worker(
+                    &watchdog_validity,
+                    &running,
+                    &healthy,
+                    &watchdog_loss_notified,
+                    watchdog_loss_hook.as_deref(),
+                );
+            }) {
+            Ok(handle) => self.watchdog_handle = Some(handle),
+            Err(error) => {
+                tracing::error!(%error, "failed to spawn lease expiry watchdog");
+                self.healthy.store(false, Ordering::Release);
+                self.running.store(false, Ordering::Release);
+                validity.notify_all();
+                self.spawn_failed = true;
+            }
+        }
+    }
+
+    /// Stop the heartbeat loop.
+    ///
+    /// Waits for the background thread to exit.
+    pub fn stop(&mut self) {
+        if !self.running.load(Ordering::Acquire)
+            && self.renewal_handle.is_none()
+            && self.watchdog_handle.is_none()
+        {
+            return;
+        }
+
+        tracing::info!("stopping lease heartbeat");
+        self.running.store(false, Ordering::Release);
+        if let Some(validity) = self.validity.as_ref() {
+            validity.notify_all();
+        }
+
+        if let Some(handle) = self.renewal_handle.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.watchdog_handle.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+    }
+
+    /// Check if the lease is healthy (renewal succeeding).
+    ///
+    /// Returns `false` if renewal has failed, indicating the instance
+    /// should stop accepting writes.
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn validity_for_test(&self) -> Option<Arc<super::traits::LeaseValidity>> {
+        self.validity.clone()
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn healthy_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.healthy)
+    }
+}
+
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lease::traits::{LeaseError, LeaseGuard, PrimaryLease};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    struct BlockingRenewalLease {
+        validity: Arc<crate::lease::traits::LeaseValidity>,
+        ttl: Duration,
+        renewal: std::sync::Mutex<(bool, bool, bool)>,
+        changed: std::sync::Condvar,
+    }
+
+    impl BlockingRenewalLease {
+        fn new(ttl: Duration) -> Self {
+            Self {
+                validity: Arc::new(crate::lease::traits::LeaseValidity::new()),
+                ttl,
+                renewal: std::sync::Mutex::new((false, false, false)),
+                changed: std::sync::Condvar::new(),
+            }
+        }
+
+        fn wait_until_renewal_started(&self, timeout: Duration) -> bool {
+            let state = self
+                .renewal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(state, timeout, |state| !state.0)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.0
+        }
+
+        fn allow_renewal(&self) {
+            let mut state = self
+                .renewal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.1 = true;
+            self.changed.notify_all();
+        }
+
+        fn wait_until_renewal_completed(&self, timeout: Duration) -> bool {
+            let state = self
+                .renewal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(state, timeout, |state| !state.2)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.2
+        }
+    }
+
+    impl PrimaryLease for BlockingRenewalLease {
+        fn try_acquire(self: Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+            self.validity
+                .activate(1, std::time::Instant::now() + self.ttl)?;
+            Ok(LeaseGuard::token())
+        }
+
+        fn renew(&self) -> Result<(), LeaseError> {
+            let candidate_until = std::time::Instant::now() + self.ttl;
+            let mut state = self
+                .renewal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.0 = true;
+            self.changed.notify_all();
+            state = self
+                .changed
+                .wait_while(state, |state| !state.1)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(state);
+            let result = self.validity.advance(1, candidate_until);
+            let mut state = self
+                .renewal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.2 = true;
+            self.changed.notify_all();
+            result
+        }
+
+        fn release(&self) -> Result<(), LeaseError> {
+            self.validity.deactivate(1);
+            Ok(())
+        }
+
+        fn ttl(&self) -> Duration {
+            self.ttl
+        }
+
+        fn holder_id(&self) -> String {
+            "blocking-renewal".to_string()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
+        }
+    }
+
+    struct AdvancingLease {
+        validity: Arc<crate::lease::traits::LeaseValidity>,
+        ttl: Duration,
+        renewals: AtomicUsize,
+    }
+
+    impl PrimaryLease for AdvancingLease {
+        fn try_acquire(self: Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+            self.validity
+                .activate(1, std::time::Instant::now() + self.ttl)?;
+            Ok(LeaseGuard::token())
+        }
+
+        fn renew(&self) -> Result<(), LeaseError> {
+            let valid_until = std::time::Instant::now() + self.ttl;
+            self.validity.advance(1, valid_until)?;
+            self.renewals.fetch_add(1, Ordering::Release);
+            Ok(())
+        }
+
+        fn release(&self) -> Result<(), LeaseError> {
+            self.validity.deactivate(1);
+            Ok(())
+        }
+
+        fn ttl(&self) -> Duration {
+            self.ttl
+        }
+
+        fn holder_id(&self) -> String {
+            "advancing".to_string()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
+        }
+    }
+
+    struct MockLease {
+        renewal_count: Arc<AtomicUsize>,
+        should_fail: Arc<AtomicBool>,
+    }
+
+    impl MockLease {
+        fn new() -> Self {
+            Self {
+                renewal_count: Arc::new(AtomicUsize::new(0)),
+                should_fail: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn get_renewal_count(&self) -> usize {
+            self.renewal_count.load(Ordering::Acquire)
+        }
+
+        fn set_should_fail(&self, fail: bool) {
+            self.should_fail.store(fail, Ordering::Release);
+        }
+    }
+
+    impl PrimaryLease for MockLease {
+        fn try_acquire(self: std::sync::Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+            // Token-style guard for the mock (no-op on Drop)
+            Ok(LeaseGuard::token())
+        }
+
+        fn renew(&self) -> Result<(), LeaseError> {
+            if self.should_fail.load(Ordering::Acquire) {
+                return Err(LeaseError::RenewalFailed("mock failure".to_string()));
+            }
+            self.renewal_count.fetch_add(1, Ordering::Release);
+            Ok(())
+        }
+
+        fn release(&self) -> Result<(), LeaseError> {
+            Ok(())
+        }
+
+        fn ttl(&self) -> Duration {
+            Duration::from_millis(300) // Short TTL for fast tests
+        }
+
+        fn holder_id(&self) -> String {
+            "mock".to_string()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
+        }
+    }
+
+    #[test]
+    fn should_renew_lease_periodically_when_healthy() {
+        // Arrange
+        let mock = Arc::new(MockLease::new());
+        let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
+
+        // Act
+        heartbeat.start();
+
+        // Wait up to a reasonable timeout for several renewals to happen.
+        // Using a loop with a timeout reduces flakiness on slower or busy runners.
+        let deadline = std::time::Instant::now() + mock.ttl() * 5;
+        while mock.get_renewal_count() < 3 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        heartbeat.stop();
+
+        let renewal_count = mock.get_renewal_count();
+
+        let is_healthy = heartbeat.is_healthy();
+
+        // Assert
+        assert!(
+            renewal_count >= 3,
+            "expected at least 3 renewals within timeout, got {renewal_count}"
+        );
+        assert!(is_healthy);
+    }
+
+    struct FlakyRenewalLease {
+        validity: Arc<crate::lease::traits::LeaseValidity>,
+        ttl: Duration,
+        renew_calls: AtomicUsize,
+    }
+
+    impl PrimaryLease for FlakyRenewalLease {
+        fn try_acquire(self: Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+            self.validity
+                .activate(1, std::time::Instant::now() + self.ttl)?;
+            Ok(LeaseGuard::token())
+        }
+
+        fn renew(&self) -> Result<(), LeaseError> {
+            if self.renew_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(LeaseError::IoError("provider read timed out".into()));
+            }
+            self.validity
+                .advance(1, std::time::Instant::now() + self.ttl)
+        }
+
+        fn release(&self) -> Result<(), LeaseError> {
+            self.validity.deactivate(1);
+            Ok(())
+        }
+
+        fn ttl(&self) -> Duration {
+            self.ttl
+        }
+
+        fn holder_id(&self) -> String {
+            "flaky-renewal".to_string()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
+        }
+    }
+
+    #[test]
+    fn should_retry_lease_renewal_when_first_attempt_fails_transiently() {
+        // Arrange: one slow or failed provider call must not fence a writer
+        // whose lease is still valid for most of its TTL.
+        let lease = Arc::new(FlakyRenewalLease {
+            validity: Arc::new(crate::lease::traits::LeaseValidity::new()),
+            ttl: Duration::from_millis(600),
+            renew_calls: AtomicUsize::new(0),
+        });
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire");
+        let mut heartbeat = LeaseHeartbeat::new_with_healthy_and_validity(
+            lease.clone() as Arc<dyn PrimaryLease>,
+            Arc::new(AtomicBool::new(true)),
+            Some(Arc::clone(&lease.validity)),
+        );
+
+        // Act
+        heartbeat.start();
+        std::thread::sleep(Duration::from_secs(1));
+        let healthy = heartbeat.is_healthy();
+        heartbeat.stop();
+
+        // Assert
+        assert!(
+            healthy,
+            "a transient renewal failure must be retried, not fenced"
+        );
+        assert!(lease.renew_calls.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[test]
+    fn should_mark_heartbeat_unhealthy_given_renewal_failure_when_running() {
+        // Arrange
+        let mock = Arc::new(MockLease::new());
+        let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
+
+        // Act
+        heartbeat.start();
+        std::thread::sleep(Duration::from_millis(200)); // Let it succeed once
+
+        // Trigger failure
+        mock.set_should_fail(true);
+
+        // Wait up to a timeout for unhealthy state to be set.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while heartbeat.is_healthy() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let is_healthy = heartbeat.is_healthy();
+
+        // Assert
+
+        assert!(
+            !is_healthy,
+            "expected heartbeat to be unhealthy after renewal failure"
+        );
+        heartbeat.stop();
+    }
+
+    #[test]
+    fn should_notify_lease_loss_exactly_once_given_repeated_unhealthy_observation() {
+        // Arrange
+        let mock = Arc::new(MockLease::new());
+        mock.set_should_fail(true);
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let hook_notifications = Arc::clone(&notifications);
+        let mut heartbeat = LeaseHeartbeat::new(mock as Arc<dyn PrimaryLease>);
+        heartbeat.set_loss_hook(Arc::new(move || {
+            hook_notifications.fetch_add(1, Ordering::AcqRel);
+        }));
+
+        // Act
+        heartbeat.start();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while heartbeat.is_healthy() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        for _ in 0..10 {
+            assert!(!heartbeat.is_healthy());
+        }
+        heartbeat.stop();
+
+        // Assert
+        assert_eq!(notifications.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn should_stop_heartbeat_given_renewal_failure_when_running() {
+        // Arrange: distinct from
+        // `should_mark_heartbeat_unhealthy_given_renewal_failure_when_running`,
+        // which checks the unhealthy flag while the worker threads are still
+        // alive. This test verifies `stop()` joins and clears the worker.
+        let mock = Arc::new(MockLease::new());
+        mock.set_should_fail(true);
+        let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
+
+        // Act
+        heartbeat.start();
+        heartbeat
+            .renewal_handle
+            .as_ref()
+            .expect("renewal worker started")
+            .thread()
+            .unpark();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while heartbeat.is_healthy() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let unhealthy_before_stop = !heartbeat.is_healthy();
+        heartbeat.stop();
+
+        // Assert
+        assert!(
+            unhealthy_before_stop,
+            "renewal failure must be observed before stop"
+        );
+        assert!(!heartbeat.is_healthy());
+        assert!(
+            heartbeat.renewal_handle.is_none(),
+            "stop() must join and clear the renewal thread"
+        );
+        assert!(
+            heartbeat.watchdog_handle.is_none(),
+            "stop() must join and clear the watchdog thread"
+        );
+    }
+
+    #[test]
+    fn should_remain_single_threaded_given_start_called_twice_when_heartbeat_is_running() {
+        // Arrange
+        let mock = Arc::new(MockLease::new());
+        let mut heartbeat = LeaseHeartbeat::new(mock);
+
+        // Act
+        heartbeat.start();
+        let first_thread = heartbeat
+            .renewal_handle
+            .as_ref()
+            .expect("first start must retain renewal thread")
+            .thread()
+            .id();
+        heartbeat.start();
+        let second_thread = heartbeat
+            .renewal_handle
+            .as_ref()
+            .expect("second start must retain renewal thread")
+            .thread()
+            .id();
+        heartbeat.stop();
+
+        // Assert
+        assert_eq!(
+            second_thread, first_thread,
+            "second start must not replace the live worker"
+        );
+        assert!(heartbeat.renewal_handle.is_none());
+        assert!(heartbeat.watchdog_handle.is_none());
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_report_unhealthy_given_heartbeat_thread_spawn_failure_when_starting() {
+        // Arrange
+        let _test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        fail::cfg(
+            "midge::lease::inject_renewal_thread_spawn_failure",
+            "return",
+        )
+        .expect("configure renewal spawn failure");
+        let mock = Arc::new(MockLease::new());
+        let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
+
+        // Act
+        heartbeat.start();
+
+        // Assert
+        assert!(!heartbeat.is_healthy());
+        assert!(heartbeat.spawn_failed);
+        assert!(!heartbeat.running.load(Ordering::Acquire));
+        assert!(heartbeat.renewal_handle.is_none());
+        assert!(heartbeat.watchdog_handle.is_none());
+        assert_eq!(mock.get_renewal_count(), 0);
+        fail::remove("midge::lease::inject_renewal_thread_spawn_failure");
+        scenario.teardown();
+    }
+
+    #[test]
+    fn should_fence_at_monotonic_expiry_while_renewal_is_blocked() {
+        // Arrange
+        let lease = Arc::new(BlockingRenewalLease::new(Duration::from_secs(2)));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let mut heartbeat =
+            LeaseHeartbeat::new_with_validity(lease.clone(), Arc::clone(&lease.validity));
+
+        // Act
+        heartbeat.start();
+        assert!(lease.wait_until_renewal_started(Duration::from_secs(5)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while heartbeat.is_healthy() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Assert
+        assert!(!heartbeat.is_healthy());
+        assert!(matches!(
+            lease.validity.snapshot(),
+            LeaseValidityState::Fenced { epoch: 1 }
+        ));
+        lease.allow_renewal();
+        assert!(lease.wait_until_renewal_completed(Duration::from_secs(1)));
+        assert!(
+            !heartbeat.is_healthy(),
+            "late renewal must not restore health"
+        );
+        heartbeat.stop();
+    }
+
+    #[test]
+    fn should_remain_healthy_past_prior_deadline_when_renewal_advances_in_time() {
+        // Arrange
+        let ttl = Duration::from_secs(2);
+        let lease = Arc::new(AdvancingLease {
+            validity: Arc::new(crate::lease::traits::LeaseValidity::new()),
+            ttl,
+            renewals: AtomicUsize::new(0),
+        });
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let prior_deadline = match lease.validity.snapshot() {
+            LeaseValidityState::Active { valid_until, .. } => valid_until,
+            state => panic!("expected active validity, got {state:?}"),
+        };
+        let mut heartbeat =
+            LeaseHeartbeat::new_with_validity(lease.clone(), Arc::clone(&lease.validity));
+
+        // Act
+        heartbeat.start();
+        while lease.renewals.load(Ordering::Acquire) == 0
+            && std::time::Instant::now() < prior_deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        while std::time::Instant::now() <= prior_deadline + Duration::from_millis(20) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Assert
+        assert!(lease.renewals.load(Ordering::Acquire) > 0);
+        assert!(heartbeat.is_healthy());
+        assert!(matches!(
+            lease.validity.snapshot(),
+            LeaseValidityState::Active { valid_until, .. } if valid_until > prior_deadline
+        ));
+        heartbeat.stop();
+    }
+}
+
+#[cfg(test)]
+mod watchdog_snapshot_tests {
+    use super::{run_watchdog_worker, WATCHDOG_SNAPSHOT_HOOK};
+    use crate::lease::traits::{LeaseValidity, LeaseValidityState};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_preserve_renewed_validity_when_watchdog_resumes_with_stale_snapshot() {
+        // Arrange: suspend the watchdog after its old snapshot releases the
+        // mutex; a timely renewal must remain authoritative afterward.
+        let validity = Arc::new(LeaseValidity::new());
+        let old_deadline = Instant::now() + Duration::from_secs(1);
+        validity.activate(9, old_deadline).expect("activate lease");
+        let running = Arc::new(AtomicBool::new(true));
+        let healthy = Arc::new(AtomicBool::new(true));
+        let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let (loss_tx, loss_rx) = mpsc::sync_channel(1);
+        let worker = {
+            let validity = Arc::clone(&validity);
+            let running = Arc::clone(&running);
+            let healthy = Arc::clone(&healthy);
+            std::thread::spawn(move || {
+                WATCHDOG_SNAPSHOT_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        snapshot_tx.send(()).expect("announce old snapshot");
+                        resume_rx
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("resume stale watchdog");
+                    }));
+                });
+                let loss_notified = AtomicBool::new(false);
+                let loss_hook = || {
+                    loss_tx.send(()).expect("announce lease loss");
+                };
+                run_watchdog_worker(
+                    &validity,
+                    &running,
+                    &healthy,
+                    &loss_notified,
+                    Some(&loss_hook),
+                );
+            })
+        };
+        snapshot_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("watchdog captured old deadline");
+        let renewed_deadline = Instant::now() + Duration::from_secs(10);
+        validity
+            .advance(9, renewed_deadline)
+            .expect("renew while old deadline is still live");
+
+        // Act: resume the watchdog once only its copied deadline has expired.
+        std::thread::sleep(old_deadline.saturating_duration_since(Instant::now()));
+        resume_tx
+            .send(())
+            .expect("resume watchdog after old expiry");
+        let loss = loss_rx.recv_timeout(Duration::from_millis(100));
+        running.store(false, Ordering::Release);
+        validity.notify_all();
+        worker.join().expect("watchdog thread");
+
+        // Assert
+        assert!(
+            matches!(loss, Err(mpsc::RecvTimeoutError::Timeout)),
+            "watchdog must not notify loss for an old deadline: {loss:?}"
+        );
+        assert!(healthy.load(Ordering::Acquire));
+        assert_eq!(
+            validity.snapshot(),
+            LeaseValidityState::Active {
+                epoch: 9,
+                valid_until: renewed_deadline,
+            }
+        );
+    }
+}

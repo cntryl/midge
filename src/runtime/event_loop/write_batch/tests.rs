@@ -1,11 +1,11 @@
 use super::*;
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::event_loop::EventLoop;
 use crate::runtime::state::RuntimeState;
 use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{ConflictPolicy, ResponseRouter, RuntimeConfig};
-use cntryl_midge_durability::wal::DurabilityPolicy;
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::wal::DurabilityPolicy;
 use std::sync::Arc;
 #[cfg(feature = "failpoints")]
 use std::sync::{Mutex, OnceLock};
@@ -1390,7 +1390,10 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
 }
 
 #[cfg(feature = "failpoints")]
-fn memtable_keys(fixture: &EventLoopFixture, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> Vec<Vec<u8>> {
+fn memtable_keys(
+    fixture: &EventLoopFixture,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
+) -> Vec<Vec<u8>> {
     fixture
         .event_loop
         .state
@@ -2281,7 +2284,9 @@ fn should_report_stall_hint_for_transaction_actual_column_family() -> MidgeResul
         .get_cf_mut(secondary_cf)
         .expect("secondary column family")
         .immutable_memtables
-        .push(Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new()));
+        .push(Arc::new(
+            cntryl_midge_table::memtable::SkipListMemtable::new(),
+        ));
     assert!(!fixture.event_loop.state.should_stall_writes(0));
     assert!(fixture.event_loop.state.should_stall_writes(secondary_cf));
     let response_rx = fixture.register(901);
@@ -2324,12 +2329,14 @@ fn should_stall_before_wal_when_transaction_would_exceed_hard_l0_ceiling() -> Mi
         .manifest
         .test_mut()
         .files
-        .extend((0..2).map(|index| cntryl_midge_durability::metadata::FileMeta {
-            name: format!("l0-{index}.sst"),
-            level: 0,
-            cf_id: 0,
-            ..Default::default()
-        }));
+        .extend(
+            (0..2).map(|index| cntryl_midge_durability::metadata::FileMeta {
+                name: format!("l0-{index}.sst"),
+                level: 0,
+                cf_id: 0,
+                ..Default::default()
+            }),
+        );
     let first_rx = fixture.register(902);
     let second_rx = fixture.register(903);
     let (_tx, empty_rx) = crossbeam::channel::unbounded();
@@ -2436,12 +2443,14 @@ fn should_treat_memtable_limit_as_advisory_until_l0_slots_are_exhausted() -> Mid
         .manifest
         .test_mut()
         .files
-        .extend((0..2).map(|index| cntryl_midge_durability::metadata::FileMeta {
-            name: format!("advisory-l0-{index}.sst"),
-            level: 0,
-            cf_id: 0,
-            ..Default::default()
-        }));
+        .extend(
+            (0..2).map(|index| cntryl_midge_durability::metadata::FileMeta {
+                name: format!("advisory-l0-{index}.sst"),
+                level: 0,
+                cf_id: 0,
+                ..Default::default()
+            }),
+        );
     let sequence = fixture.event_loop.state.sequence;
     let appends = fixture.event_loop.actors.wal_actor.append_calls();
     let third = fixture.register(932);
@@ -2660,11 +2669,19 @@ impl cntryl_midge_durability::lease::LeaderStore for UnreachableLeaderStore {
     fn acquire_leadership(
         &self,
         _holder_id: &str,
-    ) -> Result<cntryl_midge_durability::lease::LeaderRecord, cntryl_midge_durability::lease::LeaseError> {
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaderRecord,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         unreachable!("validation fixture")
     }
 
-    fn read_current(&self) -> Result<Option<cntryl_midge_durability::lease::LeaderRecord>, cntryl_midge_durability::lease::LeaseError> {
+    fn read_current(
+        &self,
+    ) -> Result<
+        Option<cntryl_midge_durability::lease::LeaderRecord>,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         Err(cntryl_midge_durability::lease::LeaseError::IoError(
             "test leader store is unreachable".to_string(),
         ))

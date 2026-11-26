@@ -187,7 +187,10 @@ impl RuntimeState {
     }
 
     #[cfg(test)]
-    pub(crate) fn make_immutable_flush_retry_due(&mut self, cf_id: cntryl_midge_core::types::ColumnFamilyId) {
+    pub(crate) fn make_immutable_flush_retry_due(
+        &mut self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) {
         if let Some(cf_state) = self.column_families.get_mut(&cf_id) {
             for flush in &mut cf_state.immutable_flushes {
                 if flush.phase == ImmutableFlushPhase::RetryPending {
@@ -204,7 +207,10 @@ impl RuntimeState {
             .max(1)
     }
 
-    pub fn is_immutable_memtable_queue_full(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> bool {
+    pub fn is_immutable_memtable_queue_full(
+        &self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> bool {
         self.column_families.get(&cf_id).is_some_and(|cf_state| {
             cf_state.immutable_memtables.len() >= self.limits.max_immutable_memtables
         })
@@ -254,7 +260,10 @@ impl RuntimeState {
             .saturating_add(usize::from(cf.memtable.size_bytes() > 0))
     }
 
-    pub(crate) fn has_critical_l0_debt(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> bool {
+    pub(crate) fn has_critical_l0_debt(
+        &self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> bool {
         self.l0_slot_usage(cf_id) >= self.l0_hard_ceiling()
     }
 
@@ -268,7 +277,10 @@ impl RuntimeState {
     /// that does not exist. A below-threshold active memtable may continue to
     /// consume its already-reserved slot; the transaction that crosses the
     /// flush threshold is accepted, then the next transaction stalls.
-    pub(crate) fn l0_write_slot_unavailable(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> bool {
+    pub(crate) fn l0_write_slot_unavailable(
+        &self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> bool {
         let usage = self.l0_slot_usage(cf_id);
         let ceiling = self.l0_hard_ceiling();
         if usage < ceiling {
@@ -303,7 +315,10 @@ impl RuntimeState {
     ///
     /// This intentionally excludes active memtable size: active memtable pressure
     /// should trigger flush, not block the flush that would relieve it.
-    pub fn should_hard_stall_writes(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> bool {
+    pub fn should_hard_stall_writes(
+        &self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> bool {
         if self.write_pressure.admission.hard_pending_limit() {
             return true;
         }
@@ -551,9 +566,9 @@ impl RuntimeState {
         })?;
         facts.max_seq_per_cf.iter().find_map(|&(cf, sequence)| {
             let needs_flush = match self.manifest.flush_frontiers().get(cf) {
-                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence }) => {
-                    sequence > through_sequence
-                }
+                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live {
+                    through_sequence,
+                }) => sequence > through_sequence,
                 Ok(cntryl_midge_durability::metadata::FamilyFrontier::Dropped) => false,
                 Err(_) => true,
             };

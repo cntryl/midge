@@ -192,18 +192,21 @@ fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_c
         put_requests: std::sync::Mutex::new(Vec::new()),
     });
     let cloud = Arc::new(CloudStorage::new(backend.clone(), "metadata-cache".into()));
-    let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-        cntryl_midge_durability::lease::CloudLeaseConfig {
-            bucket: "midge".into(),
-            prefix: "metadata-cache".into(),
-        },
-        directory.path().to_path_buf(),
-        Arc::clone(&cloud),
-    ));
+    let lease = Arc::new(
+        cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+            cntryl_midge_durability::lease::CloudLeaseConfig {
+                bucket: "midge".into(),
+                prefix: "metadata-cache".into(),
+            },
+            directory.path().to_path_buf(),
+            Arc::clone(&cloud),
+        ),
+    );
     let _guard = Arc::clone(&lease).try_acquire().unwrap();
     let store = lease.get_leader_store().unwrap();
     let fs = cntryl_midge_core::io::real::test_root(directory.path());
-    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())
+        .unwrap();
     ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
     let lock = crate::runtime::MetadataPublicationLock::default();
     let mirror = || {
@@ -224,12 +227,14 @@ fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_c
         )
     };
     mirror().unwrap();
-    crate::runtime::IntentPersistence::save_with_fs(
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_with_fs(
         &fs,
-        &[crate::runtime::IntentLogEntry::SeqnoAllocated {
-            seqno: 11,
-            cf_id: 0,
-        }],
+        &[
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::SeqnoAllocated {
+                seqno: 11,
+                cf_id: 0,
+            },
+        ],
     )
     .unwrap();
     backend.inner.clear_history();

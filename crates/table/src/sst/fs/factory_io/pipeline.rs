@@ -361,7 +361,7 @@ impl BlockPipeline {
 }
 
 impl FsSstWriter {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(super) fn new(
         fs: Arc<dyn Fs>,
         compression_policy: CompressionPolicy,

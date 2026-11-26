@@ -8,9 +8,6 @@
 //! - decode single SST entry
 //! - roundtrip encode→decode
 
-#[path = "table_bench_support.rs"]
-mod stress_config;
-
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 use cntryl_midge_table::sst::encoding::{decode, encode};
@@ -58,8 +55,7 @@ fn encode_small(ctx: &mut StressContext) {
 
     record_sst_batch_parameters(ctx, ENCODE_BATCH_SIZE);
 
-    stress_config::measure_hot_path_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "encode_small",
         sst_logical_operation_count(ENCODE_BATCH_SIZE),
         || {
@@ -101,8 +97,7 @@ fn decode_small(ctx: &mut StressContext) {
     assert_eq!(consumed, encoded_entries[0].len());
     record_sst_batch_parameters(ctx, DECODE_BATCH_SIZE);
 
-    stress_config::measure_hot_path_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "decode_small",
         sst_logical_operation_count(DECODE_BATCH_SIZE),
         || {
@@ -143,8 +138,7 @@ fn roundtrip_small(ctx: &mut StressContext) {
 
     record_sst_batch_parameters(ctx, ROUNDTRIP_BATCH_SIZE);
 
-    stress_config::measure_hot_path_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "roundtrip_small",
         sst_logical_operation_count(ROUNDTRIP_BATCH_SIZE),
         || {

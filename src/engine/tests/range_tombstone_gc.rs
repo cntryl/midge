@@ -123,7 +123,10 @@ fn manifest_contains(engine: &Engine, name: &str) -> MidgeResult<bool> {
     Ok(manifest_file(engine, name)?.is_some())
 }
 
-fn manifest_file(engine: &Engine, name: &str) -> MidgeResult<Option<cntryl_midge_durability::metadata::FileMeta>> {
+fn manifest_file(
+    engine: &Engine,
+    name: &str,
+) -> MidgeResult<Option<cntryl_midge_durability::metadata::FileMeta>> {
     let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load(&engine.db_path)
         .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
     Ok(manifest.files.into_iter().find(|file| file.name == name))
@@ -154,7 +157,10 @@ fn inspect_published_ssts(engine: &Engine) -> MidgeResult<PublishedSstState> {
 
 fn sst_factory(engine: &Engine) -> cntryl_midge_table::sst::FsSstFactoryIo {
     cntryl_midge_table::sst::FsSstFactoryIo::new(
-        cntryl_midge_core::io::subdirectory(Arc::clone(&engine.root), cntryl_midge_table::sst::fs::SST_DIR),
+        cntryl_midge_core::io::subdirectory(
+            Arc::clone(&engine.root),
+            cntryl_midge_table::sst::fs::SST_DIR,
+        ),
         64 * 1024,
     )
 }

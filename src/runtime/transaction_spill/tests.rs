@@ -149,7 +149,8 @@ fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()>
 fn should_cover_range_tree_endpoint_duplication_with_spill_disk_reservation() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let setup = cntryl_midge_storage::simulated::host_simulated_cloud(dir.path(), Some(1024 * 1024))?;
+    let setup =
+        cntryl_midge_storage::simulated::host_simulated_cloud(dir.path(), Some(1024 * 1024))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024 * 1024);
     let budget = SpillDiskBudget(Arc::clone(&setup.hybrid_storage));
     let mut ops = (0_u64..64)

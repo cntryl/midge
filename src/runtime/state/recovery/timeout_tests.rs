@@ -1,9 +1,9 @@
 //! Actual local metadata reads must not select salvage/default state on timeout.
 
 use super::*;
-use cntryl_midge_durability::RecoveryPolicy;
 use cntryl_midge_core::io::traits::{DirEntry, HostAddressing, Metadata};
 use cntryl_midge_core::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs};
+use cntryl_midge_durability::RecoveryPolicy;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -123,7 +123,10 @@ impl ReadFs for TimedReadFs {
 }
 
 impl Fs for TimedReadFs {
-    fn try_lock_exclusive(&self, path: &FsPath) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
+    fn try_lock_exclusive(
+        &self,
+        path: &FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
@@ -244,8 +247,11 @@ fn assert_intent_timeout(policy: RecoveryPolicy) {
         segment_id: 3,
         seqno: 7,
     }];
-    crate::runtime::IntentPersistence::save(directory.path(), &intents)
-        .expect("persist actual intent log");
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save(
+        directory.path(),
+        &intents,
+    )
+    .expect("persist actual intent log");
     let target = cntryl_midge_durability::metadata::files::INTENT_LOG;
     let before = std::fs::read(directory.path().join(target)).unwrap();
     let (fs, evidence) = timed_fs(directory.path(), target);
@@ -329,7 +335,8 @@ fn assert_journal_timeout(policy: RecoveryPolicy, aggregate: bool) {
         .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT)
         .exists());
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-    let healthy = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    let healthy =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
     assert_eq!(healthy.edit_checkpoint_id, 16);
     assert_eq!(healthy.column_families.len(), 16);
     for id in 1..=16 {
@@ -483,7 +490,10 @@ impl ReadFs for ListingFailsFs {
 }
 
 impl Fs for ListingFailsFs {
-    fn try_lock_exclusive(&self, path: &FsPath) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
+    fn try_lock_exclusive(
+        &self,
+        path: &FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.0.try_lock_exclusive(path)
     }
 
@@ -514,10 +524,20 @@ fn should_not_regress_next_segment_id_when_wal_directory_listing_fails() {
     let directory = tempfile::tempdir().unwrap();
     let wal_dir = directory.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
-    std::fs::write(wal_dir.join(cntryl_midge_durability::wal::segment_file_name(5)), b"x").unwrap();
-    std::fs::write(wal_dir.join(cntryl_midge_durability::wal::segment_file_name(6)), b"").unwrap();
+    std::fs::write(
+        wal_dir.join(cntryl_midge_durability::wal::segment_file_name(5)),
+        b"x",
+    )
+    .unwrap();
+    std::fs::write(
+        wal_dir.join(cntryl_midge_durability::wal::segment_file_name(6)),
+        b"",
+    )
+    .unwrap();
     crate::runtime::wal_history::fixture::record_at(directory.path(), &[5], 6).unwrap();
-    let wal: Arc<dyn Fs> = Arc::new(ListingFailsFs(cntryl_midge_core::io::RealFs::new(&wal_dir).unwrap()));
+    let wal: Arc<dyn Fs> = Arc::new(ListingFailsFs(
+        cntryl_midge_core::io::RealFs::new(&wal_dir).unwrap(),
+    ));
 
     // Act: open the WAL history the way recovery does.
     let result = crate::runtime::wal_history::WalHistory::open(wal, 1, 0).map(|history| {

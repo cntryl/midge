@@ -14,9 +14,9 @@ use super::{
 /// stays short because callers and a shutdown drain wait on this path: a
 /// longer one spends their budget waiting instead of retrying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WalUploadRetryPolicy {
-    pub(crate) base_delay: Duration,
-    pub(crate) max_delay: Duration,
+pub struct WalUploadRetryPolicy {
+    pub base_delay: Duration,
+    pub max_delay: Duration,
 }
 
 impl WalUploadRetryPolicy {
@@ -34,9 +34,9 @@ impl WalUploadRetryPolicy {
 /// landed. They count against the queue's limits, so a segment that keeps
 /// failing bounds the writes behind it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct HeldUploads {
-    pub(crate) entries: usize,
-    pub(crate) bytes: u64,
+pub struct HeldUploads {
+    pub entries: usize,
+    pub bytes: u64,
 }
 
 impl Default for WalUploadRetryPolicy {
@@ -98,18 +98,18 @@ impl UploadState {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct HybridQueueLimits {
-    pub(crate) upload_entries: usize,
-    pub(crate) upload_bytes: u64,
-    pub(crate) worker_entries: usize,
-    pub(crate) worker_concurrency: usize,
-    pub(crate) upload_memory_bytes: usize,
-    pub(crate) event_entries: usize,
-    pub(crate) event_bytes: usize,
-    pub(crate) prune_workers: usize,
-    pub(crate) prune_requests: usize,
-    pub(crate) callback_timeout: Duration,
-    pub(crate) wal_upload_retry: WalUploadRetryPolicy,
+pub struct HybridQueueLimits {
+    pub upload_entries: usize,
+    pub upload_bytes: u64,
+    pub worker_entries: usize,
+    pub worker_concurrency: usize,
+    pub upload_memory_bytes: usize,
+    pub event_entries: usize,
+    pub event_bytes: usize,
+    pub prune_workers: usize,
+    pub prune_requests: usize,
+    pub callback_timeout: Duration,
+    pub wal_upload_retry: WalUploadRetryPolicy,
 }
 
 impl Default for HybridQueueLimits {

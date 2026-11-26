@@ -1,9 +1,9 @@
 use super::{ensure_compaction_not_aborted, CompactionVersion};
 use cntryl_midge_core::common::MidgeResult;
-use cntryl_midge_table::sst::traits::{RawSstVersionCursor, SstFactory};
 #[cfg(test)]
 use cntryl_midge_core::types::KeyState;
 use cntryl_midge_core::types::{EntryType, RangeTombstone};
+use cntryl_midge_table::sst::traits::{RawSstVersionCursor, SstFactory};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
@@ -201,7 +201,9 @@ impl<'a> EventMergeIterator<'a> {
             return Ok(None);
         };
         let input = self.inputs.get_mut(head.input_idx).ok_or_else(|| {
-            cntryl_midge_core::common::MidgeError::Internal("compaction merge input is missing".to_string())
+            cntryl_midge_core::common::MidgeError::Internal(
+                "compaction merge input is missing".to_string(),
+            )
         })?;
         ensure_compaction_not_aborted(self.abort_check)?;
         let current = if let Some(next) = input.cursor.next().transpose()? {
@@ -328,7 +330,10 @@ struct ChainedSstEventCursor<'a> {
     current: Option<SstEventCursor>,
     budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
     abort_check: Option<&'a dyn Fn() -> bool>,
-    last_key: Option<(Vec<u8>, cntryl_midge_core::common::resource_budget::ResourceReservation)>,
+    last_key: Option<(
+        Vec<u8>,
+        cntryl_midge_core::common::resource_budget::ResourceReservation,
+    )>,
 }
 
 impl<'a> ChainedSstEventCursor<'a> {

@@ -20,11 +20,11 @@ pub struct CloudStorage {
 }
 
 impl CloudStorage {
-    pub(crate) fn set_retry_policy(&self, policy: super::CloudRetryPolicy) {
+    pub fn set_retry_policy(&self, policy: super::CloudRetryPolicy) {
         self.writes.set_retry_policy(policy);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn new(backend: Arc<dyn CloudBackend>, namespace: String) -> Self {
         Self::new_with_timeout(
             backend,
@@ -33,7 +33,7 @@ impl CloudStorage {
         )
     }
 
-    pub(crate) fn new_with_timeout(
+    pub fn new_with_timeout(
         backend: Arc<dyn CloudBackend>,
         namespace: String,
         callback_timeout: std::time::Duration,
@@ -50,17 +50,17 @@ impl CloudStorage {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn with_mock() -> Self {
         let backend = Arc::new(super::MockCloudBackend::new());
         Self::new(backend, "midge".to_string())
     }
 
-    pub(crate) fn callback_timeout(&self) -> std::time::Duration {
+    pub fn callback_timeout(&self) -> std::time::Duration {
         self.scoped_timeout(self.callback_timeout)
     }
 
-    pub(crate) fn with_startup_scope(&self, scope: cntryl_midge_core::DeadlineScope) -> Self {
+    pub fn with_startup_scope(&self, scope: cntryl_midge_core::DeadlineScope) -> Self {
         Self {
             reads: Arc::clone(&self.reads),
             writes: Arc::clone(&self.writes),
@@ -132,7 +132,7 @@ impl CloudStorage {
         }
     }
 
-    pub(crate) fn strip_namespace<'a>(&self, key: &'a str) -> &'a str {
+    pub fn strip_namespace<'a>(&self, key: &'a str) -> &'a str {
         let namespace = self.namespace.trim_matches('/');
         if namespace.is_empty() {
             return key;
@@ -165,14 +165,14 @@ impl CloudStorage {
         self.writes.write(&full_key, data, options, callback);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn submit_get(&self, key: &str, callback: CloudCallback) {
         let full_key = self.full_path(key);
         self.reads
             .read(&full_key, CloudReadOptions::default(), callback);
     }
 
-    pub(crate) fn submit_get_within(
+    pub fn submit_get_within(
         &self,
         key: &str,
         timeout: std::time::Duration,
@@ -208,7 +208,7 @@ impl CloudStorage {
         );
     }
 
-    pub(crate) fn submit_get_with_metadata_within(
+    pub fn submit_get_with_metadata_within(
         &self,
         key: &str,
         timeout: std::time::Duration,
@@ -235,7 +235,7 @@ impl CloudStorage {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn submit_get_range(
         &self,
         key: &str,

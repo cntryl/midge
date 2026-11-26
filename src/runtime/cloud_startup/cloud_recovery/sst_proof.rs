@@ -1,7 +1,7 @@
 use super::{CloudStartupRecovery, MidgeError, MidgeResult};
 use cntryl_midge_core::io::{Fs, FsError, FsPath};
-use cntryl_midge_table::sst::identity::{ProofPolicy, SstIdentity};
 use cntryl_midge_core::types::ExpectedSst;
+use cntryl_midge_table::sst::identity::{ProofPolicy, SstIdentity};
 use std::sync::Arc;
 
 /// Describe a manifest proof for the shared identity checker.
@@ -120,13 +120,14 @@ impl CloudStartupRecovery {
 mod tests {
     use super::CloudStartupRecovery;
     use cntryl_midge_core::io::{Fs, FsPath, MockFs};
-    use cntryl_midge_durability::metadata::FileMeta;
     use cntryl_midge_core::types::EntryType;
+    use cntryl_midge_durability::metadata::FileMeta;
     use std::sync::Arc;
 
     fn write_sst(fs: &Arc<dyn Fs>, name: &str) -> Vec<u8> {
         let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(fs), 4096);
-        let mut writer = cntryl_midge_table::sst::traits::SstFactory::create(&factory).expect("create writer");
+        let mut writer =
+            cntryl_midge_table::sst::traits::SstFactory::create(&factory).expect("create writer");
         writer
             .add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)
             .expect("add entry");

@@ -63,13 +63,8 @@ fn range_tombstone_file(fixture: &mut ConcurrentFixture) -> MidgeResult<String> 
         .finish_to_path_with_summary(std::path::Path::new(&name))?
         .expect("range tombstone SST summary");
     let summary = finalized.summary.expect("range tombstone key bounds");
-    fixture
-        .event_loop
-        .state
-        .manifest
-        .test_mut()
-        .files
-        .push(cntryl_midge_durability::metadata::FileMeta {
+    fixture.event_loop.state.manifest.test_mut().files.push(
+        cntryl_midge_durability::metadata::FileMeta {
             name: name.clone(),
             level: 0,
             cf_id: 0,
@@ -82,7 +77,8 @@ fn range_tombstone_file(fixture: &mut ConcurrentFixture) -> MidgeResult<String> 
             largest_seq: Some(summary.largest_seq),
             key_bounds_complete: true,
             ..Default::default()
-        });
+        },
+    );
     Ok(name)
 }
 
@@ -176,11 +172,13 @@ fn should_preserve_range_tombstone_visibility_after_identity_move() -> MidgeResu
         .find(|file| file.name == name)
         .unwrap()
         .clone();
-    assert!(!cntryl_midge_durability::metadata::manifest::validate_sst_move(
-        &fixture.event_loop.state.manifest.files,
-        &[source],
-        1,
-    )?);
+    assert!(
+        !cntryl_midge_durability::metadata::manifest::validate_sst_move(
+            &fixture.event_loop.state.manifest.files,
+            &[source],
+            1,
+        )?
+    );
     let path = fixture.directory.path().join("sst").join(&name);
     let original = std::fs::read(&path)?;
 
@@ -361,11 +359,12 @@ fn should_recover_exact_original_identity_on_each_side_of_the_logical_move_edit(
         // or retired input. Startup replays the journal before the move intent.
         assert_eq!(current_level(&fixture, &name), level);
         assert!(fixture.event_loop.authority.compaction_fence.is_degraded());
-        let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
-            &fixture.event_loop.state.fs,
-            cntryl_midge_durability::RecoveryPolicy::Strict,
-        )
-        .map_err(MidgeError::Internal)?;
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
+                &fixture.event_loop.state.fs,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
+            )
+            .map_err(MidgeError::Internal)?;
         assert_eq!(recovered.files.len(), 1);
         assert_eq!(recovered.files[0].name, name);
         assert_eq!(recovered.files[0].level, level);

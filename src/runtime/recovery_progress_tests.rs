@@ -1,11 +1,11 @@
 //! Cargo regressions driven by actual planner/replay, HEAD inventory and
 //! journal recovery work. No custom watchdog executable or clock is involved.
 
-use cntryl_midge_core::common::MidgeResult;
 use crate::runtime::cloud_startup::recovery_progress_fixture::{
     prepare_recovery_progress_fixture, PreparedRecoveryProgressFixture,
     RecoveryProgressFixtureMode, RecoveryProgressFixtureResult,
 };
+use cntryl_midge_core::common::MidgeResult;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

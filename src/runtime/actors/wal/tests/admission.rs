@@ -17,7 +17,8 @@ fn should_reject_spilled_transaction_before_wal_write_when_preflight_finds_dupli
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(fs)
+            .create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
     let key = Bytes::from_static(b"duplicate-sequence");
     state
@@ -152,7 +153,9 @@ impl Fs for PartialAppendFs {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
             .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
@@ -245,7 +248,8 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(fs)
+            .create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
     actor.set_storage_budget(Arc::clone(&setup.hybrid_storage));
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(8192));
@@ -338,7 +342,8 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
         )?;
         actor.install_filesystem_for_test(
             fs.clone(),
-            FsWalFactoryIo::new(fs.clone()).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
+            FsWalFactoryIo::new(fs.clone())
+                .create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
         );
         actor.set_storage_budget(setup.hybrid_storage.clone());
         let seed = prepare_put_transaction(
@@ -351,7 +356,9 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
         )?;
         actor.append_prepared_transactions(&mut state, vec![seed])?;
         let physical_before = fs
-            .metadata(&FsPath::new(cntryl_midge_durability::wal::segment_file_name(1)))
+            .metadata(&FsPath::new(
+                cntryl_midge_durability::wal::segment_file_name(1),
+            ))
             .map_err(FsError::into_midge)?
             .len;
         fs.fail_next
@@ -365,9 +372,11 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
         assert!(matches!(result, Err(MidgeError::NoSpace(_))));
         assert!(physical_before > 0);
         assert_eq!(
-            fs.metadata(&FsPath::new(cntryl_midge_durability::wal::segment_file_name(1)))
-                .map_err(FsError::into_midge)?
-                .len,
+            fs.metadata(&FsPath::new(
+                cntryl_midge_durability::wal::segment_file_name(1)
+            ))
+            .map_err(FsError::into_midge)?
+            .len,
             physical_before
         );
         // The header is written when the segment is created, outside WAL
@@ -484,7 +493,8 @@ impl WalWriter for UncertainAppendWriter {
     fn seal_facts(
         &self,
         _timeout: std::time::Duration,
-    ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_durability::wal::format::SealedFacts> {
+    ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_durability::wal::format::SealedFacts>
+    {
         cntryl_midge_durability::wal::traits::unsealable::seal()
     }
 
@@ -557,7 +567,8 @@ fn should_report_recovery_required_not_fenced_when_append_follows_poisoning_io_f
     let dyn_fs: Arc<dyn Fs> = fs.clone();
     actor.install_filesystem_for_test(
         Arc::clone(&dyn_fs),
-        FsWalFactoryIo::new(dyn_fs).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(dyn_fs)
+            .create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
     fs.fail_next
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -584,7 +595,10 @@ fn should_report_recovery_required_not_fenced_when_append_follows_poisoning_io_f
         matches!(second, MidgeError::RecoveryFailed(_)),
         "{second:?}"
     );
-    assert_eq!(second.severity(), cntryl_midge_core::common::Severity::Fatal);
+    assert_eq!(
+        second.severity(),
+        cntryl_midge_core::common::Severity::Fatal
+    );
     Ok(())
 }
 
@@ -606,7 +620,8 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(Arc::clone(&fs))
+            .create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
     actor.set_storage_budget(Arc::clone(&setup.hybrid_storage));
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(8192));
@@ -631,7 +646,8 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
         None,
         u64::MAX,
     );
-    let begin_bound = cntryl_midge_durability::wal::encoding::record_frame_size_bound(&begin)? as u64;
+    let begin_bound =
+        cntryl_midge_durability::wal::encoding::record_frame_size_bound(&begin)? as u64;
     // Largest admissible amount right now.
     let (mut low, mut high) = (0_u64, 4096_u64);
     while low < high {
@@ -659,7 +675,9 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     };
 
     let wal_len_before = fs
-        .metadata(&FsPath::new(cntryl_midge_durability::wal::segment_file_name(1)))
+        .metadata(&FsPath::new(
+            cntryl_midge_durability::wal::segment_file_name(1),
+        ))
         .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
     let budget_before = setup.hybrid_storage.budget_snapshot().total_committed_bytes;
@@ -667,7 +685,9 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     // Act: the whole unit is rejected before its begin frame can be written.
     let first_result = actor.append_spilled_transaction(&mut state, &source, &params(1));
     let wal_len_after_first = fs
-        .metadata(&FsPath::new(cntryl_midge_durability::wal::segment_file_name(1)))
+        .metadata(&FsPath::new(
+            cntryl_midge_durability::wal::segment_file_name(1),
+        ))
         .map_or(0, |m| m.len);
     let fenced_after_first = actor.is_fenced();
     let budget_after_rejection = setup.hybrid_storage.budget_snapshot().total_committed_bytes;

@@ -1612,7 +1612,10 @@ mod tests {
             .expect_err("missing persisted key-range metadata must fail closed");
 
         // Assert
-        assert!(matches!(error, cntryl_midge_core::common::MidgeError::Corruption(_)));
+        assert!(matches!(
+            error,
+            cntryl_midge_core::common::MidgeError::Corruption(_)
+        ));
     }
 
     #[test]
@@ -1637,7 +1640,10 @@ mod tests {
             .expect_err("unknown target overlap must fail closed");
 
         // Assert
-        assert!(matches!(error, cntryl_midge_core::common::MidgeError::Corruption(_)));
+        assert!(matches!(
+            error,
+            cntryl_midge_core::common::MidgeError::Corruption(_)
+        ));
     }
 
     #[test]
@@ -1659,7 +1665,10 @@ mod tests {
             .expect_err("inverted range must fail closed");
 
         // Assert
-        assert!(matches!(error, cntryl_midge_core::common::MidgeError::Corruption(_)));
+        assert!(matches!(
+            error,
+            cntryl_midge_core::common::MidgeError::Corruption(_)
+        ));
     }
 
     // ============================================================================

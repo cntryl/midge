@@ -489,9 +489,7 @@ fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
     )
 }
 
-#[path = "qualification/sqrzl.rs"]
-mod sqrzl;
-use sqrzl::*;
+use crate::test_support::sqrzl::*;
 
 fn ensure_sqrzl_namespace(provider: &CloudProviderConfig) -> Result<(), String> {
     match provider {

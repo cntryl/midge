@@ -11,7 +11,9 @@ impl CloudStartupRecovery {
         for file_name in cntryl_midge_durability::metadata::files::CLOUD_MIRRORED
             .iter()
             .copied()
-            .chain(std::iter::once(cntryl_midge_durability::metadata::files::MANIFEST))
+            .chain(std::iter::once(
+                cntryl_midge_durability::metadata::files::MANIFEST,
+            ))
         {
             scope.check("legacy cloud metadata inventory")?;
             let key = cntryl_midge_core::cloud_layout::CloudObjectLayout::metadata_key(file_name);

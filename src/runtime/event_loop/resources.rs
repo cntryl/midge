@@ -61,6 +61,8 @@ pub(super) fn compaction_sst_factory(
         cntryl_midge_core::io::subdirectory(fs, cntryl_midge_table::sst::fs::SST_DIR),
         64 * 1024,
     )
-    .with_compaction_scratch_directory(std::path::PathBuf::from(cntryl_midge_table::sst::fs::STAGING_DIR_NAME))
+    .with_compaction_scratch_directory(std::path::PathBuf::from(
+        cntryl_midge_table::sst::fs::STAGING_DIR_NAME,
+    ))
     .with_compression_policy(compression_policy)
 }

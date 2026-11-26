@@ -1,6 +1,6 @@
 use super::*;
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::event_loop::tests::create_test_local_event_loop;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::sync::Arc;
 
 const LOCAL_BUDGET: u64 = 1_000;
@@ -25,7 +25,9 @@ fn should_preserve_current_publication_when_another_job_reports_failure() -> Mid
     event_loop
         .state
         .record_compaction_publication_intent(0, vec![input.clone()], Vec::new())?;
-    let intent_path = directory.path().join(cntryl_midge_durability::metadata::files::INTENT_LOG);
+    let intent_path = directory
+        .path()
+        .join(cntryl_midge_durability::metadata::files::INTENT_LOG);
     let before = std::fs::read(&intent_path)?;
     let token = CompactionPublicationToken {
         request_id: 41,
@@ -135,7 +137,8 @@ fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
     // Act: one equality neighbor is safe; changed identity and a replacement
     // creating a three-way boundary are rejected.
     CompactionCoordinator::validate_captured_target_span(&event_loop, &selected, 0, 1)?;
-    let good = crate::runtime::FileMeta::from(&file("new.sst", b"a", b"z"));
+    let good =
+        cntryl_midge_durability::metadata::intent::FileMeta::from(&file("new.sst", b"a", b"z"));
     CompactionCoordinator::validate_repair_replacement_level(
         &event_loop,
         &selected,
@@ -144,8 +147,8 @@ fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
         1,
     )?;
     let bad = [
-        crate::runtime::FileMeta::from(&file("new-a.sst", b"a", b"z")),
-        crate::runtime::FileMeta::from(&file("new-b.sst", b"z", b"zz")),
+        cntryl_midge_durability::metadata::intent::FileMeta::from(&file("new-a.sst", b"a", b"z")),
+        cntryl_midge_durability::metadata::intent::FileMeta::from(&file("new-b.sst", b"z", b"zz")),
     ];
     // Assert
     assert!(CompactionCoordinator::validate_repair_replacement_level(
@@ -306,14 +309,12 @@ fn published_output(event_loop: &mut EventLoop) -> String {
         .test_mut()
         .files
         .push(metadata.clone());
-    event_loop
-        .state
-        .intent_log
-        .push(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: crate::runtime::PublicationPhase::ManifestPublished,
+    event_loop.state.intent_log.push(
+        cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+            phase: cntryl_midge_durability::metadata::intent::PublicationPhase::ManifestPublished,
             cf_id: 0,
             removed: Vec::new(),
-            added: vec![crate::runtime::FileMeta {
+            added: vec![cntryl_midge_durability::metadata::intent::FileMeta {
                 name: metadata.name,
                 level: metadata.level,
                 cf_id: metadata.cf_id,
@@ -326,7 +327,8 @@ fn published_output(event_loop: &mut EventLoop) -> String {
                 key_bounds_complete: false,
                 earliest_expiration_millis: None,
             }],
-        });
+        },
+    );
     output_name
 }
 
@@ -365,16 +367,13 @@ fn should_settle_async_compaction_failure_according_to_owned_scratch() -> MidgeR
             let compaction_storage: Arc<dyn crate::runtime::actors::compaction::CompactionStorage> =
                 hybrid.clone();
             let input = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
-            event_loop
-                .state
-                .manifest
-                .test_mut()
-                .files
-                .push(cntryl_midge_durability::metadata::FileMeta {
+            event_loop.state.manifest.test_mut().files.push(
+                cntryl_midge_durability::metadata::FileMeta {
                     name: input.clone(),
                     size_bytes: 100,
                     ..Default::default()
-                });
+                },
+            );
             hybrid.reconcile_local_disk_usage(100, 0);
             event_loop
                 .actors
@@ -438,12 +437,8 @@ fn should_defer_failed_repair_until_the_next_maintenance_backoff() -> MidgeResul
         (&inputs[0], b"a".as_slice(), b"m".as_slice()),
         (&inputs[1], b"g".as_slice(), b"z".as_slice()),
     ] {
-        event_loop
-            .state
-            .manifest
-            .test_mut()
-            .files
-            .push(cntryl_midge_durability::metadata::FileMeta {
+        event_loop.state.manifest.test_mut().files.push(
+            cntryl_midge_durability::metadata::FileMeta {
                 name: name.clone(),
                 cf_id: 0,
                 level: 1,
@@ -452,7 +447,8 @@ fn should_defer_failed_repair_until_the_next_maintenance_backoff() -> MidgeResul
                 key_bounds_complete: true,
                 earliest_expiration_millis: None,
                 ..Default::default()
-            });
+            },
+        );
     }
     event_loop
         .actors
@@ -629,13 +625,21 @@ impl cntryl_midge_durability::lease::LeaderStore for NewerHolderLeaderStore {
     fn acquire_leadership(
         &self,
         _holder_id: &str,
-    ) -> Result<cntryl_midge_durability::lease::LeaderRecord, cntryl_midge_durability::lease::LeaseError> {
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaderRecord,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         Err(cntryl_midge_durability::lease::LeaseError::Internal(
             "test leader store does not acquire leadership".to_string(),
         ))
     }
 
-    fn read_current(&self) -> Result<Option<cntryl_midge_durability::lease::LeaderRecord>, cntryl_midge_durability::lease::LeaseError> {
+    fn read_current(
+        &self,
+    ) -> Result<
+        Option<cntryl_midge_durability::lease::LeaderRecord>,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         Ok(Some(cntryl_midge_durability::lease::LeaderRecord {
             epoch: 2,
             holder_id: "new-writer".to_string(),
@@ -646,7 +650,8 @@ impl cntryl_midge_durability::lease::LeaderStore for NewerHolderLeaderStore {
 
 fn stale_writer_event_loop(directory: &tempfile::TempDir) -> MidgeResult<EventLoop> {
     let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
-    let leader_store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> = Arc::new(NewerHolderLeaderStore);
+    let leader_store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> =
+        Arc::new(NewerHolderLeaderStore);
     let config = crate::runtime::RuntimeConfig {
         writer_epoch: 1,
         lease_healthy: Some(Arc::new(std::sync::atomic::AtomicBool::new(false))),
@@ -759,7 +764,9 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
         let input_path = event_loop.state.host_sst_dir().join(&input);
         std::fs::write(&input_path, b"retained predecessor input")?;
         record_published_empty_compaction(&mut event_loop, &input)?;
-        let intent_path = directory.path().join(cntryl_midge_durability::metadata::files::INTENT_LOG);
+        let intent_path = directory
+            .path()
+            .join(cntryl_midge_durability::metadata::files::INTENT_LOG);
         let before = std::fs::read(&intent_path)?;
         let epoch = event_loop.authority.fencing.writer_epoch;
         let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
@@ -860,7 +867,7 @@ fn record_published_empty_compaction(event_loop: &mut EventLoop, input: &str) ->
     event_loop.state.transition_compaction_publication_intent(
         &[input.to_owned()],
         &[],
-        crate::runtime::PublicationPhase::ManifestPublished,
+        cntryl_midge_durability::metadata::intent::PublicationPhase::ManifestPublished,
     )
 }
 

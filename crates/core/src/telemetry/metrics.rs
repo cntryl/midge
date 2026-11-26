@@ -53,21 +53,21 @@ pub struct Metrics {
 
     // Latency distributions. Always on for an engine's own counters; one
     // relaxed increment per record.
-    pub commit_latency_sync: AtomicLatencyHistogram,
-    pub commit_latency_buffered: AtomicLatencyHistogram,
-    pub commit_latency_best_effort: AtomicLatencyHistogram,
-    pub commit_latency_cloud_async: AtomicLatencyHistogram,
-    pub commit_latency_cloud_strict: AtomicLatencyHistogram,
-    pub point_read_latency: AtomicLatencyHistogram,
+    commit_latency_sync: AtomicLatencyHistogram,
+    commit_latency_buffered: AtomicLatencyHistogram,
+    commit_latency_best_effort: AtomicLatencyHistogram,
+    commit_latency_cloud_async: AtomicLatencyHistogram,
+    commit_latency_cloud_strict: AtomicLatencyHistogram,
+    point_read_latency: AtomicLatencyHistogram,
     /// Whole-scan latency, recorded when the iterator is dropped.
-    pub scan_latency: AtomicLatencyHistogram,
+    scan_latency: AtomicLatencyHistogram,
     /// Memtable freeze to local manifest publication.
-    pub flush_latency: AtomicLatencyHistogram,
+    flush_latency: AtomicLatencyHistogram,
     /// Compaction worker start to publication.
-    pub compaction_latency: AtomicLatencyHistogram,
-    pub wal_fsync_latency: AtomicLatencyHistogram,
-    pub cloud_wal_upload_latency: AtomicLatencyHistogram,
-    pub cloud_metadata_mirror_latency: AtomicLatencyHistogram,
+    compaction_latency: AtomicLatencyHistogram,
+    wal_fsync_latency: AtomicLatencyHistogram,
+    cloud_wal_upload_latency: AtomicLatencyHistogram,
+    cloud_metadata_mirror_latency: AtomicLatencyHistogram,
 
     // WAL operations
     pub wal_appends: Arc<AtomicU64>,
@@ -952,15 +952,15 @@ impl Metrics {
             cloud_async_wal_ack_latency_us: self
                 .cloud_async_wal_ack_latency_us
                 .load(Ordering::Relaxed),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "internal-testing"))]
             wal_recovery_records_replayed: self
                 .wal_recovery_records_replayed
                 .load(Ordering::Relaxed),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "internal-testing"))]
             wal_recovery_bytes_replayed: self.wal_recovery_bytes_replayed.load(Ordering::Relaxed),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "internal-testing"))]
             intent_log_replay_runs: self.intent_log_replay_runs.load(Ordering::Relaxed),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "internal-testing"))]
             intent_log_entries_replayed: self.intent_log_entries_replayed.load(Ordering::Relaxed),
         }
     }
@@ -1038,13 +1038,13 @@ pub struct MetricsSnapshot {
     pub cloud_async_wal_uploads_failed: u64,
     pub cloud_async_wal_upload_latency_us: u64,
     pub cloud_async_wal_ack_latency_us: u64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub wal_recovery_records_replayed: u64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub wal_recovery_bytes_replayed: u64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub intent_log_replay_runs: u64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub intent_log_entries_replayed: u64,
 }
 

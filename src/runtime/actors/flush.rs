@@ -33,7 +33,7 @@ pub(crate) struct FlushIdentity {
 pub(crate) struct FlushBuildOutput {
     pub identity: FlushIdentity,
     pub staging_path: PathBuf,
-    pub file_meta: crate::runtime::FileMeta,
+    pub file_meta: cntryl_midge_durability::metadata::intent::FileMeta,
     pub reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
 }
 
@@ -55,7 +55,9 @@ pub(crate) trait FlushStorage: Send + Sync {
         publication_lock: &crate::runtime::MetadataPublicationLock,
         deadline: &cntryl_midge_core::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
-        validate_lease: &mut dyn FnMut(&cntryl_midge_core::common::OperationDeadline) -> MidgeResult<()>,
+        validate_lease: &mut dyn FnMut(
+            &cntryl_midge_core::common::OperationDeadline,
+        ) -> MidgeResult<()>,
     ) -> MidgeResult<bool>;
 
     fn mirror_captured_control_metadata(
@@ -64,7 +66,9 @@ pub(crate) trait FlushStorage: Send + Sync {
         _publication_lock: &crate::runtime::MetadataPublicationLock,
         _deadline: &cntryl_midge_core::common::OperationDeadline,
         _authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
-        _validate_lease: &mut dyn FnMut(&cntryl_midge_core::common::OperationDeadline) -> MidgeResult<()>,
+        _validate_lease: &mut dyn FnMut(
+            &cntryl_midge_core::common::OperationDeadline,
+        ) -> MidgeResult<()>,
     ) -> MidgeResult<bool> {
         Err(MidgeError::NotSupported(
             "storage does not support captured metadata publication".into(),
@@ -112,7 +116,9 @@ impl FlushStorage for HybridFlushStorage {
         publication_lock: &crate::runtime::MetadataPublicationLock,
         deadline: &cntryl_midge_core::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
-        validate_lease: &mut dyn FnMut(&cntryl_midge_core::common::OperationDeadline) -> MidgeResult<()>,
+        validate_lease: &mut dyn FnMut(
+            &cntryl_midge_core::common::OperationDeadline,
+        ) -> MidgeResult<()>,
     ) -> MidgeResult<bool> {
         let Some(cloud) = &self.cloud_metadata else {
             return Ok(false);
@@ -140,7 +146,9 @@ impl FlushStorage for HybridFlushStorage {
         publication_lock: &crate::runtime::MetadataPublicationLock,
         deadline: &cntryl_midge_core::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
-        validate_lease: &mut dyn FnMut(&cntryl_midge_core::common::OperationDeadline) -> MidgeResult<()>,
+        validate_lease: &mut dyn FnMut(
+            &cntryl_midge_core::common::OperationDeadline,
+        ) -> MidgeResult<()>,
     ) -> MidgeResult<bool> {
         let Some(cloud) = &self.cloud_metadata else {
             return Ok(false);
@@ -170,7 +178,7 @@ pub(crate) struct FlushBuildCompletion {
     pub staging_path: PathBuf,
     pub reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
     pub build_ns: u64,
-    pub result: MidgeResult<crate::runtime::FileMeta>,
+    pub result: MidgeResult<cntryl_midge_durability::metadata::intent::FileMeta>,
 }
 
 #[derive(Clone)]
@@ -190,7 +198,7 @@ pub(crate) struct FlushPublishTask {
 #[derive(Debug, Clone)]
 pub(crate) struct FlushPublicationDelta {
     pub identity: FlushIdentity,
-    pub file_meta: crate::runtime::FileMeta,
+    pub file_meta: cntryl_midge_durability::metadata::intent::FileMeta,
     pub next_sst_seq: u64,
 }
 
@@ -600,9 +608,9 @@ impl FlushActor {
                     "column family {cf_id} flush has no durable capacity"
                 )))
             }
-            Err(cntryl_midge_storage::hybrid::actor::ReservationResult::Ok) => Err(MidgeError::Internal(
-                "storage admitted a reservation without a token".to_string(),
-            )),
+            Err(cntryl_midge_storage::hybrid::actor::ReservationResult::Ok) => Err(
+                MidgeError::Internal("storage admitted a reservation without a token".to_string()),
+            ),
         }
     }
 
@@ -705,7 +713,9 @@ impl FlushActor {
                 let fallback = task.clone();
                 let started = Instant::now();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::before_publication");
+                    cntryl_midge_core::failpoints::fail_point!(
+                        "midge::flush_worker::before_publication"
+                    );
                     Self::publish_with_budget(&task, budget)
                 }));
                 let publish_ns = elapsed_ns(started);
@@ -757,11 +767,13 @@ impl FlushActor {
     fn write_memtable_to_staging(
         factory: &Arc<cntryl_midge_table::sst::FsSstFactoryIo>,
         task: &mut FlushBuildTask,
-    ) -> MidgeResult<crate::runtime::FileMeta> {
+    ) -> MidgeResult<cntryl_midge_durability::metadata::intent::FileMeta> {
         build::write(
             factory,
             task,
-            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+                DEFAULT_FLUSH_MEMORY_BYTES,
+            ),
         )
     }
 
@@ -769,7 +781,9 @@ impl FlushActor {
     fn publish(task: &FlushPublishTask) -> MidgeResult<FlushPublicationDelta> {
         Self::publish_with_budget(
             task,
-            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+                DEFAULT_FLUSH_MEMORY_BYTES,
+            ),
         )
     }
 
@@ -907,8 +921,11 @@ fn mirror_after_local_commit(task: &FlushMirrorTask) -> MidgeResult<bool> {
             &mut validate_lease,
         )
     }?;
-    cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::after_control_metadata_publication");
-    cntryl_midge_core::common::DeadlineScope::new(deadline).check("flush metadata mirror completion")?;
+    cntryl_midge_core::failpoints::fail_point!(
+        "midge::flush_worker::after_control_metadata_publication"
+    );
+    cntryl_midge_core::common::DeadlineScope::new(deadline)
+        .check("flush metadata mirror completion")?;
     Ok(mirrored || task.storage.has_hybrid_storage())
 }
 
@@ -916,7 +933,8 @@ fn validate_mirror_lease(
     task: &FlushMirrorTask,
     deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<()> {
-    cntryl_midge_core::common::DeadlineScope::new(*deadline).check("flush metadata mirror authority")?;
+    cntryl_midge_core::common::DeadlineScope::new(*deadline)
+        .check("flush metadata mirror authority")?;
     if task
         .lease_healthy
         .as_ref()
@@ -941,7 +959,8 @@ fn validate_mirror_lease(
             )
             .map_err(|error| error.into_validation_error("flush mirror writer authority"))?;
     }
-    cntryl_midge_core::common::DeadlineScope::new(*deadline).check("flush metadata mirror authority completion")
+    cntryl_midge_core::common::DeadlineScope::new(*deadline)
+        .check("flush metadata mirror authority completion")
 }
 
 fn finalize_staged_sst(
@@ -957,7 +976,9 @@ fn finalize_staged_sst(
     {
         validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
         task.fs
-            .create_dir_all(&cntryl_midge_core::io::FsPath::new(cntryl_midge_table::sst::fs::SST_DIR))
+            .create_dir_all(&cntryl_midge_core::io::FsPath::new(
+                cntryl_midge_table::sst::fs::SST_DIR,
+            ))
             .map_err(FsError::into_midge)?;
         let staging_fs_path = db_relative_fs_path(task, &task.build.staging_path)?;
         validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
@@ -978,7 +999,10 @@ fn finalize_staged_sst(
     Ok(())
 }
 
-fn db_relative_fs_path(task: &FlushPublishTask, path: &Path) -> MidgeResult<cntryl_midge_core::io::FsPath> {
+fn db_relative_fs_path(
+    task: &FlushPublishTask,
+    path: &Path,
+) -> MidgeResult<cntryl_midge_core::io::FsPath> {
     cntryl_midge_table::sst::fs::fs_relative_sst_path(&task.fs, path)
 }
 
@@ -1007,7 +1031,7 @@ fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
 fn validate_final_sst(
     task: &FlushPublishTask,
     path: &Path,
-    expected: &crate::runtime::FileMeta,
+    expected: &cntryl_midge_durability::metadata::intent::FileMeta,
     budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<()> {
     // A freshly written SST always carries both proofs, so anything missing
@@ -1025,8 +1049,12 @@ fn validate_final_sst(
             ))
         })?;
     let fs_path = db_relative_fs_path(task, path)?;
-    cntryl_midge_table::sst::fs::SstFileIo::open_for_compaction(&fs_path.0, Arc::clone(&task.fs), budget.clone())
-        .map(|_| ())
+    cntryl_midge_table::sst::fs::SstFileIo::open_for_compaction(
+        &fs_path.0,
+        Arc::clone(&task.fs),
+        budget.clone(),
+    )
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -1038,7 +1066,12 @@ mod tests {
         inner: cntryl_midge_core::io::RealFs,
         fail_rename: bool,
         fail_sync: AtomicBool,
-        sync_dir_calls: parking_lot::Mutex<Vec<(cntryl_midge_core::io::FsPath, cntryl_midge_core::io::Durability)>>,
+        sync_dir_calls: parking_lot::Mutex<
+            Vec<(
+                cntryl_midge_core::io::FsPath,
+                cntryl_midge_core::io::Durability,
+            )>,
+        >,
     }
 
     impl PublicationTestFs {
@@ -1046,7 +1079,12 @@ mod tests {
             self.fail_sync.store(fail, Ordering::Relaxed);
         }
 
-        fn sync_dir_calls(&self) -> Vec<(cntryl_midge_core::io::FsPath, cntryl_midge_core::io::Durability)> {
+        fn sync_dir_calls(
+            &self,
+        ) -> Vec<(
+            cntryl_midge_core::io::FsPath,
+            cntryl_midge_core::io::Durability,
+        )> {
             self.sync_dir_calls.lock().clone()
         }
     }
@@ -1055,12 +1093,20 @@ mod tests {
         fn open_read(
             &self,
             path: &cntryl_midge_core::io::FsPath,
-        ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
-            cntryl_midge_core::io::Fs::open(self, path, cntryl_midge_core::io::OpenOptions::READ_ONLY)
-                .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
+        ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>>
+        {
+            cntryl_midge_core::io::Fs::open(
+                self,
+                path,
+                cntryl_midge_core::io::OpenOptions::READ_ONLY,
+            )
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
         }
 
-        fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
+        fn exists(
+            &self,
+            path: &cntryl_midge_core::io::FsPath,
+        ) -> cntryl_midge_core::io::FsResult<bool> {
             cntryl_midge_core::io::ReadFs::exists(&self.inner, path)
         }
 
@@ -1097,7 +1143,9 @@ mod tests {
             self.inner.try_lock_exclusive(path)
         }
 
-        fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+        fn persistent_handle_capability(
+            &self,
+        ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
             self.inner
                 .persistent_handle_capability()
                 .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
@@ -1119,15 +1167,24 @@ mod tests {
             cntryl_midge_core::io::Fs::open(&self.inner, path, options)
         }
 
-        fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+        fn remove_file(
+            &self,
+            path: &cntryl_midge_core::io::FsPath,
+        ) -> cntryl_midge_core::io::FsResult<()> {
             cntryl_midge_core::io::Fs::remove_file(&self.inner, path)
         }
 
-        fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+        fn create_dir_all(
+            &self,
+            path: &cntryl_midge_core::io::FsPath,
+        ) -> cntryl_midge_core::io::FsResult<()> {
             cntryl_midge_core::io::Fs::create_dir_all(&self.inner, path)
         }
 
-        fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+        fn remove_dir_all(
+            &self,
+            path: &cntryl_midge_core::io::FsPath,
+        ) -> cntryl_midge_core::io::FsResult<()> {
             cntryl_midge_core::io::Fs::remove_dir_all(&self.inner, path)
         }
 
@@ -1170,15 +1227,23 @@ mod tests {
         fn acquire_leadership(
             &self,
             _holder_id: &str,
-        ) -> Result<cntryl_midge_durability::lease::LeaderRecord, cntryl_midge_durability::lease::LeaseError> {
-            Err(cntryl_midge_durability::lease::LeaseError::AcquisitionFailed(
-                "not used by flush publication tests".to_string(),
-            ))
+        ) -> Result<
+            cntryl_midge_durability::lease::LeaderRecord,
+            cntryl_midge_durability::lease::LeaseError,
+        > {
+            Err(
+                cntryl_midge_durability::lease::LeaseError::AcquisitionFailed(
+                    "not used by flush publication tests".to_string(),
+                ),
+            )
         }
 
         fn read_current(
             &self,
-        ) -> Result<Option<cntryl_midge_durability::lease::LeaderRecord>, cntryl_midge_durability::lease::LeaseError> {
+        ) -> Result<
+            Option<cntryl_midge_durability::lease::LeaderRecord>,
+            cntryl_midge_durability::lease::LeaseError,
+        > {
             let validation = self.validations.fetch_add(1, Ordering::SeqCst) + 1;
             let epoch = if validation == self.fail_at_validation {
                 self.expected_epoch + 1
@@ -1252,11 +1317,12 @@ mod tests {
             control_backend.clone(),
             String::new(),
         ));
-        let leader_store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> = Arc::new(ScriptedLeaderStore {
-            expected_epoch: identity.writer_epoch,
-            fail_at_validation,
-            validations: AtomicUsize::new(0),
-        });
+        let leader_store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> =
+            Arc::new(ScriptedLeaderStore {
+                expected_epoch: identity.writer_epoch,
+                fail_at_validation,
+                validations: AtomicUsize::new(0),
+            });
         let publication_fs: Arc<dyn cntryl_midge_core::io::Fs> =
             Arc::new(cntryl_midge_core::io::RealFs::new(&db_path).map_err(FsError::into_midge)?);
         let task = FlushPublishTask {
@@ -1434,7 +1500,9 @@ mod tests {
             std::fs::read(
                 fixture
                     .db_path
-                    .join(cntryl_midge_table::sst::fs::sst_location(&fixture.task.sst_name))
+                    .join(cntryl_midge_table::sst::fs::sst_location(
+                        &fixture.task.sst_name
+                    ))
             )?,
             bytes
         );
@@ -1457,7 +1525,9 @@ mod tests {
         assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
         assert!(fixture
             .db_path
-            .join(cntryl_midge_table::sst::fs::sst_location(&fixture.task.sst_name))
+            .join(cntryl_midge_table::sst::fs::sst_location(
+                &fixture.task.sst_name
+            ))
             .exists());
         assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
         assert_eq!(fixture.control_backend.get_uploads().len(), 0);
@@ -1526,8 +1596,9 @@ mod tests {
 
         // Act
         let delta = FlushActor::publish(&fixture.task)?;
-        let persisted = cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.db_path)
-            .map_err(MidgeError::Internal)?;
+        let persisted =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.db_path)
+                .map_err(MidgeError::Internal)?;
 
         // Assert
         assert_eq!(delta.next_sst_seq, 2);
@@ -1555,7 +1626,8 @@ mod tests {
             hybrid_storage: Some(Arc::clone(hybrid)),
         };
         let fs = Arc::new(
-            cntryl_midge_core::io::RealFs::new(fixture.directory.path()).map_err(FsError::into_midge)?,
+            cntryl_midge_core::io::RealFs::new(fixture.directory.path())
+                .map_err(FsError::into_midge)?,
         );
         let factory: Arc<cntryl_midge_table::sst::FsSstFactoryIo> =
             Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(fs, 64 * 1024));
@@ -1580,7 +1652,8 @@ mod tests {
         // Arrange
         let mut fixture = publication_fixture(usize::MAX)?;
         let sync_fs = Arc::new(PublicationTestFs {
-            inner: cntryl_midge_core::io::RealFs::new(&fixture.db_path).map_err(FsError::into_midge)?,
+            inner: cntryl_midge_core::io::RealFs::new(&fixture.db_path)
+                .map_err(FsError::into_midge)?,
             fail_rename: false,
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
@@ -1589,20 +1662,26 @@ mod tests {
         fixture.task.fs = sync_fs.clone();
         let final_path = fixture
             .db_path
-            .join(cntryl_midge_table::sst::fs::sst_location(&fixture.task.sst_name));
+            .join(cntryl_midge_table::sst::fs::sst_location(
+                &fixture.task.sst_name,
+            ));
 
         // Act
         let error = finalize_staged_sst(
             &fixture.task,
             &final_path,
-            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+                DEFAULT_FLUSH_MEMORY_BYTES,
+            ),
         )
         .expect_err("directory durability failure must fail SST finalization");
         sync_fs.set_sync_dir_failure(false);
         finalize_staged_sst(
             &fixture.task,
             &final_path,
-            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+                DEFAULT_FLUSH_MEMORY_BYTES,
+            ),
         )?;
 
         // Assert
@@ -1633,20 +1712,25 @@ mod tests {
         // Arrange
         let mut fixture = publication_fixture(usize::MAX)?;
         fixture.task.fs = Arc::new(PublicationTestFs {
-            inner: cntryl_midge_core::io::RealFs::new(&fixture.db_path).map_err(FsError::into_midge)?,
+            inner: cntryl_midge_core::io::RealFs::new(&fixture.db_path)
+                .map_err(FsError::into_midge)?,
             fail_rename: true,
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
         });
         let final_path = fixture
             .db_path
-            .join(cntryl_midge_table::sst::fs::sst_location(&fixture.task.sst_name));
+            .join(cntryl_midge_table::sst::fs::sst_location(
+                &fixture.task.sst_name,
+            ));
 
         // Act
         let error = finalize_staged_sst(
             &fixture.task,
             &final_path,
-            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+                DEFAULT_FLUSH_MEMORY_BYTES,
+            ),
         )
         .expect_err("injected filesystem must own the atomic publication rename");
 
@@ -1763,10 +1847,12 @@ mod tests {
         // Assert
         assert_eq!(delta.identity, fixture.task.build.identity);
         assert_eq!(fixture.sst_backend.get_uploads().len(), 1);
-        assert!(cntryl_midge_durability::metadata::ManifestPersistence::load(&db_path)
-            .map_err(MidgeError::Internal)?
-            .files
-            .is_empty());
+        assert!(
+            cntryl_midge_durability::metadata::ManifestPersistence::load(&db_path)
+                .map_err(MidgeError::Internal)?
+                .files
+                .is_empty()
+        );
         assert!(!db_path.join("intent_log.json").exists());
         Ok(())
     }
@@ -1798,14 +1884,20 @@ mod tests {
 
         // Assert
         assert!(matches!(error, MidgeError::Fenced(_)));
-        assert!(cntryl_midge_durability::metadata::ManifestPersistence::load(&db_path)
+        assert!(
+            cntryl_midge_durability::metadata::ManifestPersistence::load(&db_path)
+                .map_err(MidgeError::Internal)?
+                .files
+                .iter()
+                .any(|file| file.name == sst_name)
+        );
+        assert!(
+            cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load(
+                &db_path
+            )
             .map_err(MidgeError::Internal)?
-            .files
-            .iter()
-            .any(|file| file.name == sst_name));
-        assert!(crate::runtime::IntentPersistence::load(&db_path)
-            .map_err(MidgeError::Internal)?
-            .is_empty());
+            .is_empty()
+        );
         assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         Ok(())
     }
@@ -1822,10 +1914,12 @@ mod tests {
 
         // Assert
         assert_eq!(delta.file_meta.name, sst_name);
-        assert!(cntryl_midge_durability::metadata::ManifestPersistence::load(&db_path)
-            .map_err(MidgeError::Internal)?
-            .files
-            .is_empty());
+        assert!(
+            cntryl_midge_durability::metadata::ManifestPersistence::load(&db_path)
+                .map_err(MidgeError::Internal)?
+                .files
+                .is_empty()
+        );
         assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         Ok(())
     }
@@ -1838,8 +1932,9 @@ mod tests {
         let publication_lock = fixture.metadata_publication_lock.clone();
         let guard = publication_lock.lock();
         let mut task = mirror_task(&fixture, delta);
-        task.deadline =
-            cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_millis(100));
+        task.deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            std::time::Duration::from_millis(100),
+        );
         let (result_tx, result_rx) = std::sync::mpsc::channel();
 
         // Act: keep the lock on this thread so the old blocking lock path

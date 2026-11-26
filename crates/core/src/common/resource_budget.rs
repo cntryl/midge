@@ -29,7 +29,7 @@ struct ResourceBudgetInner {
 
 /// Measure serialized output without allocating a staging buffer.
 #[derive(Default)]
-pub(crate) struct ByteCounter(pub(crate) usize);
+pub struct ByteCounter(pub usize);
 
 impl std::io::Write for ByteCounter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -76,7 +76,7 @@ impl ResourceBudget {
     /// the shared `Arc` because it is a per-holder error contract, and
     /// propagating it would change the errors unrelated callers observe.
     #[must_use]
-    pub(crate) fn child(&self, limit: usize) -> Self {
+    pub fn child(&self, limit: usize) -> Self {
         Self {
             inner: Arc::new(ResourceBudgetInner {
                 id: NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed),
@@ -104,7 +104,7 @@ impl ResourceBudget {
 
     /// Preserve the cause of admission failure for an internal retrying caller.
     /// Ordinary consumers retain the public `ResourceLimit` error contract.
-    pub(crate) fn with_contention_errors(mut self) -> Self {
+    pub fn with_contention_errors(mut self) -> Self {
         self.report_contention = true;
         self
     }
@@ -173,7 +173,7 @@ impl ResourceBudget {
     /// `bytes` must include the actual shared workspace; this cannot discount
     /// a separate new allocation. The result's `bytes`, `resize` and `split`
     /// describe its independently charged part, with credit retained separately.
-    pub(crate) fn reserve_with_shared_credit(
+    pub fn reserve_with_shared_credit(
         &self,
         bytes: usize,
         credit: &Arc<ResourceReservation>,
@@ -205,13 +205,12 @@ impl ResourceBudget {
         self.inner.limit
     }
 
-    pub(crate) fn used(&self) -> usize {
+    pub fn used(&self) -> usize {
         self.inner.current.load(Ordering::Acquire)
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
-    #[cfg(test)]
-    pub(crate) fn peak(&self) -> usize {
+    pub fn peak(&self) -> usize {
         self.inner.peak.load(Ordering::Acquire)
     }
 }
@@ -220,7 +219,7 @@ impl ResourceBudget {
 /// Decoded from the failed attempt's own error; oversized requests remain a
 /// plain `MidgeError::ResourceLimit`.
 #[derive(Debug, Clone)]
-pub(crate) struct ResourceContention {
+pub struct ResourceContention {
     pool_id: u64,
     required_release: usize,
     message: String,
@@ -229,14 +228,14 @@ pub(crate) struct ResourceContention {
 impl ResourceContention {
     /// Match this failed attempt's originating pool even if the owner that
     /// caused contention has already released its charge.
-    pub(crate) fn is_for_pool(&self, budget: &ResourceBudget) -> bool {
+    pub fn is_for_pool(&self, budget: &ResourceBudget) -> bool {
         budget.is_within_pool(self.pool_id)
     }
     /// Recover the contention that produced `error`, if it was produced by a
     /// contention-reporting budget. Pure: nothing is consumed, so the same
     /// error can be inspected any number of times and no other attempt can
     /// affect the answer.
-    pub(crate) fn from_error(error: &MidgeError) -> Option<Self> {
+    pub fn from_error(error: &MidgeError) -> Option<Self> {
         let MidgeError::ResourceLimit(message) = error else {
             return None;
         };
@@ -251,7 +250,7 @@ impl ResourceContention {
         })
     }
 
-    pub(crate) fn is_blocked_by(&self, budget: &ResourceBudget) -> bool {
+    pub fn is_blocked_by(&self, budget: &ResourceBudget) -> bool {
         // Temporary allocations have unwound before the caller decides to retry.
         // The remaining reservations must cover the shortfall; otherwise the
         // operation's own working set cannot fit even if those owners finish.
@@ -264,7 +263,7 @@ impl ResourceContention {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_context(mut self, context: &str) -> Self {
+    pub fn with_context(mut self, context: &str) -> Self {
         self.message = format!("{context}: {}", self.message);
         self
     }
@@ -304,7 +303,7 @@ impl Drop for SharedReservationCredit {
 impl ResourceReservation {
     /// Whether this attempt was refused by a reservation in this same pool
     /// hierarchy, even if that owner finished before error classification.
-    pub(crate) fn admission_retryable(&self, error: &MidgeError) -> bool {
+    pub fn admission_retryable(&self, error: &MidgeError) -> bool {
         ResourceContention::from_error(error)
             .is_some_and(|contention| contention.is_for_pool(&self.budget))
     }
@@ -312,7 +311,7 @@ impl ResourceReservation {
     /// Transfer an existing charge without releasing or increasing any level
     /// of its pool hierarchy. The two resulting owners release independently.
     /// Borrowed credit stays with this source; it is never copied to the split.
-    pub(crate) fn split(&mut self, bytes: usize) -> MidgeResult<Self> {
+    pub fn split(&mut self, bytes: usize) -> MidgeResult<Self> {
         if bytes > self.bytes || self.credit_claimed.load(Ordering::Acquire) {
             return Err(MidgeError::ResourceLimit(
                 "resource reservation cannot split its owned charge".into(),
@@ -332,26 +331,22 @@ impl ResourceReservation {
             credit_claimed: AtomicBool::new(false),
         })
     }
-    pub(crate) fn reserve_related(
-        &self,
-        bytes: usize,
-        resource: &'static str,
-    ) -> MidgeResult<Self> {
+    pub fn reserve_related(&self, bytes: usize, resource: &'static str) -> MidgeResult<Self> {
         self.budget.reserve(bytes, resource)
     }
 
-    pub(crate) fn bytes(&self) -> usize {
+    pub fn bytes(&self) -> usize {
         self.bytes
     }
 
-    pub(crate) fn limit(&self) -> usize {
+    pub fn limit(&self) -> usize {
         self.budget.limit()
     }
 
     /// Payload retained by this reservation and its owned parent Boxes.
     /// The caller accounts for its outer Arc header separately. Shared pool
     /// objects and borrowed-credit allocations already have separate owners.
-    pub(crate) fn allocation_bytes(&self) -> usize {
+    pub fn allocation_bytes(&self) -> usize {
         let mut bytes = std::mem::size_of::<Self>();
         let mut parent = self.parent.as_deref();
         while let Some(reservation) = parent {

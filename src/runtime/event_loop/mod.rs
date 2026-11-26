@@ -122,7 +122,9 @@ impl RecoveredCloudWalConfig {
         sealed_tail: Option<crate::runtime::wal_history::SealedSegment>,
     ) -> Self {
         let mut recovered = Self::from(config);
-        if config.wal_durability_policy != cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync {
+        if config.wal_durability_policy
+            != cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync
+        {
             return recovered;
         }
         if let Some(sealed) = sealed_tail {
@@ -196,7 +198,8 @@ struct PublicationCoordination {
     compaction_publish_result_rx: crossbeam::channel::Receiver<CompactionPublishCompletion>,
     deferred_compaction_result: Option<CompactionPublishCompletion>,
     compaction_publication: compaction::PublicationSlot<compaction::PendingCompactionPublication>,
-    flush_barrier_waiters: HashMap<cntryl_midge_core::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
+    flush_barrier_waiters:
+        HashMap<cntryl_midge_core::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
 }
 
 struct PipelineCoordination {
@@ -559,7 +562,8 @@ impl EventLoop {
     fn seal_recovered_tail(
         state: &mut RuntimeState,
         config: &super::RuntimeConfig,
-    ) -> cntryl_midge_core::common::MidgeResult<Option<crate::runtime::wal_history::SealedSegment>> {
+    ) -> cntryl_midge_core::common::MidgeResult<Option<crate::runtime::wal_history::SealedSegment>>
+    {
         Self::check_existing_levels(state, &config.compaction_levels)?;
         state.begin_wal_epoch(config.writer_epoch)
     }
@@ -655,12 +659,16 @@ impl EventLoop {
             .pipeline
             .durability
             .contiguous_acked_cloud_segments(self.actors.cloud_coordinator.cloud_wal.acks())
-            .map_err(|refusal| cntryl_midge_core::common::MidgeError::RecoveryFailed(refusal.to_string()))?;
+            .map_err(|refusal| {
+                cntryl_midge_core::common::MidgeError::RecoveryFailed(refusal.to_string())
+            })?;
         check_startup_scope(startup_scope, "recovered cloud WAL acknowledgement")?;
         if let Some(durable) = initially_durable.last() {
             self.state.wal.advance_cloud_through(durable.max_sequence);
         }
-        for cntryl_midge_durability::wal::publish::OwedSegment { segment_id, .. } in initially_durable {
+        for cntryl_midge_durability::wal::publish::OwedSegment { segment_id, .. } in
+            initially_durable
+        {
             check_startup_scope(startup_scope, "recovered durable cloud WAL")?;
             self.pipeline
                 .wal_transition
@@ -749,7 +757,9 @@ impl EventLoop {
     /// shutdown behind it, so it gets the same budget the runtime promises
     /// its callers rather than waiting indefinitely.
     pub(super) fn event_loop_cloud_deadline(&self) -> cntryl_midge_core::common::OperationDeadline {
-        cntryl_midge_core::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout)
+        cntryl_midge_core::common::OperationDeadline::from_budget(
+            self.routing.runtime_response_timeout,
+        )
     }
 
     /// Set the snapshot cache for read-path bypass.
@@ -834,7 +844,10 @@ impl EventLoop {
 
     /// Ordinary commits update only their families. Lifecycle and manifest
     /// publication use the full pass above, retaining unchanged source Arcs.
-    pub(super) fn publish_snapshots_for(&self, cf_ids: &[cntryl_midge_core::types::ColumnFamilyId]) {
+    pub(super) fn publish_snapshots_for(
+        &self,
+        cf_ids: &[cntryl_midge_core::types::ColumnFamilyId],
+    ) {
         for &cf_id in cf_ids {
             self.publish_write_pressure(cf_id);
         }
@@ -894,7 +907,7 @@ impl EventLoop {
         cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sst_name: &str,
         sequence: u64,
-        file_meta: Option<crate::runtime::FileMeta>,
+        file_meta: Option<cntryl_midge_durability::metadata::intent::FileMeta>,
         _frozen_memtable: Option<&std::sync::Arc<cntryl_midge_table::memtable::SkipListMemtable>>,
     ) -> cntryl_midge_core::common::MidgeResult<()> {
         let Some(file_meta) = file_meta else {
@@ -919,7 +932,7 @@ impl EventLoop {
         )?;
         self.state.transition_flush_publication_intent(
             sst_name,
-            crate::runtime::PublicationPhase::ManifestPublished,
+            cntryl_midge_durability::metadata::intent::PublicationPhase::ManifestPublished,
         )?;
         crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
         self.state.clear_flush_publication_intent(sst_name)?;
@@ -953,8 +966,9 @@ impl EventLoop {
     }
 
     pub(super) fn retry_gc(&mut self) -> HandleOutcome {
-        let deadline =
-            cntryl_midge_core::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout);
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            self.routing.runtime_response_timeout,
+        );
         gc::GcCoordinator::retry_within(self, &deadline)
     }
 

@@ -1,9 +1,11 @@
 //! Keep accepted cloud transactions inside a flushable memtable generation.
 
 use super::EventLoop;
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
-use cntryl_midge_table::memtable::size_bound::{flush_staging_bytes, point_bytes, range_bytes, FIXED_SST_BYTES};
 use crate::runtime::TransactionOp;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_table::memtable::size_bound::{
+    flush_staging_bytes, point_bytes, range_bytes, FIXED_SST_BYTES,
+};
 use std::collections::HashMap;
 
 impl EventLoop {
@@ -262,8 +264,10 @@ mod tests {
         Arc<cntryl_midge_storage::HybridStorage>,
     )> {
         let directory = tempfile::tempdir()?;
-        let setup =
-            cntryl_midge_storage::simulated::host_simulated_cloud(directory.path(), Some(256 * 1024))?;
+        let setup = cntryl_midge_storage::simulated::host_simulated_cloud(
+            directory.path(),
+            Some(256 * 1024),
+        )?;
         setup.hybrid_storage.enable_ephemeral_sst_cache(256 * 1024);
         let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
         let config = crate::runtime::RuntimeConfig {
@@ -299,8 +303,9 @@ mod tests {
                     let cf = event_loop.state.get_cf_mut(other).unwrap();
                     cf.memtable
                         .put_with_seq(b"seed".to_vec(), vec![1; 20 * 1024], 1, None)?;
-                    cf.immutable_memtables
-                        .push(Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new()));
+                    cf.immutable_memtables.push(Arc::new(
+                        cntryl_midge_table::memtable::SkipListMemtable::new(),
+                    ));
                     event_loop.state.sequence = 1;
                 }
                 let put = |cf_id, key: &'static [u8], size| TransactionOp::Put {
@@ -696,7 +701,9 @@ mod tests {
             .get_cf_mut(0)
             .unwrap()
             .immutable_memtables
-            .push(Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new()));
+            .push(Arc::new(
+                cntryl_midge_table::memtable::SkipListMemtable::new(),
+            ));
         let ops = || {
             vec![TransactionOp::Put {
                 cf_id: 0,

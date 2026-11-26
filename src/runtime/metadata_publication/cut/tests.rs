@@ -1,15 +1,15 @@
 use super::MetadataPublicationLock;
+use crate::runtime::hybrid_persistence::{
+    mirror_captured_control_metadata_within, CloudMetadataMirrorAuthority,
+    CloudMetadataMirrorContext,
+};
+use crate::runtime::{IntentLogEntry, IntentPersistence, PublicationPhase};
 use cntryl_midge_core::common::resource_budget::ResourceBudget;
 use cntryl_midge_core::common::OperationDeadline;
 use cntryl_midge_core::io::{Fs, FsPath};
 use cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore;
 use cntryl_midge_durability::lease::LeaderStore;
 use cntryl_midge_durability::metadata::{files, Manifest, ManifestEdit, ManifestPersistence};
-use crate::runtime::hybrid_persistence::{
-    mirror_captured_control_metadata_within, CloudMetadataMirrorAuthority,
-    CloudMetadataMirrorContext,
-};
-use crate::runtime::{IntentLogEntry, IntentPersistence, PublicationPhase};
 use cntryl_midge_storage::cloud::CloudStorage;
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,7 +77,8 @@ struct DroppedSource {
 fn select_source_before_contended_drop() -> DroppedSource {
     let directory = tempfile::tempdir().unwrap();
     let fs = cntryl_midge_core::io::real::test_root(directory.path());
-    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())
+        .unwrap();
     ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
     let file = cntryl_midge_durability::metadata::FileMeta {
         name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
@@ -102,7 +103,7 @@ fn select_source_before_contended_drop() -> DroppedSource {
             phase: PublicationPhase::ManifestPublished,
             cf_id: 0,
             sequence: 1,
-            file_meta: crate::runtime::FileMeta::from(&file),
+            file_meta: cntryl_midge_durability::metadata::intent::FileMeta::from(&file),
         }],
     )
     .unwrap();
@@ -121,7 +122,10 @@ fn select_source_before_contended_drop() -> DroppedSource {
         }),
         "one-cut".into(),
     );
-    let store = FsLeaderStore::new(Arc::clone(&fs), cntryl_midge_durability::lease::LeaseClock::default());
+    let store = FsLeaderStore::new(
+        Arc::clone(&fs),
+        cntryl_midge_durability::lease::LeaseClock::default(),
+    );
     store.acquire_leadership("writer").unwrap();
     mirror_captured_control_metadata_within(
         CloudMetadataMirrorContext {
@@ -250,8 +254,11 @@ fn should_bound_cut_witness_storage_before_decoding_announced_members() {
     let maximum = cntryl_midge_durability::metadata::codec::encode(5, &raw).unwrap();
 
     // Act
-    let rejected = cntryl_midge_durability::metadata::codec::decode::<super::MetadataCutProof>(5, &oversized);
-    let accepted = cntryl_midge_durability::metadata::codec::decode::<super::MetadataCutProof>(5, &maximum).unwrap();
+    let rejected =
+        cntryl_midge_durability::metadata::codec::decode::<super::MetadataCutProof>(5, &oversized);
+    let accepted =
+        cntryl_midge_durability::metadata::codec::decode::<super::MetadataCutProof>(5, &maximum)
+            .unwrap();
 
     // Assert
     assert!(

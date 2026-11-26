@@ -1,7 +1,7 @@
 use super::*;
+use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use cntryl_midge_core::common::{MidgeResult, OperationDeadline};
 use cntryl_midge_durability::lease::{CloudMetadataGeneration, CloudMetadataHead};
-use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use std::time::Duration;
 
 fn generation(event_loop: &EventLoop) -> CloudMetadataGeneration {
@@ -32,7 +32,9 @@ fn should_prewarm_first_flush_block_before_output_needs_its_name() -> MidgeResul
     let journal_before = event_loop
         .state
         .fs
-        .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
+        .metadata(&cntryl_midge_core::io::FsPath::new(
+            cntryl_midge_durability::metadata::files::JOURNAL,
+        ))
         .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
     let assigned = event_loop.reserve_flush_sst_seq(0)?;
@@ -46,7 +48,9 @@ fn should_prewarm_first_flush_block_before_output_needs_its_name() -> MidgeResul
         event_loop
             .state
             .fs
-            .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
+            .metadata(&cntryl_midge_core::io::FsPath::new(
+                cntryl_midge_durability::metadata::files::JOURNAL
+            ))
             .map_err(cntryl_midge_core::io::FsError::into_midge)?
             .len,
         journal_before
@@ -112,7 +116,9 @@ fn should_use_shared_prefetched_name_cursor_when_wal_sequence_is_high() -> Midge
     let journal_before = event_loop
         .state
         .fs
-        .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
+        .metadata(&cntryl_midge_core::io::FsPath::new(
+            cntryl_midge_durability::metadata::files::JOURNAL,
+        ))
         .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
     // Act: these are the production naming entry points used by output launch.
@@ -129,7 +135,9 @@ fn should_use_shared_prefetched_name_cursor_when_wal_sequence_is_high() -> Midge
         event_loop
             .state
             .fs
-            .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
+            .metadata(&cntryl_midge_core::io::FsPath::new(
+                cntryl_midge_durability::metadata::files::JOURNAL
+            ))
             .map_err(cntryl_midge_core::io::FsError::into_midge)?
             .len,
         journal_before

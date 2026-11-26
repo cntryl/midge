@@ -1,10 +1,10 @@
 //! Discover only keys that this writer can never admit into selected history.
 
 use super::{decode_generation_manifest, read_committed_metadata_bodies_within};
+use crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority;
 use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
 use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use cntryl_midge_durability::lease::{CloudMetadataGeneration, CloudMetadataHead};
-use crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority;
 use cntryl_midge_storage::cloud::{CloudListPageRequest, CloudStorage, MAX_LIST_PAGE_KEYS};
 use cntryl_midge_storage::HybridStorage;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -246,11 +246,14 @@ fn selected_names(
     for family in &manifest.column_families {
         names.extend(family.dropped_sst_names.iter().cloned());
     }
-    let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> = std::sync::Arc::new(cntryl_midge_core::io::MockFs::new());
+    let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> =
+        std::sync::Arc::new(cntryl_midge_core::io::MockFs::new());
     if let Some(intents) = bodies.get(cntryl_midge_durability::metadata::files::INTENT_LOG) {
         let mut file = fs
             .open(
-                &cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::INTENT_LOG),
+                &cntryl_midge_core::io::FsPath::new(
+                    cntryl_midge_durability::metadata::files::INTENT_LOG,
+                ),
                 cntryl_midge_core::io::OpenOptions {
                     mode: cntryl_midge_core::io::OpenMode::ReadWrite,
                     create: true,
@@ -261,7 +264,7 @@ fn selected_names(
             .map_err(cntryl_midge_core::io::FsError::into_midge)?;
         file.write_at(0, bytes::Bytes::copy_from_slice(intents))
             .map_err(cntryl_midge_core::io::FsError::into_midge)?;
-        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+        let intents = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy(
             &fs,
             cntryl_midge_durability::RecoveryPolicy::Strict,
         )
@@ -304,10 +307,10 @@ fn validate_selected(
 }
 
 pub(crate) fn visit_intent_sources(
-    intent: &crate::runtime::IntentLogEntry,
+    intent: &cntryl_midge_durability::metadata::intent::IntentLogEntry,
     mut visit: impl FnMut(&str),
 ) {
-    use crate::runtime::IntentLogEntry;
+    use cntryl_midge_durability::metadata::intent::IntentLogEntry;
     match intent {
         IntentLogEntry::MoveSstsPublish { captured, .. } => {
             for file in captured {

@@ -7,9 +7,9 @@
 //! later exact edit.
 
 use super::{FloorEdit, WalActor};
-use cntryl_midge_core::common::MidgeResult;
 use crate::config::AmortizedSyncFloor;
 use crate::runtime::state::RuntimeState;
+use cntryl_midge_core::common::MidgeResult;
 use cntryl_midge_durability::wal::format::HEADER_LEN;
 use cntryl_midge_durability::wal::ledger::SegmentId;
 use std::time::{Duration, Instant};

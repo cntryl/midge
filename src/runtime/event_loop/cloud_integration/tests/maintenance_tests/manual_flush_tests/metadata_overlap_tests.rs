@@ -148,14 +148,14 @@ impl Fixture {
         self.el.handle_flush_worker_result(published);
         fail::remove("midge::manifest::inject_no_space_on_append_edit_batch");
         self.el.state.retry_metadata_reload()?;
-        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+        let intents = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
             &self.el.state.fs,
             cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
         assert!(intents.iter().any(|intent| matches!(
             intent,
-            crate::runtime::IntentLogEntry::FlushPublish {
-                phase: crate::runtime::PublicationPhase::OutputDurable,
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish {
+                phase: cntryl_midge_durability::metadata::intent::PublicationPhase::OutputDurable,
                 ..
             }
         )));
@@ -195,14 +195,16 @@ impl Fixture {
             String::new(),
             Duration::from_secs(5),
         ));
-        let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-            cntryl_midge_durability::lease::CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: "overlap".into(),
-            },
-            original.state.db_path.clone(),
-            Arc::clone(&metadata),
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "test".into(),
+                    prefix: "overlap".into(),
+                },
+                original.state.db_path.clone(),
+                Arc::clone(&metadata),
+            ),
+        );
         let guard = Arc::clone(&lease)
             .try_acquire()
             .map_err(|error| error.into_validation_error("overlap lease"))?;
@@ -226,9 +228,11 @@ impl Fixture {
             _guard: guard,
             ..
         } = Self::new()?;
-        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        let deadline =
+            cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
         original.drain_metadata_mirror_within(&deadline)?;
-        let root: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
+        let root: Arc<dyn cntryl_midge_core::io::Fs> =
+            Arc::new(cntryl_midge_core::io::MockFs::new());
         root.create_dir_all(&cntryl_midge_core::io::FsPath::new("sst"))
             .map_err(FsError::into_midge)?;
         for name in cntryl_midge_durability::metadata::files::CLOUD_MIRRORED {
@@ -343,7 +347,8 @@ impl Fixture {
         );
         families.sort_unstable();
         families.dedup();
-        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        let deadline =
+            cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
         for cf_id in families {
             while self
                 .el
@@ -355,7 +360,8 @@ impl Fixture {
                 .unwrap_or(0)
                 <= 1024
             {
-                cntryl_midge_core::common::DeadlineScope::new(deadline).check("fixture name coverage")?;
+                cntryl_midge_core::common::DeadlineScope::new(deadline)
+                    .check("fixture name coverage")?;
                 if !self
                     .el
                     .actors
@@ -497,14 +503,14 @@ impl Fixture {
         pending_compaction: bool,
     ) -> MidgeResult<std::collections::BTreeSet<String>> {
         let names = if pending_compaction {
-            crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+            cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
                 &self.el.state.fs,
                 cntryl_midge_durability::RecoveryPolicy::Strict,
             )?
             .into_iter()
             .filter_map(|intent| match intent {
-                crate::runtime::IntentLogEntry::CompactionPublish {
-                    phase: crate::runtime::PublicationPhase::OutputDurable,
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                    phase: cntryl_midge_durability::metadata::intent::PublicationPhase::OutputDurable,
                     added,
                     ..
                 } => Some(added),
@@ -537,11 +543,12 @@ impl Fixture {
             cold.path(),
             cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
-        let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
-            &fs,
-            cntryl_midge_durability::RecoveryPolicy::Strict,
-        )
-        .map_err(MidgeError::Internal)?;
+        let manifest =
+            cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
+                &fs,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
+            )
+            .map_err(MidgeError::Internal)?;
         assert!(
             manifest
                 .files
@@ -549,7 +556,7 @@ impl Fixture {
                 .all(|file| !held_outputs.contains(&file.name)),
             "unselected compaction outputs cannot become authoritative during hydration"
         );
-        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+        let intents = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy(
             &fs,
             cntryl_midge_durability::RecoveryPolicy::Strict,
         )
@@ -557,7 +564,7 @@ impl Fixture {
         assert_eq!(
             intents.iter().any(|intent| matches!(
                 intent,
-                crate::runtime::IntentLogEntry::CompactionPublish { .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish { .. }
             )),
             pending_compaction
         );
@@ -582,11 +589,12 @@ impl Fixture {
                 .background_compaction(false)
                 .build()?,
         )?;
-        let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
-            &fs,
-            cntryl_midge_durability::RecoveryPolicy::Strict,
-        )
-        .map_err(MidgeError::Internal)?;
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
+                &fs,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
+            )
+            .map_err(MidgeError::Internal)?;
         assert!(
             recovered
                 .files
@@ -675,11 +683,9 @@ fn should_finish_flush_retry_when_earlier_capture_retains_its_failed_manifest_in
     // fails. A different admitted metadata owner captures that durable intent.
     let mut fixture = Fixture::new()?;
     let flush_id = fixture.fail_flush_manifest_after_actual_upload()?;
-    fixture
-        .el
-        .drain_metadata_mirror_within(&cntryl_midge_core::common::OperationDeadline::from_budget(
-            Duration::from_secs(5),
-        ))?;
+    fixture.el.drain_metadata_mirror_within(
+        &cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+    )?;
     let (entered, arrived) = crossbeam::channel::bounded(1);
     let (release, resumed) = crossbeam::channel::bounded(1);
     *fixture.provider.next_manifest.lock().unwrap() = Some(HeldPut {
@@ -721,14 +727,14 @@ fn should_finish_flush_retry_when_earlier_capture_retains_its_failed_manifest_in
         if let Err(error) = capture {
             eprintln!("failed flush retry coverage: {error}");
         }
-        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+        let intents = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
             &fixture.el.state.fs,
             cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
         assert!(
             !intents.iter().any(|intent| matches!(
                 intent,
-                crate::runtime::IntentLogEntry::FlushPublish { .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish { .. }
             )),
             "the retry actually cleared its original durable flush intent"
         );
@@ -740,11 +746,9 @@ fn should_finish_flush_retry_when_earlier_capture_retains_its_failed_manifest_in
     fixture.assert_rows()?;
     fixture.assert_cloud_restart(false)?;
     held.release();
-    fixture
-        .el
-        .drain_metadata_mirror_within(&cntryl_midge_core::common::OperationDeadline::from_budget(
-            Duration::from_secs(5),
-        ))?;
+    fixture.el.drain_metadata_mirror_within(
+        &cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+    )?;
     fixture.assert_rows()?;
     Ok(())
 }
@@ -1025,7 +1029,7 @@ fn assert_settled_publication(
             .pending_captures(),
         0
     );
-    assert!(!crate::runtime::IntentPersistence::load_with_fs_and_policy(
+    assert!(!cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy(
         &fixture.el.state.fs,
         cntryl_midge_durability::RecoveryPolicy::Strict
     )
@@ -1033,8 +1037,8 @@ fn assert_settled_publication(
     .iter()
     .any(|intent| matches!(
         intent,
-        crate::runtime::IntentLogEntry::FlushPublish { .. }
-            | crate::runtime::IntentLogEntry::CompactionPublish { .. }
+        cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish { .. }
+            | cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish { .. }
     )));
     fixture.assert_rows()?;
     fixture.assert_cloud_restart(false)?;

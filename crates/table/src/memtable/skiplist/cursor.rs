@@ -102,7 +102,7 @@ impl Iterator for VisibleCursor {
         // SAFETY: `curr` came from `seek`/`step`, which load published links
         // with Acquire; nodes are never freed while `self.list` is shared.
         while let Some(node) = unsafe { curr.as_ref() } {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "internal-testing"))]
             self.list.note_node_visited();
             if !self.within_bounds(&node.key) {
                 break;

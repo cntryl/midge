@@ -2,8 +2,8 @@
 
 use super::super::{Engine, OpenOptions};
 use super::EngineStartup;
-use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::{StartupAdmission, StartupEvent, StartupObserver};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crossbeam::channel::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

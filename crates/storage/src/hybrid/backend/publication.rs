@@ -1,17 +1,17 @@
 //! Immutable SST publication and retry compatibility.
 
 use super::HybridStorage;
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 use super::{mpsc, StorageEvent, StorageOutcome};
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 use cntryl_midge_core::{MidgeError, MidgeResult, OperationDeadline};
 
 impl HybridStorage {
     /// Byte-oriented fixture publication; runtime SST publishers use
     /// `publish_immutable_file` with shared admission and bounded readback.
     /// Retries succeed only when an existing object holds exactly these bytes.
-    #[cfg(test)]
-    pub(crate) fn publish_immutable_object_within(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn publish_immutable_object_within(
         &self,
         key: &str,
         data: &[u8],
@@ -20,7 +20,7 @@ impl HybridStorage {
         self.ensure_remote_immutable_published(key, data, deadline)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn ensure_remote_immutable_published(
         &self,
         key: &str,
@@ -88,7 +88,7 @@ impl HybridStorage {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn ensure_remote_object_matches(
         &self,
         key: &str,
@@ -120,7 +120,7 @@ impl HybridStorage {
         )))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn publication_error(context: &str, error: MidgeError) -> MidgeError {
         match error {
             MidgeError::Timeout(message) => MidgeError::Timeout(format!("{context}: {message}")),

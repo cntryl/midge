@@ -1,7 +1,7 @@
 use super::*;
 use cntryl_midge_core::io::{Fs, MockFs};
-use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory};
 use cntryl_midge_core::types::EntryType;
+use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory};
 use std::sync::Arc;
 
 #[test]

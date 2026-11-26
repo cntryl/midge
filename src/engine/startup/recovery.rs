@@ -1,10 +1,10 @@
 use super::{CloudStartupRecovery, RuntimeRecoveryMaterialization, RuntimeStorageMaterialization};
-use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
-use cntryl_midge_durability::RecoveryPolicy;
-use cntryl_midge_core::io::FsError;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority;
 use crate::runtime::RuntimeState;
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_durability::RecoveryPolicy;
 use std::sync::Arc;
 
 impl RuntimeRecoveryMaterialization {
@@ -36,7 +36,7 @@ impl RuntimeRecoveryMaterialization {
             // Retain the local bytes unless the remote publication proof holds.
             let validation = RuntimeState::validate_sst_fs_proof(
                 Arc::clone(&fs),
-                &crate::runtime::FileMeta::from(meta),
+                &cntryl_midge_durability::metadata::intent::FileMeta::from(meta),
             );
             materialized
                 .state
@@ -98,7 +98,9 @@ impl RuntimeRecoveryMaterialization {
                     .len
             };
             total = total.checked_add(bytes).ok_or_else(|| {
-                cntryl_midge_core::common::MidgeError::ResourceLimit("local storage accounting overflow".into())
+                cntryl_midge_core::common::MidgeError::ResourceLimit(
+                    "local storage accounting overflow".into(),
+                )
             })?;
         }
         check_scope(scope, "startup storage accounting completion")?;
@@ -162,11 +164,10 @@ impl RuntimeRecoveryMaterialization {
         scope: &DeadlineScope,
     ) -> MidgeResult<Self> {
         scope.check("recovery repair")?;
-        materialized.state.recovery_sst_fs = materialized
-            .runtime_config
-            .sst_read_fs
-            .as_ref()
-            .map(|fs| cntryl_midge_core::telemetry::recovery_progress::observe_reads(Arc::clone(fs)));
+        materialized.state.recovery_sst_fs =
+            materialized.runtime_config.sst_read_fs.as_ref().map(|fs| {
+                cntryl_midge_core::telemetry::recovery_progress::observe_reads(Arc::clone(fs))
+            });
         let remote_cleanup_candidates = materialized
             .state
             .non_authoritative_compaction_outputs_for_remote_cleanup()?;

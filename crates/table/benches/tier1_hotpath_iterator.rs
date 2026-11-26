@@ -2,9 +2,6 @@
 //!
 //! Covers in-memory skiplist traversal used during scans.
 
-#[path = "table_bench_support.rs"]
-mod stress_config;
-
 use bytes::Bytes;
 use cntryl_midge_table::memtable::bench::SkipList;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
@@ -52,7 +49,7 @@ fn run_iter_sequential(ctx: &mut StressContext, scenario: &'static str, count: u
     ctx.parameter("range_scan_batch_size", RANGE_SCAN_BATCH_SIZE);
     ctx.parameter("logical_unit", "range_scan");
 
-    stress_config::measure_hot_path_batch(ctx, scenario, RANGE_SCAN_BATCH_SIZE as u64, || {
+    let _completed = ctx.measure_batch(scenario, RANGE_SCAN_BATCH_SIZE as u64, || {
         let mut checksum = 0usize;
         for _ in 0..RANGE_SCAN_BATCH_SIZE {
             let entries = sl.range(None, None);
@@ -95,7 +92,7 @@ fn run_range(ctx: &mut StressContext, scenario: &'static str, start: usize, end:
     ctx.parameter("range_scan_batch_size", RANGE_SCAN_BATCH_SIZE);
     ctx.parameter("logical_unit", "range_scan");
 
-    stress_config::measure_hot_path_batch(ctx, scenario, RANGE_SCAN_BATCH_SIZE as u64, || {
+    let _completed = ctx.measure_batch(scenario, RANGE_SCAN_BATCH_SIZE as u64, || {
         let mut checksum = 0usize;
         for _ in 0..RANGE_SCAN_BATCH_SIZE {
             let entries = sl.range(
@@ -136,10 +133,10 @@ fn next_after_seek(ctx: &mut StressContext) {
     let mut key_index = 0usize;
     ctx.parameter("batch_size", ITER_SINGLE_STEP_BATCH_SIZE);
     ctx.parameter("seek_windows", SEEK_WINDOW_COUNT);
-    stress_config::mark_validated_micro(ctx, "iterator_seek_next");
+    ctx.parameter("logical_unit", "iterator_seek_next");
+    ctx.metadata("validated_micro", "true");
 
-    stress_config::measure_hot_path_batch(
-        ctx,
+    let _completed = ctx.measure_batch(
         "next_after_seek",
         ITER_SINGLE_STEP_BATCH_SIZE as u64,
         || {
@@ -164,7 +161,8 @@ fn next_after_seek(ctx: &mut StressContext) {
     metadata(component = "iterator", scenario = "range_beginning")
 )]
 fn range_beginning(ctx: &mut StressContext) {
-    stress_config::mark_local_rsd_diagnostic(ctx);
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
     run_range(ctx, "range_beginning", 0, 10);
 }
 
@@ -174,7 +172,8 @@ fn range_beginning(ctx: &mut StressContext) {
     metadata(component = "iterator", scenario = "range_middle")
 )]
 fn range_middle(ctx: &mut StressContext) {
-    stress_config::mark_local_rsd_diagnostic(ctx);
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
     run_range(ctx, "range_middle", 45, 55);
 }
 
@@ -184,7 +183,8 @@ fn range_middle(ctx: &mut StressContext) {
     metadata(component = "iterator", scenario = "range_end")
 )]
 fn range_end(ctx: &mut StressContext) {
-    stress_config::mark_local_rsd_diagnostic(ctx);
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
     run_range(ctx, "range_end", 90, 100);
 }
 
@@ -202,7 +202,8 @@ fn unbounded_50_keys(ctx: &mut StressContext) {
     metadata(component = "iterator", scenario = "bounded_50_keys")
 )]
 fn bounded_50_keys(ctx: &mut StressContext) {
-    stress_config::mark_local_rsd_diagnostic(ctx);
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
     run_range(ctx, "bounded_50_keys", 0, 50);
 }
 

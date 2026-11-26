@@ -13,7 +13,7 @@ use super::{
 use cntryl_midge_core::{MidgeError, MidgeResult, OperationDeadline};
 use std::sync::mpsc::RecvTimeoutError;
 
-pub(crate) struct BlockingCloud<'a> {
+pub struct BlockingCloud<'a> {
     cloud: &'a CloudStorage,
     deadline: &'a OperationDeadline,
     reservation:
@@ -21,7 +21,7 @@ pub(crate) struct BlockingCloud<'a> {
 }
 
 impl<'a> BlockingCloud<'a> {
-    pub(crate) fn new(cloud: &'a CloudStorage, deadline: &'a OperationDeadline) -> Self {
+    pub fn new(cloud: &'a CloudStorage, deadline: &'a OperationDeadline) -> Self {
         Self {
             cloud,
             deadline,
@@ -29,7 +29,7 @@ impl<'a> BlockingCloud<'a> {
         }
     }
 
-    pub(crate) fn with_reservation(
+    pub fn with_reservation(
         mut self,
         reservation: std::sync::Arc<
             cntryl_midge_core::common::resource_budget::ResourceReservation,
@@ -105,7 +105,7 @@ impl<'a> BlockingCloud<'a> {
             })
     }
 
-    pub(crate) fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {
+    pub fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {
         let read_deadline = self.begin("get", key)?;
         loop {
             self.remaining(&read_deadline, "get", key)?;
@@ -144,7 +144,7 @@ impl<'a> BlockingCloud<'a> {
         }
     }
 
-    pub(crate) fn head_optional(&self, key: &str) -> MidgeResult<Option<ObjectMetadata>> {
+    pub fn head_optional(&self, key: &str) -> MidgeResult<Option<ObjectMetadata>> {
         let deadline = self.begin("head", key)?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud
@@ -155,7 +155,7 @@ impl<'a> BlockingCloud<'a> {
         })
     }
 
-    pub(crate) fn range_identity(&self, key: &str) -> MidgeResult<Option<ObjectMetadata>> {
+    pub fn range_identity(&self, key: &str) -> MidgeResult<Option<ObjectMetadata>> {
         let deadline = self.begin("range HEAD", key)?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud.heads.head_for_range(
@@ -170,7 +170,7 @@ impl<'a> BlockingCloud<'a> {
     }
 
     /// Read a bounded immutable body under the exact identity supplied by HEAD.
-    pub(crate) fn get_exact_len(&self, key: &str, len: u64) -> MidgeResult<Option<Vec<u8>>> {
+    pub fn get_exact_len(&self, key: &str, len: u64) -> MidgeResult<Option<Vec<u8>>> {
         let Some(identity) = self.range_identity(key)? else {
             return Ok(None);
         };
@@ -182,7 +182,7 @@ impl<'a> BlockingCloud<'a> {
         self.get_identity_range(key, identity)
     }
 
-    pub(crate) fn get_bounded(&self, key: &str, max_len: u64) -> MidgeResult<Option<Vec<u8>>> {
+    pub fn get_bounded(&self, key: &str, max_len: u64) -> MidgeResult<Option<Vec<u8>>> {
         let Some(identity) = self.range_identity(key)? else {
             return Ok(None);
         };
@@ -218,7 +218,7 @@ impl<'a> BlockingCloud<'a> {
         })
     }
 
-    pub(crate) fn list(&self, prefix: &str) -> MidgeResult<Vec<String>> {
+    pub fn list(&self, prefix: &str) -> MidgeResult<Vec<String>> {
         let deadline = self.begin("list", prefix)?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud
@@ -230,7 +230,7 @@ impl<'a> BlockingCloud<'a> {
         Ok(keys.unwrap_or_default())
     }
 
-    pub(crate) fn list_page(
+    pub fn list_page(
         &self,
         prefix: &str,
         page: super::CloudListPageRequest,
@@ -268,7 +268,7 @@ impl<'a> BlockingCloud<'a> {
     /// An admitted FORMAT 10 stage can be reclaimed only after each payload
     /// PUT has a positive terminal reply. Readback alone can prove bytes, but
     /// cannot prove that a timed-out request will never create them again.
-    pub(crate) fn put_immutable_terminal(&self, key: &str, bytes: &[u8]) -> MidgeResult<()> {
+    pub fn put_immutable_terminal(&self, key: &str, bytes: &[u8]) -> MidgeResult<()> {
         use crate::{StorageBackend, StoragePrecondition, StorageRequest};
         let deadline = self.begin("immutable put", key)?;
         let timeout = self.remaining(&deadline, "immutable put", key)?;
@@ -297,8 +297,8 @@ impl<'a> BlockingCloud<'a> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn put_with_headers(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn put_with_headers(
         &self,
         key: &str,
         data: Vec<u8>,
@@ -332,8 +332,8 @@ impl<'a> BlockingCloud<'a> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn put_with_precondition(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn put_with_precondition(
         &self,
         key: &str,
         data: Vec<u8>,

@@ -10,14 +10,14 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Number of bins in every latency histogram.
-pub(crate) const HISTOGRAM_BUCKETS: usize = 80;
+pub const HISTOGRAM_BUCKETS: usize = 80;
 /// Leading bins of `STEP_NS` width each.
 pub(crate) const LINEAR_BUCKETS: usize = 64;
 /// Width of one linear bin in nanoseconds (250 µs).
 pub(crate) const STEP_NS: u64 = 250_000;
 
 /// Inclusive upper bound in nanoseconds of bin `index`.
-pub(crate) fn upper_bound(index: usize) -> u64 {
+pub fn upper_bound(index: usize) -> u64 {
     if index < LINEAR_BUCKETS {
         u64::try_from(index + 1).expect("fixed histogram index") * STEP_NS - 1
     } else {

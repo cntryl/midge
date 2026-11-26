@@ -8,11 +8,11 @@
 
 use super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::EventLoop;
-use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
-use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::actors::wal::CommitValidationProof;
 use crate::runtime::snapshot_pins::OwnedSnapshotPin;
 use crate::runtime::{ConflictPolicy, ReadSnapshot, RuntimeMsg, RuntimeResponse, TransactionOp};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crossbeam::channel::{Receiver, Sender};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

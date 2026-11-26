@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::{ConflictPolicy, TestRuntimeMsg};
-use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 use bytes::Bytes;
+use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 use crossbeam::channel::{Receiver, Sender};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -447,7 +447,10 @@ fn should_reject_direct_rotation_when_strict_group_owns_writer_root() -> MidgeRe
     // Assert: reject without moving or fencing the WAL, then allow it after
     // the group completion has been processed.
     assert!(
-        matches!(rotation, Err(cntryl_midge_core::common::MidgeError::WriteStall(_))),
+        matches!(
+            rotation,
+            Err(cntryl_midge_core::common::MidgeError::WriteStall(_))
+        ),
         "unexpected rotation result while a strict group owns the writer: {rotation:?}"
     );
     assert_eq!(event_loop.state.wal.open_segment(), segment);
@@ -481,7 +484,8 @@ fn should_defer_direct_cloud_seal_until_pending_seal_completes() -> MidgeResult<
     let sequence = event_loop.state.sequence;
     let held = HeldSync::at("midge::wal::before_physical_sync");
     let segment = event_loop.state.wal.open_segment();
-    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(10));
+    let deadline =
+        cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(10));
     assert!(event_loop.start_cloud_seal_for_request(&deadline, 97_803, sequence, false)?);
     wait_for_hold(&mut event_loop, &held);
     assert!(event_loop.pipeline.pending_cloud_seal.is_some());
@@ -492,7 +496,10 @@ fn should_defer_direct_cloud_seal_until_pending_seal_completes() -> MidgeResult<
 
     // Assert: preserve the current segment and its retry obligation.
     assert!(
-        matches!(rotation, Err(cntryl_midge_core::common::MidgeError::WriteStall(_))),
+        matches!(
+            rotation,
+            Err(cntryl_midge_core::common::MidgeError::WriteStall(_))
+        ),
         "unexpected cloud rotation result while an async seal is in flight: {rotation:?}"
     );
     assert_eq!(event_loop.state.wal.open_segment(), segment);

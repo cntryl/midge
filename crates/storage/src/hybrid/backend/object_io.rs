@@ -8,7 +8,7 @@ use super::{
 impl HybridStorage {
     /// Exact, caller-bounded bytes from one pinned object identity. Format
     /// validation and whether the key is reclaimable remain runtime policy.
-    pub(crate) fn read_remote_range_within(
+    pub fn read_remote_range_within(
         &self,
         key: &str,
         metadata: &StorageObjectMetadata,
@@ -56,7 +56,7 @@ impl HybridStorage {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(super) fn read_object_from_backend_blocking(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
@@ -86,7 +86,7 @@ impl HybridStorage {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(super) fn read_object_from_backend_within(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
@@ -165,7 +165,7 @@ impl HybridStorage {
         error.is_timeout()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn object_exists_in_backend_within(
         backend: &Arc<dyn StorageBackend>,
         key: &str,

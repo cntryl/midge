@@ -11,12 +11,12 @@ const FIXED_WORKSPACE: usize = 256 * 1024;
 
 /// A finished immutable file, read through the filesystem that wrote it.
 #[derive(Clone, Copy)]
-pub(crate) struct ImmutableFileSource<'a> {
-    pub(crate) key: &'a str,
-    pub(crate) fs: &'a dyn Fs,
-    pub(crate) path: &'a FsPath,
-    pub(crate) size: u64,
-    pub(crate) checksum: u32,
+pub struct ImmutableFileSource<'a> {
+    pub key: &'a str,
+    pub fs: &'a dyn Fs,
+    pub path: &'a FsPath,
+    pub size: u64,
+    pub checksum: u32,
 }
 
 struct PublicationAdmission {
@@ -48,7 +48,7 @@ impl HybridStorage {
     /// one quarter of the remaining pool prevents a valid streaming compaction
     /// from repeatedly failing when its input cursors retain more than half of
     /// the shared maintenance budget.
-    pub(crate) fn immutable_file_partition_target(&self, pool: usize) -> usize {
+    pub fn immutable_file_partition_target(&self, pool: usize) -> usize {
         let streaming_workspace = crate::FILE_UPLOAD_PART_BYTES
             .saturating_mul(self.publication_copies())
             .saturating_add(FIXED_WORKSPACE);
@@ -63,7 +63,7 @@ impl HybridStorage {
         1 + self.stores.sst.write_payload_copies()
     }
 
-    pub(crate) fn publish_immutable_file(
+    pub fn publish_immutable_file(
         &self,
         source: ImmutableFileSource<'_>,
         budget: &ResourceBudget,
@@ -71,7 +71,7 @@ impl HybridStorage {
         self.publish_immutable_file_within(source, budget, &OperationDeadline::unbounded())
     }
 
-    pub(crate) fn publish_immutable_file_within(
+    pub fn publish_immutable_file_within(
         &self,
         source: ImmutableFileSource<'_>,
         budget: &ResourceBudget,
@@ -125,7 +125,7 @@ impl HybridStorage {
                     truncate: false,
                 },
             )
-            .map_err(cntryl_midge_core::io::engine_sst_error)?;
+            .map_err(|error| error.into_midge_for_existing_file("engine SST"))?;
         if source.len().map_err(FsError::into_midge)? != size {
             return Err(MidgeError::Corruption(
                 "immutable upload file size changed".into(),

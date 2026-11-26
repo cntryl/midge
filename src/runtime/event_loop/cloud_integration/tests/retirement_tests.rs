@@ -68,7 +68,8 @@ fn should_preserve_wal_when_catalog_retirement_uses_a_stale_writer_epoch(
 }
 
 #[test]
-fn should_keep_retired_wal_out_of_history_when_gc_unlink_fails() -> cntryl_midge_core::common::MidgeResult<()> {
+fn should_keep_retired_wal_out_of_history_when_gc_unlink_fails(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: a non-empty directory takes the sealed segment's name, so its
     // unlink fails after the ledger stops naming it.
     let mut el = create_test_cloud_event_loop(

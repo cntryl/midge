@@ -4,10 +4,10 @@ use super::{
     PreparedGroupOutcome, PreparedTransactionAppend, TransactionAppendResult, TransactionApplyOp,
     TxnSequencePlan, WalActor,
 };
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
-use cntryl_midge_table::memtable::SkipListMemtable;
 use crate::runtime::state::RuntimeState;
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_table::memtable::SkipListMemtable;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 

@@ -1,6 +1,6 @@
 use super::*;
-use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::runtime::RuntimeResponse;
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
 use std::sync::Arc;
 
 struct ContendedFlush {

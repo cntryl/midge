@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::event_loop::flush::FlushCoordinator;
-use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 use bytes::Bytes;
+use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -131,7 +131,10 @@ impl cntryl_midge_core::io::ReadFs for SstReadOpenCounter {
             .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
@@ -151,7 +154,11 @@ impl cntryl_midge_core::io::ReadFs for SstReadOpenCounter {
 }
 
 impl SstReadOpenCounter {
-    fn record_read_open(&self, path: &cntryl_midge_core::io::FsPath, options: cntryl_midge_core::io::OpenOptions) {
+    fn record_read_open(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+        options: cntryl_midge_core::io::OpenOptions,
+    ) {
         if options.mode == cntryl_midge_core::io::OpenMode::ReadOnly
             && std::path::Path::new(&path.0)
                 .extension()
@@ -176,7 +183,9 @@ impl SstReadOpenCounter {
 }
 
 impl cntryl_midge_core::io::Fs for SstReadOpenCounter {
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         Some(self)
     }
 
@@ -196,15 +205,24 @@ impl cntryl_midge_core::io::Fs for SstReadOpenCounter {
         self.inner.open(path, options)
     }
 
-    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 
@@ -237,10 +255,12 @@ impl cntryl_midge_core::io::PersistentHandleFs for SstReadOpenCounter {
 }
 
 fn create_counted_event_loop(
-) -> cntryl_midge_core::common::MidgeResult<(tempfile::TempDir, EventLoop, Arc<SstReadOpenCounter>)> {
+) -> cntryl_midge_core::common::MidgeResult<(tempfile::TempDir, EventLoop, Arc<SstReadOpenCounter>)>
+{
     let directory = tempfile::tempdir()?;
     let fs = Arc::new(SstReadOpenCounter {
-        inner: cntryl_midge_core::io::RealFs::new(directory.path()).map_err(cntryl_midge_core::io::FsError::into_midge)?,
+        inner: cntryl_midge_core::io::RealFs::new(directory.path())
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?,
         event_loop_thread: std::thread::current().id(),
         validation_worker_thread: std::sync::Mutex::new(None),
         event_loop_opens: AtomicUsize::new(0),

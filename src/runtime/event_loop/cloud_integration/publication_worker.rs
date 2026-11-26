@@ -3,8 +3,8 @@
 
 use super::super::fencing::RuntimeFence;
 use super::super::EventLoop;
-use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::hybrid_persistence::{CloudPersistence, PublicationError};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use cntryl_midge_durability::wal::cloud_catalog::CatalogEntry;
 use cntryl_midge_durability::wal::publish::OwedSegment;
 use std::collections::BTreeMap;
@@ -79,8 +79,9 @@ impl EventLoop {
         let size = match self
             .state
             .fs
-            .metadata(&cntryl_midge_durability::wal::segment_key(acknowledged.segment_id))
-        {
+            .metadata(&cntryl_midge_durability::wal::segment_key(
+                acknowledged.segment_id,
+            )) {
             Ok(metadata) => metadata.len,
             Err(error) => {
                 self.requeue_failed_cloud_upload(acknowledged.segment_id, &error.into_midge());

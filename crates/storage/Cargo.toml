@@ -13,12 +13,10 @@ bench = false
 
 [dependencies]
 cntryl-midge-core.workspace = true
-arc-swap = "1.9"
 bytes = { version = "1.12", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 crossbeam = "0.8"
 crc32c = "0.6"
-dashmap = "6.2"
 fail = { version = "0.5", features = ["failpoints"], optional = true }
 hex = "0.4"
 hmac = { version = "0.13", optional = true }
@@ -42,8 +40,8 @@ uuid = { version = "1.29", features = ["v4"] }
 
 [features]
 default = ["cloud-all"]
-internal-testing = []
-sqrzl-tests = []
+internal-testing = ["cntryl-midge-core/internal-testing"]
+sqrzl-tests = ["cloud-signing", "dep:sha1"]
 failpoints = ["cntryl-midge-core/failpoints", "dep:fail"]
 cloud-common = ["dep:reqwest", "dep:tokio"]
 cloud-signing = ["cloud-common", "dep:base64", "dep:hmac", "dep:percent-encoding", "dep:urlencoding"]
@@ -58,6 +56,7 @@ version = "0.23"
 optional = true
 
 [dev-dependencies]
+cntryl-midge-storage = { path = ".", default-features = false, features = ["internal-testing"] }
 tempfile = "3.27"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 

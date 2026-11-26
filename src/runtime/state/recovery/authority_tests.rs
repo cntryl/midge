@@ -1,10 +1,10 @@
 use super::*;
+use bytes::Bytes;
 use cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT;
 use cntryl_midge_core::io::traits::{DirEntry, Metadata};
 use cntryl_midge_core::io::{Durability, File, FsError, FsPath, FsResult, OpenMode, ReadFs};
 use cntryl_midge_durability::lease::LeaderStore;
 use cntryl_midge_durability::wal::traits::WalWriter;
-use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -106,11 +106,18 @@ impl Fs for SnapshotRecoveryFs {
         self.inner.coordination_key()
     }
 
-    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
+    fn try_lock_exclusive(
+        &self,
+        path: &FsPath,
+    ) -> FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn open(&self, path: &FsPath, options: cntryl_midge_core::io::OpenOptions) -> FsResult<Box<dyn File + '_>> {
+    fn open(
+        &self,
+        path: &FsPath,
+        options: cntryl_midge_core::io::OpenOptions,
+    ) -> FsResult<Box<dyn File + '_>> {
         let file = self.inner.open(path, options)?;
         if path.0 != self.blocked_path || self.gate.claimed.swap(true, Ordering::AcqRel) {
             return Ok(file);
@@ -151,7 +158,8 @@ fn should_leave_wal_history_unchanged_when_salvage_lacks_family_authority() {
     // Arrange
     let wal: Arc<dyn Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
     let history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&wal), 1, 1).unwrap();
-    let ledger = cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::wal::ledger_store::LEDGER_FILE);
+    let ledger =
+        cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::wal::ledger_store::LEDGER_FILE);
     let before = cntryl_midge_core::io::read_all(wal.as_ref(), &ledger).unwrap();
     let root: Arc<dyn Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
     let storage = cntryl_midge_durability::wal::FsWalFactoryIo::new(Arc::clone(&wal));
@@ -183,7 +191,10 @@ fn should_leave_wal_history_unchanged_when_salvage_lacks_family_authority() {
 
     // Assert
     assert!(matches!(result, Err(MidgeError::Corruption(_))));
-    assert_eq!(cntryl_midge_core::io::read_all(wal.as_ref(), &ledger).unwrap(), before);
+    assert_eq!(
+        cntryl_midge_core::io::read_all(wal.as_ref(), &ledger).unwrap(),
+        before
+    );
 }
 
 struct WindowDamageFixture {
@@ -196,9 +207,13 @@ struct WindowDamageFixture {
 
 fn window_damage_fixture(include_damaged_frame_in_floor: bool) -> MidgeResult<WindowDamageFixture> {
     let root: Arc<dyn Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
-    let wal = cntryl_midge_core::io::subdirectory(Arc::clone(&root), cntryl_midge_durability::wal::WAL_DIR);
+    let wal = cntryl_midge_core::io::subdirectory(
+        Arc::clone(&root),
+        cntryl_midge_durability::wal::WAL_DIR,
+    );
     let mut history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&wal), 1, 1)?;
-    let writer = cntryl_midge_durability::wal::FsWalFactoryIo::new(Arc::clone(&wal)).open_segment(1)?;
+    let writer =
+        cntryl_midge_durability::wal::FsWalFactoryIo::new(Arc::clone(&wal)).open_segment(1)?;
     let record = |key: &'static [u8], sequence| {
         cntryl_midge_durability::wal::WalRecord::new(
             cntryl_midge_durability::wal::WalOpKind::Put,
@@ -286,8 +301,8 @@ fn should_enforce_sync_floor_recovery_policy_for_window_damage() -> MidgeResult<
     // Assert
     assert_eq!(recovered.records_replayed, 1);
     let path = FsPath::new(cntryl_midge_durability::wal::segment_file_name(1));
-    let bytes =
-        cntryl_midge_core::io::read_all(above_floor.wal.as_ref(), &path).map_err(FsError::into_midge)?;
+    let bytes = cntryl_midge_core::io::read_all(above_floor.wal.as_ref(), &path)
+        .map_err(FsError::into_midge)?;
     assert_eq!(bytes.len() as u64, above_floor.prefix_end);
     assert_eq!(
         &bytes[..],
@@ -310,8 +325,8 @@ fn should_enforce_sync_floor_recovery_policy_for_window_damage() -> MidgeResult<
         panic!("strict recovery accepted damage below the retained floor");
     };
     assert!(matches!(error, MidgeError::Corruption(_)), "{error:?}");
-    let bytes =
-        cntryl_midge_core::io::read_all(below_floor.wal.as_ref(), &path).map_err(FsError::into_midge)?;
+    let bytes = cntryl_midge_core::io::read_all(below_floor.wal.as_ref(), &path)
+        .map_err(FsError::into_midge)?;
     assert_eq!(bytes, below_floor.damaged_bytes);
     Ok(())
 }
@@ -361,14 +376,21 @@ fn should_fence_stale_recovery_tail_truncation_after_successor_seals_segment() -
     // Arrange: recovery captures a torn active tail, then pauses before it
     // attempts the truncation. A successor can take over and seal that segment.
     let directory = tempfile::tempdir().expect("temporary database root");
-    let real = Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+    let real = Arc::new(
+        cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+    );
     let root: Arc<dyn Fs> = real.clone();
-    let store = Arc::new(cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
-        Arc::clone(&root),
-        cntryl_midge_durability::lease::LeaseClock::default(),
-    ));
+    let store = Arc::new(
+        cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
+            Arc::clone(&root),
+            cntryl_midge_durability::lease::LeaseClock::default(),
+        ),
+    );
     let predecessor = store.acquire_leadership("predecessor").unwrap();
-    let wal = cntryl_midge_core::io::subdirectory(Arc::clone(&root), cntryl_midge_durability::wal::WAL_DIR);
+    let wal = cntryl_midge_core::io::subdirectory(
+        Arc::clone(&root),
+        cntryl_midge_durability::wal::WAL_DIR,
+    );
     let predecessor_fence = crate::runtime::wal_history::WalHistoryFence::new(
         Arc::clone(&store) as Arc<dyn cntryl_midge_durability::lease::LeaderStore>,
         "predecessor".into(),
@@ -389,7 +411,8 @@ fn should_fence_stale_recovery_tail_truncation_after_successor_seals_segment() -
 
     let gate = RecoveryReadGate::new();
     let gated_root: Arc<dyn Fs> = Arc::new(SnapshotRecoveryFs {
-        inner: cntryl_midge_core::io::RealFs::open_existing(directory.path()).map_err(FsError::into_midge)?,
+        inner: cntryl_midge_core::io::RealFs::open_existing(directory.path())
+            .map_err(FsError::into_midge)?,
         blocked_path: format!("{}/{}", cntryl_midge_durability::wal::WAL_DIR, segment_name),
         gate: Arc::clone(&gate),
     });
@@ -432,8 +455,8 @@ fn should_fence_stale_recovery_tail_truncation_after_successor_seals_segment() -
         .ledger()
         .sealed()
         .any(|segment| segment == 1));
-    let successor_bytes =
-        cntryl_midge_core::io::read_all(wal.as_ref(), &segment_path).map_err(FsError::into_midge)?;
+    let successor_bytes = cntryl_midge_core::io::read_all(wal.as_ref(), &segment_path)
+        .map_err(FsError::into_midge)?;
     assert!(successor_bytes.len() as u64 > valid_prefix_bytes);
 
     // Assert: the stale recovery is refused before it can truncate the
@@ -452,8 +475,8 @@ fn should_fence_stale_recovery_tail_truncation_after_successor_seals_segment() -
         ),
         "stale recovery error: {predecessor_error:?}"
     );
-    let bytes_after_stale_recovery =
-        cntryl_midge_core::io::read_all(wal.as_ref(), &segment_path).map_err(FsError::into_midge)?;
+    let bytes_after_stale_recovery = cntryl_midge_core::io::read_all(wal.as_ref(), &segment_path)
+        .map_err(FsError::into_midge)?;
     assert_eq!(bytes_after_stale_recovery, successor_bytes);
     Ok(())
 }

@@ -61,8 +61,12 @@ impl cntryl_midge_storage::cloud::CloudBackend for RecoveryRangeBudgetBackend {}
 
 fn live_frontier(manifest: &Manifest, cf_id: u32) -> u64 {
     match manifest.flush_frontiers().get(cf_id).unwrap() {
-        cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence } => through_sequence,
-        cntryl_midge_durability::metadata::FamilyFrontier::Dropped => panic!("expected live family {cf_id}"),
+        cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence } => {
+            through_sequence
+        }
+        cntryl_midge_durability::metadata::FamilyFrontier::Dropped => {
+            panic!("expected live family {cf_id}")
+        }
     }
 }
 
@@ -72,7 +76,7 @@ fn should_report_family_frontiers_when_one_family_is_dropped() {
     let mut state = RuntimeState::new(PathBuf::from("metrics-frontiers"), true);
     let family = state.create_cf("flushed".into()).unwrap();
     let idle = state.create_cf("idle".into()).unwrap();
-    let output = crate::runtime::FileMeta {
+    let output = cntryl_midge_durability::metadata::intent::FileMeta {
         name: "metrics.sst".into(),
         level: 0,
         size_bytes: 1,
@@ -93,11 +97,13 @@ fn should_report_family_frontiers_when_one_family_is_dropped() {
     let before_drop = state.runtime_metrics_snapshot();
     state
         .manifest
-        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::DropColumnFamilyAt {
-            id: family,
-            drop_sequence: 5,
-            dropped_sst_names: Vec::new(),
-        })
+        .apply_edit(
+            &cntryl_midge_durability::metadata::ManifestEdit::DropColumnFamilyAt {
+                id: family,
+                drop_sequence: 5,
+                dropped_sst_names: Vec::new(),
+            },
+        )
         .unwrap();
     let after_drop = state.runtime_metrics_snapshot();
 
@@ -164,15 +170,19 @@ fn should_reuse_manifest_read_view_when_only_sequence_metadata_changes() {
     owner.set_next_sst_seq(0, 7);
     owner.advance_next_sst_seq(0, 8);
     owner.note_applied_journal_edit(9);
-    owner.adopt_checkpoint(cntryl_midge_durability::metadata::persistence::WrittenCheckpoint {
-        edit_checkpoint_id: 9,
-        caller_was_current: true,
-    });
+    owner.adopt_checkpoint(
+        cntryl_midge_durability::metadata::persistence::WrittenCheckpoint {
+            edit_checkpoint_id: 9,
+            caller_was_current: true,
+        },
+    );
     owner
-        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
-            cf_id: 0,
-            next_seq: 10,
-        })
+        .apply_edit(
+            &cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 10,
+            },
+        )
         .unwrap();
     let after_sequence = owner.read_view_for(0);
 
@@ -198,10 +208,12 @@ fn should_rebuild_one_read_view_after_manifest_file_batch() {
 
     // Act
     owner
-        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
-            cntryl_midge_durability::metadata::ManifestEdit::AddSst(file("first.sst")),
-            cntryl_midge_durability::metadata::ManifestEdit::AddSst(file("second.sst")),
-        ]))
+        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::Batch(
+            vec![
+                cntryl_midge_durability::metadata::ManifestEdit::AddSst(file("first.sst")),
+                cntryl_midge_durability::metadata::ManifestEdit::AddSst(file("second.sst")),
+            ],
+        ))
         .unwrap();
     let updated = owner.read_view_for(0);
 
@@ -294,7 +306,7 @@ fn write_valid_sst_for_recovery_test(
     level: u32,
     key: &[u8],
     sequence: u64,
-) -> crate::runtime::FileMeta {
+) -> cntryl_midge_durability::metadata::intent::FileMeta {
     write_sst_entries_for_recovery_test(state, name, level, &[(key, sequence)])
 }
 
@@ -303,10 +315,13 @@ fn write_sst_entries_for_recovery_test(
     name: &str,
     level: u32,
     entries: &[(&[u8], u64)],
-) -> crate::runtime::FileMeta {
+) -> cntryl_midge_durability::metadata::intent::FileMeta {
     use cntryl_midge_table::sst::SstFactory;
 
-    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 4096);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(cntryl_midge_core::io::MockFs::new()),
+        4096,
+    );
     let mut writer = factory.create().expect("create recovery test SST");
     for (key, sequence) in entries {
         writer
@@ -317,7 +332,7 @@ fn write_sst_entries_for_recovery_test(
     std::fs::create_dir_all(state.host_sst_dir()).expect("create recovery test SST directory");
     std::fs::write(state.host_sst_dir().join(name), &bytes).expect("persist recovery test SST");
 
-    crate::runtime::FileMeta {
+    cntryl_midge_durability::metadata::intent::FileMeta {
         name: name.to_string(),
         level,
         size_bytes: u64::try_from(bytes.len()).expect("SST length fits u64"),
@@ -332,7 +347,9 @@ fn write_sst_entries_for_recovery_test(
     }
 }
 
-fn manifest_meta_for_recovery_test(file: &crate::runtime::FileMeta) -> cntryl_midge_durability::metadata::FileMeta {
+fn manifest_meta_for_recovery_test(
+    file: &cntryl_midge_durability::metadata::intent::FileMeta,
+) -> cntryl_midge_durability::metadata::FileMeta {
     cntryl_midge_durability::metadata::FileMeta {
         name: file.name.clone(),
         level: file.level,
@@ -364,23 +381,25 @@ fn should_replay_published_compaction_from_remote_ssts_without_local_staging() {
         .test_mut()
         .files
         .push(manifest_meta_for_recovery_test(&input));
-    state
-        .intent_log
-        .push(crate::runtime::IntentLogEntry::CompactionPublish {
+    state.intent_log.push(
+        cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
             phase: PublicationPhase::ManifestPublished,
             cf_id: 0,
             removed: vec![input_name.clone()],
             added: vec![output],
-        });
+        },
+    );
     let remote = Arc::new(
         cntryl_midge_storage::filesystem::FileSystem::new(remote_dir.path())
             .expect("remote object storage"),
     );
-    state.recovery_sst_fs = Some(Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
-        Arc::clone(&state.fs),
-        remote,
-        std::time::Duration::from_secs(5),
-    )));
+    state.recovery_sst_fs = Some(Arc::new(
+        cntryl_midge_storage::remote_sst::RemoteSstFs::new(
+            Arc::clone(&state.fs),
+            remote,
+            std::time::Duration::from_secs(5),
+        ),
+    ));
 
     // Act
     state
@@ -412,7 +431,7 @@ fn should_reject_corrupt_remote_publication_with_bounded_checksum_ranges() {
     ));
     let name = cntryl_midge_core::cloud_layout::file_name(0, 0, 7);
     let corrupt_bytes = vec![0x5A; 3 * 1024 * 1024 + 19];
-    let file_meta = crate::runtime::FileMeta {
+    let file_meta = cntryl_midge_durability::metadata::intent::FileMeta {
         name: name.clone(),
         level: 0,
         size_bytes: corrupt_bytes.len() as u64,
@@ -441,12 +460,14 @@ fn should_reject_corrupt_remote_publication_with_bounded_checksum_ranges() {
     ));
     state
         .intent_log
-        .push(crate::runtime::IntentLogEntry::SstAdded { file_meta });
-    state.recovery_sst_fs = Some(Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
-        Arc::clone(&state.fs),
-        cloud,
-        std::time::Duration::from_secs(5),
-    )));
+        .push(cntryl_midge_durability::metadata::intent::IntentLogEntry::SstAdded { file_meta });
+    state.recovery_sst_fs = Some(Arc::new(
+        cntryl_midge_storage::remote_sst::RemoteSstFs::new(
+            Arc::clone(&state.fs),
+            cloud,
+            std::time::Duration::from_secs(5),
+        ),
+    ));
     backend.inner.clear_history();
 
     // Act
@@ -476,7 +497,7 @@ fn should_reject_corrupt_remote_publication_with_bounded_checksum_ranges() {
 fn should_preserve_column_family_identity_given_sst_add_is_appended_to_manifest() {
     // Arrange
     let state = RuntimeState::new(isolated_test_db_path(), false);
-    let file = crate::runtime::FileMeta {
+    let file = cntryl_midge_durability::metadata::intent::FileMeta {
         name: "000042_00_00000000000000000001.sst".to_string(),
         level: 0,
         size_bytes: 437,
@@ -494,11 +515,12 @@ fn should_preserve_column_family_identity_given_sst_add_is_appended_to_manifest(
     state
         .append_manifest_add_sst(&file)
         .expect("append SST manifest edit");
-    let edits =
-        cntryl_midge_durability::metadata::journal::replay_journal(&state.db_path).expect("replay SST manifest edit");
+    let edits = cntryl_midge_durability::metadata::journal::replay_journal(&state.db_path)
+        .expect("replay SST manifest edit");
 
     // Assert
-    let [cntryl_midge_durability::metadata::ManifestEdit::AddSst(persisted)] = edits.as_slice() else {
+    let [cntryl_midge_durability::metadata::ManifestEdit::AddSst(persisted)] = edits.as_slice()
+    else {
         panic!("expected one persisted SST add edit: {edits:?}");
     };
     assert_eq!(persisted.cf_id, 42);
@@ -812,16 +834,14 @@ fn should_derive_hard_l0_ceiling_from_capacity() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.l0_compaction_trigger = 3;
     state.limits.max_immutable_memtables = 2;
-    state
-        .manifest
-        .test_mut()
-        .files
-        .extend((0..4).map(|index| cntryl_midge_durability::metadata::FileMeta {
+    state.manifest.test_mut().files.extend((0..4).map(|index| {
+        cntryl_midge_durability::metadata::FileMeta {
             name: format!("l0-{index}.sst"),
             level: 0,
             cf_id: 0,
             ..Default::default()
-        }));
+        }
+    }));
     let immutable = Arc::new(SkipListMemtable::new());
     state
         .get_cf_mut(0)
@@ -846,16 +866,14 @@ fn should_stall_next_write_after_active_generation_reserves_last_l0_slot() {
     state.limits.l0_compaction_trigger = 1;
     state.limits.max_immutable_memtables = 1;
     state.limits.memtable_flush_threshold = 1;
-    state
-        .manifest
-        .test_mut()
-        .files
-        .extend((0..2).map(|index| cntryl_midge_durability::metadata::FileMeta {
+    state.manifest.test_mut().files.extend((0..2).map(|index| {
+        cntryl_midge_durability::metadata::FileMeta {
             name: format!("l0-{index}.sst"),
             level: 0,
             cf_id: 0,
             ..Default::default()
-        }));
+        }
+    }));
     assert_eq!(state.l0_hard_ceiling(), 3);
     assert!(!state.l0_write_slot_unavailable(0));
     state
@@ -932,9 +950,11 @@ fn should_account_for_recovered_wal_memtable_bytes_when_reopening() {
         Some(bytes::Bytes::from(vec![0xA5; 4096])),
         1,
     );
-    let payload = cntryl_midge_durability::wal::encoding::encode(&record).expect("encode WAL record");
+    let payload =
+        cntryl_midge_durability::wal::encoding::encode(&record).expect("encode WAL record");
     let mut frame = Vec::new();
-    cntryl_midge_durability::wal::frame::append_frame(&mut frame, &payload).expect("frame WAL record");
+    cntryl_midge_durability::wal::frame::append_frame(&mut frame, &payload)
+        .expect("frame WAL record");
     // The record follows the open segment's header.
     let mut segment = std::fs::OpenOptions::new()
         .append(true)
@@ -1276,11 +1296,16 @@ fn should_load_intent_log_on_startup() {
     )
     .expect("create format marker");
 
-    let intents = vec![crate::runtime::IntentLogEntry::WalSynced {
-        segment_id: 2,
-        seqno: 99,
-    }];
-    crate::runtime::IntentPersistence::save(&test_dir, &intents).expect("save intents");
+    let intents = vec![
+        cntryl_midge_durability::metadata::intent::IntentLogEntry::WalSynced {
+            segment_id: 2,
+            seqno: 99,
+        },
+    ];
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save(
+        &test_dir, &intents,
+    )
+    .expect("save intents");
 
     // Act: create runtime state for that path (not memory mode)
     let state = RuntimeState::new(test_dir.clone(), false);
@@ -1293,7 +1318,7 @@ fn should_load_intent_log_on_startup() {
     assert!(
         matches!(
             state.intent_log[0],
-            crate::runtime::IntentLogEntry::WalSynced {
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::WalSynced {
                 segment_id: 2,
                 seqno: 99
             }
@@ -1310,11 +1335,14 @@ fn should_replay_intent_log_idempotently_given_duplicate_publish_intents_when_re
     let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
     let sst_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 17);
     let file_meta = write_valid_sst_for_recovery_test(&state, &sst_name, 0, b"value", 17);
-    let duplicate = crate::runtime::IntentLogEntry::SstAdded {
+    let duplicate = cntryl_midge_durability::metadata::intent::IntentLogEntry::SstAdded {
         file_meta: file_meta.clone(),
     };
-    crate::runtime::IntentPersistence::save(temp_dir.path(), &[duplicate.clone(), duplicate])
-        .expect("persist duplicate publication intents");
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save(
+        temp_dir.path(),
+        &[duplicate.clone(), duplicate],
+    )
+    .expect("persist duplicate publication intents");
     drop(state);
 
     // Act
@@ -1414,7 +1442,7 @@ fn should_not_mutate_compaction_intent_when_persistence_rejects_output() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create compaction intent directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let invalid_output = crate::runtime::FileMeta {
+    let invalid_output = cntryl_midge_durability::metadata::intent::FileMeta {
         name: "../escape.sst".to_string(),
         level: 1,
         size_bytes: 1,
@@ -1454,12 +1482,14 @@ fn should_roll_back_output_durable_compaction_when_manifest_is_still_prepublicat
         .files
         .push(manifest_meta_for_recovery_test(&input));
     state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::OutputDurable,
-            cf_id: 0,
-            removed: vec![input_name.clone()],
-            added: vec![output],
-        })
+        .append_intent(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id: 0,
+                removed: vec![input_name.clone()],
+                added: vec![output],
+            },
+        )
         .expect("persist output-durable intent");
 
     // Act
@@ -1534,7 +1564,7 @@ impl CompactionPublicationCrashPoint {
 fn persist_proof_mirror(
     state: &RuntimeState,
     mirror_dir: &std::path::Path,
-    outputs: &[crate::runtime::FileMeta],
+    outputs: &[cntryl_midge_durability::metadata::intent::FileMeta],
     output_count: usize,
 ) -> HashSet<String> {
     std::fs::create_dir_all(mirror_dir).expect("create proof mirror directory");
@@ -1562,7 +1592,10 @@ fn write_compaction_publication_fixture(
     input_names: &[String; 2],
     output_names: &[String; 2],
     repair: bool,
-) -> ([crate::runtime::FileMeta; 2], [crate::runtime::FileMeta; 2]) {
+) -> (
+    [cntryl_midge_durability::metadata::intent::FileMeta; 2],
+    [cntryl_midge_durability::metadata::intent::FileMeta; 2],
+) {
     if repair {
         (
             [
@@ -1632,11 +1665,14 @@ fn should_replay_every_compaction_publication_crash_point_to_complete_authority(
             } else {
                 inputs.iter().map(manifest_meta_for_recovery_test).collect()
             };
-            cntryl_midge_durability::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
-                .expect("persist crash-point manifest");
+            cntryl_midge_durability::metadata::ManifestPersistence::save(
+                temp_dir.path(),
+                &state.manifest,
+            )
+            .expect("persist crash-point manifest");
             if let Some(phase) = crash_point.intent_phase() {
                 state
-                    .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+                    .append_intent(cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
                         phase,
                         cf_id: 0,
                         removed: input_names.to_vec(),
@@ -1719,12 +1755,14 @@ fn should_retain_inputs_for_output_durable_remove_only_compaction_after_crash() 
     cntryl_midge_durability::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
         .expect("persist prepublication manifest");
     state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::OutputDurable,
-            cf_id: 0,
-            removed: vec![input_name.clone()],
-            added: Vec::new(),
-        })
+        .append_intent(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id: 0,
+                removed: vec![input_name.clone()],
+                added: Vec::new(),
+            },
+        )
         .expect("persist remove-only output intent");
     drop(state);
 
@@ -1757,12 +1795,14 @@ fn should_publish_remove_only_compaction_after_manifest_phase_crash() {
     cntryl_midge_durability::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
         .expect("persist prepublication manifest");
     state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::ManifestPublished,
-            cf_id: 0,
-            removed: vec![input_name.clone()],
-            added: Vec::new(),
-        })
+        .append_intent(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::ManifestPublished,
+                cf_id: 0,
+                removed: vec![input_name.clone()],
+                added: Vec::new(),
+            },
+        )
         .expect("persist remove-only publication intent");
     drop(state);
 
@@ -1786,7 +1826,7 @@ fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_in
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
     let input_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
-    let first_output = crate::runtime::FileMeta {
+    let first_output = cntryl_midge_durability::metadata::intent::FileMeta {
         name: cntryl_midge_core::cloud_layout::file_name(0, 1, 2),
         level: 1,
         size_bytes: 1,
@@ -1799,7 +1839,7 @@ fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_in
         key_bounds_complete: true,
         earliest_expiration_millis: None,
     };
-    let retry_output = crate::runtime::FileMeta {
+    let retry_output = cntryl_midge_durability::metadata::intent::FileMeta {
         name: cntryl_midge_core::cloud_layout::file_name(0, 1, 3),
         level: 1,
         size_bytes: 1,
@@ -1826,7 +1866,10 @@ fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_in
         .intent_log
         .iter()
         .filter_map(|entry| match entry {
-            crate::runtime::IntentLogEntry::CompactionPublish { added, .. } => Some(added),
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                added,
+                ..
+            } => Some(added),
             _ => None,
         })
         .collect();
@@ -1855,9 +1898,10 @@ fn should_keep_distinct_remove_only_compaction_intents_for_distinct_inputs() {
         .intent_log
         .iter()
         .filter_map(|entry| match entry {
-            crate::runtime::IntentLogEntry::CompactionPublish { removed, .. } => {
-                Some(removed.as_slice())
-            }
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                removed,
+                ..
+            } => Some(removed.as_slice()),
             _ => None,
         })
         .collect();
@@ -1882,20 +1926,24 @@ fn should_recover_published_retry_when_legacy_stale_intent_precedes_it() {
         .files
         .push(manifest_meta_for_recovery_test(&retry_output));
     state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::OutputDurable,
-            cf_id: 0,
-            removed: vec![input_name.clone()],
-            added: vec![stale_output],
-        })
+        .append_intent(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id: 0,
+                removed: vec![input_name.clone()],
+                added: vec![stale_output],
+            },
+        )
         .expect("persist stale intent");
     state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::OutputDurable,
-            cf_id: 0,
-            removed: vec![input_name],
-            added: vec![retry_output],
-        })
+        .append_intent(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id: 0,
+                removed: vec![input_name],
+                added: vec![retry_output],
+            },
+        )
         .expect("persist published retry intent");
 
     // Act
@@ -1926,20 +1974,24 @@ fn should_recover_manifest_published_retry_when_it_precedes_stale_output_intent(
         .files
         .push(manifest_meta_for_recovery_test(&input));
     state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::ManifestPublished,
-            cf_id: 0,
-            removed: vec![input_name.clone()],
-            added: vec![retry_output],
-        })
+        .append_intent(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::ManifestPublished,
+                cf_id: 0,
+                removed: vec![input_name.clone()],
+                added: vec![retry_output],
+            },
+        )
         .expect("persist published retry intent");
     state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::OutputDurable,
-            cf_id: 0,
-            removed: vec![input_name.clone()],
-            added: vec![stale_output],
-        })
+        .append_intent(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id: 0,
+                removed: vec![input_name.clone()],
+                added: vec![stale_output],
+            },
+        )
         .expect("persist stale intent after retry");
 
     // Act
@@ -1972,12 +2024,14 @@ fn should_fail_closed_when_multiple_retry_outputs_are_manifest_visible() {
         .extend([&first_output, &second_output].map(manifest_meta_for_recovery_test));
     for output in [first_output, second_output] {
         state
-            .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-                phase: PublicationPhase::OutputDurable,
-                cf_id: 0,
-                removed: vec![input_name.clone()],
-                added: vec![output],
-            })
+            .append_intent(
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                    phase: PublicationPhase::OutputDurable,
+                    cf_id: 0,
+                    removed: vec![input_name.clone()],
+                    added: vec![output],
+                },
+            )
             .expect("persist legacy retry intent");
     }
 
@@ -2022,12 +2076,14 @@ fn should_reject_compaction_intent_for_dropped_column_family_after_crash() {
         .files
         .push(manifest_meta_for_recovery_test(&input));
     state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::ManifestPublished,
-            cf_id,
-            removed: vec![input_name.clone()],
-            added: vec![output],
-        })
+        .append_intent(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::ManifestPublished,
+                cf_id,
+                removed: vec![input_name.clone()],
+                added: vec![output],
+            },
+        )
         .expect("persist late compaction intent");
     assert!(state
         .manifest
@@ -2070,12 +2126,14 @@ fn should_fail_closed_when_output_durable_compaction_manifest_is_partial() {
         .files
         .push(manifest_meta_for_recovery_test(&first_input));
     state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::OutputDurable,
-            cf_id: 0,
-            removed: vec![first_input_name.clone(), missing_input_name],
-            added: vec![output],
-        })
+        .append_intent(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id: 0,
+                removed: vec![first_input_name.clone(), missing_input_name],
+                added: vec![output],
+            },
+        )
         .expect("persist output-durable intent");
 
     // Act
@@ -2285,26 +2343,30 @@ fn should_keep_a_worker_published_sst_when_the_event_loop_publishes_next() {
     };
     cntryl_midge_durability::metadata::journal::append_edit_batch_with_fs(
         &state.fs,
-        &[cntryl_midge_durability::metadata::ManifestEdit::AddSst(published.clone())],
+        &[cntryl_midge_durability::metadata::ManifestEdit::AddSst(
+            published.clone(),
+        )],
     )
     .expect("append worker journal edit");
-    crate::runtime::IntentPersistence::save(
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save(
         &state.db_path,
-        &[crate::runtime::IntentLogEntry::SstAdded {
-            file_meta: crate::runtime::FileMeta {
-                name: published.name.clone(),
-                level: published.level,
-                size_bytes: published.size_bytes,
-                content_crc32c: published.content_crc32c,
-                cf_id: published.cf_id,
-                smallest_key: None,
-                largest_key: None,
-                smallest_seq: None,
-                largest_seq: None,
-                key_bounds_complete: false,
-                earliest_expiration_millis: None,
+        &[
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::SstAdded {
+                file_meta: cntryl_midge_durability::metadata::intent::FileMeta {
+                    name: published.name.clone(),
+                    level: published.level,
+                    size_bytes: published.size_bytes,
+                    content_crc32c: published.content_crc32c,
+                    cf_id: published.cf_id,
+                    smallest_key: None,
+                    largest_key: None,
+                    smallest_seq: None,
+                    largest_seq: None,
+                    key_bounds_complete: false,
+                    earliest_expiration_millis: None,
+                },
             },
-        }],
+        ],
     )
     .expect("write worker intent");
 
@@ -2321,7 +2383,7 @@ fn should_keep_a_worker_published_sst_when_the_event_loop_publishes_next() {
         state.manifest_has_file(&published.name),
         "the worker's published SST must survive the next publication"
     );
-    let persisted = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+    let persisted = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy(
         &state.fs,
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )
@@ -2329,7 +2391,7 @@ fn should_keep_a_worker_published_sst_when_the_event_loop_publishes_next() {
     assert!(
         persisted.iter().any(|entry| matches!(
             entry,
-            crate::runtime::IntentLogEntry::SstAdded { file_meta } if file_meta.name == published.name
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::SstAdded { file_meta } if file_meta.name == published.name
         )),
         "the worker's intent must not be erased: {persisted:?}"
     );
@@ -2337,15 +2399,18 @@ fn should_keep_a_worker_published_sst_when_the_event_loop_publishes_next() {
 
 fn state_with_worker_intent(
     temp_dir: &tempfile::TempDir,
-) -> (RuntimeState, crate::runtime::IntentLogEntry) {
+) -> (
+    RuntimeState,
+    cntryl_midge_durability::metadata::intent::IntentLogEntry,
+) {
     let state = RuntimeState::try_new(
         temp_dir.path(),
         false,
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )
     .expect("open state");
-    let intent = crate::runtime::IntentLogEntry::SstAdded {
-        file_meta: crate::runtime::FileMeta {
+    let intent = cntryl_midge_durability::metadata::intent::IntentLogEntry::SstAdded {
+        file_meta: cntryl_midge_durability::metadata::intent::FileMeta {
             name: "000000_00_00000000000000000009.sst".to_string(),
             level: 0,
             size_bytes: 4096,
@@ -2359,8 +2424,11 @@ fn state_with_worker_intent(
             earliest_expiration_millis: None,
         },
     };
-    crate::runtime::IntentPersistence::save(&state.db_path, std::slice::from_ref(&intent))
-        .expect("write worker intent");
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save(
+        &state.db_path,
+        std::slice::from_ref(&intent),
+    )
+    .expect("write worker intent");
     (state, intent)
 }
 
@@ -2395,7 +2463,7 @@ fn should_refuse_event_loop_publication_when_metadata_reload_fails() {
         "{manifest_publication:?}"
     );
     assert!(state.persistence_anomaly_detected());
-    let persisted = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+    let persisted = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy(
         &state.fs,
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )
@@ -2425,7 +2493,7 @@ fn should_publish_again_when_a_later_metadata_reload_succeeds() {
 
     // Assert
     assert!(publication.is_ok(), "{publication:?}");
-    let persisted = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+    let persisted = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy(
         &state.fs,
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )
@@ -2598,7 +2666,10 @@ impl cntryl_midge_core::io::File for CountingFile {
         self.inner.append(data)
     }
 
-    fn sync(&mut self, durability: cntryl_midge_core::io::Durability) -> cntryl_midge_core::io::FsResult<()> {
+    fn sync(
+        &mut self,
+        durability: cntryl_midge_core::io::Durability,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         if durability == cntryl_midge_core::io::Durability::Durable {
             self.counters
                 .durable_syncs
@@ -2609,7 +2680,11 @@ impl cntryl_midge_core::io::File for CountingFile {
 }
 
 impl CountingFs {
-    fn wrap(&self, path: &cntryl_midge_core::io::FsPath, file: Box<dyn cntryl_midge_core::io::File>) -> CountingFile {
+    fn wrap(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+        file: Box<dyn cntryl_midge_core::io::File>,
+    ) -> CountingFile {
         CountingFile {
             inner: file,
             journal: path.0.contains("journal"),
@@ -2627,7 +2702,10 @@ impl cntryl_midge_core::io::ReadFs for CountingFs {
             .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
@@ -2637,7 +2715,8 @@ impl cntryl_midge_core::io::ReadFs for CountingFs {
     ) -> cntryl_midge_core::io::FsResult<cntryl_midge_core::io::traits::Metadata> {
         if matches!(
             path.0.as_str(),
-            cntryl_midge_durability::metadata::files::JOURNAL | cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT
+            cntryl_midge_durability::metadata::files::JOURNAL
+                | cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT
         ) {
             self.counters
                 .manifest_stats
@@ -2673,7 +2752,9 @@ impl cntryl_midge_core::io::Fs for CountingFs {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
             .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
@@ -2688,15 +2769,24 @@ impl cntryl_midge_core::io::Fs for CountingFs {
         Ok(Box::new(self.wrap(path, file)))
     }
 
-    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 
@@ -2744,10 +2834,11 @@ fn measure_flush_publication_io_with_sst_size(
         counters: Arc::clone(&counters),
     });
     state.fs = Arc::clone(&fs);
-    state.manifest_store = Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new(fs));
+    state.manifest_store =
+        Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new(fs));
 
     for n in 1..=flushes {
-        let file_meta = crate::runtime::FileMeta {
+        let file_meta = cntryl_midge_durability::metadata::intent::FileMeta {
             name: format!("000000_00_{n:020}.sst"),
             level: 0,
             size_bytes: sst_bytes,
@@ -2772,23 +2863,25 @@ fn measure_flush_publication_io_with_sst_size(
             .expect("publish flush");
         // Reconstruct from disk after every publication, including deferred
         // checkpoints. The snapshot alone must never be needed for progress.
-        let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
-            &state.fs,
-            cntryl_midge_durability::RecoveryPolicy::Strict,
-        )
-        .expect("reconstruct published authority");
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+                &state.fs,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
+            )
+            .expect("reconstruct published authority");
         assert_eq!(live_frontier(&recovered, 0), n);
         if sst_bytes == 2 * 1024 * 1024 {
-            let snapshot: cntryl_midge_durability::metadata::Manifest = cntryl_midge_durability::metadata::codec::decode(
-                cntryl_midge_durability::metadata::codec::MANIFEST,
-                &std::fs::read(
-                    temp_dir
-                        .path()
-                        .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT),
+            let snapshot: cntryl_midge_durability::metadata::Manifest =
+                cntryl_midge_durability::metadata::codec::decode(
+                    cntryl_midge_durability::metadata::codec::MANIFEST,
+                    &std::fs::read(
+                        temp_dir
+                            .path()
+                            .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT),
+                    )
+                    .unwrap(),
                 )
-                .unwrap(),
-            )
-            .unwrap();
+                .unwrap();
             assert_eq!(
                 live_frontier(&snapshot, 0),
                 n,
@@ -2856,7 +2949,7 @@ fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
         )
         .unwrap();
         let publish = |state: &mut RuntimeState, n: u64| {
-            let file_meta = crate::runtime::FileMeta {
+            let file_meta = cntryl_midge_durability::metadata::intent::FileMeta {
                 name: format!("000000_00_{n:020}.sst"),
                 level: 0,
                 // Keep every publication above the five-percent checkpoint
@@ -2892,16 +2985,20 @@ fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
         // Act: the triggering publication remains journal-durable; subsequent
         // attempts must checkpoint before appending any more authority.
         publish(&mut state, 16).unwrap();
-        let journal = directory.path().join(cntryl_midge_durability::metadata::files::JOURNAL);
+        let journal = directory
+            .path()
+            .join(cntryl_midge_durability::metadata::files::JOURNAL);
         let retained = std::fs::read(&journal).unwrap();
         for _ in 0..3 {
             assert!(publish(&mut state, 17).is_err());
             assert_eq!(std::fs::read(&journal).unwrap(), retained);
         }
-        let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
         fail::remove(failure);
         publish(&mut state, 17).unwrap();
-        let successor = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        let successor =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
 
         // Assert
         assert_eq!(recovered.files.len(), 16);
@@ -2955,7 +3052,7 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )
     .unwrap();
-    let file_meta = crate::runtime::FileMeta {
+    let file_meta = cntryl_midge_durability::metadata::intent::FileMeta {
         name: "000000_00_00000000000000000017.sst".into(),
         level: 0,
         size_bytes: 2 * 1024 * 1024,
@@ -2990,7 +3087,8 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
         })
         .unwrap();
     fail::remove("midge::manifest::inject_snapshot_write_failure");
-    let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    let recovered =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
 
     // Assert
     assert_eq!(recovered.files.len(), 1);
@@ -3001,8 +3099,8 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
 }
 
 #[cfg(feature = "failpoints")]
-fn cheap_flush_file(n: u64) -> crate::runtime::FileMeta {
-    crate::runtime::FileMeta {
+fn cheap_flush_file(n: u64) -> cntryl_midge_durability::metadata::intent::FileMeta {
+    cntryl_midge_durability::metadata::intent::FileMeta {
         name: format!("000000_00_{n:020}.sst"),
         level: 0,
         size_bytes: 2 * 1024 * 1024,
@@ -3058,9 +3156,12 @@ fn should_reject_flush_ack_when_the_complete_publication_batch_cannot_sync() {
         // Act
         let failed = state.commit_flush_publication_for(publication);
         fail::remove(failure);
-        let journal = directory.path().join(cntryl_midge_durability::metadata::files::JOURNAL);
+        let journal = directory
+            .path()
+            .join(cntryl_midge_durability::metadata::files::JOURNAL);
         let retained = std::fs::read(&journal).unwrap();
-        let before_retry = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        let before_retry =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
         for _ in 0..3 {
             assert!(state.commit_flush_publication_for(publication).is_err());
             assert_eq!(std::fs::read(&journal).unwrap(), retained);
@@ -3068,7 +3169,8 @@ fn should_reject_flush_ack_when_the_complete_publication_batch_cannot_sync() {
         fail::remove("midge::manifest::inject_snapshot_write_failure");
         state.reload_persisted_metadata().unwrap();
         state.commit_flush_publication_for(publication).unwrap();
-        let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
 
         // Assert: no false ACK or deletion; a retry publishes exact authority.
         assert!(
@@ -3124,12 +3226,15 @@ fn should_refuse_duplicate_output_when_a_retry_claims_a_higher_flush_frontier() 
     publication.next_sst_seq = 45;
     fail::cfg("midge::manifest::inject_snapshot_write_failure", "return").unwrap();
 
-    let journal = directory.path().join(cntryl_midge_durability::metadata::files::JOURNAL);
+    let journal = directory
+        .path()
+        .join(cntryl_midge_durability::metadata::files::JOURNAL);
     let retained = std::fs::read(&journal).unwrap();
 
     // Act: an existing output cannot prove a newly claimed freeze boundary.
     assert!(state.commit_flush_publication_for(publication).is_err());
-    let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    let recovered =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
     assert!(state.commit_flush_publication_for(publication).is_err());
     fail::remove("midge::manifest::inject_snapshot_write_failure");
 
@@ -3159,9 +3264,10 @@ fn should_avoid_extra_manifest_stats_when_cheap_flush_keeps_forced_cadence() {
             counters: Arc::clone(&counters),
         });
         state.fs = Arc::clone(&fs);
-        state.manifest_store = Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new(fs));
+        state.manifest_store =
+            Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new(fs));
         for n in 1..=65 {
-            let file_meta = crate::runtime::FileMeta {
+            let file_meta = cntryl_midge_durability::metadata::intent::FileMeta {
                 name: format!("000000_00_{n:020}.sst"),
                 level: 0,
                 size_bytes: 2 * 1024 * 1024,
@@ -3177,7 +3283,8 @@ fn should_avoid_extra_manifest_stats_when_cheap_flush_keeps_forced_cadence() {
             // Prime one forced checkpoint before counting either path.
             state
                 .commit_flush_publication_for(super::manifest::FlushManifestPublication {
-                    origin: cntryl_midge_durability::metadata::accounting::Origin::OrdinaryLocalFlush,
+                    origin:
+                        cntryl_midge_durability::metadata::accounting::Origin::OrdinaryLocalFlush,
                     cf_id: 0,
                     sequence: n,
                     file_meta: &file_meta,
@@ -3191,7 +3298,8 @@ fn should_avoid_extra_manifest_stats_when_cheap_flush_keeps_forced_cadence() {
                     .store(0, std::sync::atomic::Ordering::SeqCst);
             }
         }
-        let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
         assert_eq!(recovered.files.len(), 65);
         assert_eq!(live_frontier(&recovered, 0), 65);
         assert_eq!(recovered.next_sst_seqs.get(&0), Some(&66));
@@ -3226,7 +3334,8 @@ fn should_preserve_complete_batch_journal_cost_when_healthy_cheap_flush_is_check
             counters: Arc::clone(&counters),
         });
         state.fs = Arc::clone(&fs);
-        state.manifest_store = Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new(fs));
+        state.manifest_store =
+            Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new(fs));
         let checkpoint = state
             .manifest_store
             .save_snapshot_for(
@@ -3236,7 +3345,7 @@ fn should_preserve_complete_batch_journal_cost_when_healthy_cheap_flush_is_check
             .unwrap();
         state.manifest.adopt_checkpoint(checkpoint);
         for n in 1..=8 {
-            let file = crate::runtime::FileMeta {
+            let file = cntryl_midge_durability::metadata::intent::FileMeta {
                 name: format!("000000_00_{n:020}.sst"),
                 level: 0,
                 size_bytes: 2 * 1024 * 1024,
@@ -3294,7 +3403,8 @@ fn should_preserve_complete_batch_journal_cost_when_healthy_cheap_flush_is_check
                     .unwrap();
             }
         }
-        let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
         assert_eq!(recovered.files.len(), 8);
         assert_eq!(recovered.next_sst_seqs.get(&0), Some(&9));
         assert_eq!(live_frontier(&recovered, 0), 8);
@@ -3330,7 +3440,7 @@ fn should_stop_journal_growth_when_cheap_flush_checkpoint_cannot_be_saved() {
         )
         .unwrap();
         let publish = |state: &mut RuntimeState, n: u64| {
-            let file_meta = crate::runtime::FileMeta {
+            let file_meta = cntryl_midge_durability::metadata::intent::FileMeta {
                 name: format!("000000_00_{n:020}.sst"),
                 level: 0,
                 size_bytes: 2 * 1024 * 1024,
@@ -3358,16 +3468,20 @@ fn should_stop_journal_growth_when_cheap_flush_checkpoint_cannot_be_saved() {
         // Act: the failed forced snapshot leaves a durable publication, then
         // every later append must obtain a checkpoint instead of growing it.
         publish(&mut state, 2).unwrap();
-        let journal = directory.path().join(cntryl_midge_durability::metadata::files::JOURNAL);
+        let journal = directory
+            .path()
+            .join(cntryl_midge_durability::metadata::files::JOURNAL);
         let retained = std::fs::read(&journal).unwrap();
         for _ in 0..3 {
             assert!(publish(&mut state, 3).is_err());
             assert_eq!(std::fs::read(&journal).unwrap(), retained);
         }
-        let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
         fail::remove(failure);
         publish(&mut state, 3).unwrap();
-        let successor = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        let successor =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
 
         // Assert
         assert_eq!(recovered.files.len(), 2);
@@ -3390,7 +3504,7 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )
     .unwrap();
-    let file = |n: u64| crate::runtime::FileMeta {
+    let file = |n: u64| cntryl_midge_durability::metadata::intent::FileMeta {
         name: format!("000000_00_{n:020}.sst"),
         level: 0,
         size_bytes: 2 * 1024 * 1024,
@@ -3444,12 +3558,16 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
             require_snapshot: false,
         })
         .unwrap();
-    let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
-    let journal = directory.path().join(cntryl_midge_durability::metadata::files::JOURNAL);
+    let recovered =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    let journal = directory
+        .path()
+        .join(cntryl_midge_durability::metadata::files::JOURNAL);
     let retained = std::fs::read(&journal).unwrap();
     let blocked = publish(&mut state, 45);
     assert_eq!(std::fs::read(&journal).unwrap(), retained);
-    let blocked_recovery = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    let blocked_recovery =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
     state.reload_persisted_metadata().unwrap();
     state
         .commit_flush_publication_for(super::manifest::FlushManifestPublication {
@@ -3461,13 +3579,17 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
             require_snapshot: false,
         })
         .unwrap();
-    let successor = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    let successor =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
 
     // Assert
     assert_eq!(recovered.files.len(), 3);
     assert_eq!(live_frontier(&recovered, 0), 123);
     assert_eq!(recovered.next_sst_seqs.get(&0), Some(&45));
-    assert!(matches!(blocked, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
+    assert!(matches!(
+        blocked,
+        Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+    ));
     assert_eq!(retained, Vec::<u8>::new());
     assert_eq!(blocked_recovery.files.len(), 3);
     assert_eq!(blocked_recovery.next_sst_seqs.get(&0), Some(&45));
@@ -3503,7 +3625,9 @@ fn should_preserve_flush_progress_when_foreign_edit_arrives_after_cheap_journal_
             .append_batch_for(
                 cntryl_midge_durability::metadata::accounting::Origin::Unclassified,
                 &[
-                    cntryl_midge_durability::metadata::ManifestEdit::AddSst((&cheap_flush_file(44)).into()),
+                    cntryl_midge_durability::metadata::ManifestEdit::AddSst(
+                        (&cheap_flush_file(44)).into(),
+                    ),
                     cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
                         cf_id: 0,
                         next_seq: 45,
@@ -3532,7 +3656,8 @@ fn should_preserve_flush_progress_when_foreign_edit_arrives_after_cheap_journal_
         })
         .unwrap();
     fail::remove("midge::flush_worker::after_manifest_journal");
-    let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    let recovered =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
 
     // Assert
     assert_eq!(recovered.files.len(), 2);
@@ -3547,7 +3672,12 @@ fn should_preserve_flush_progress_when_foreign_edit_arrives_after_cheap_journal_
     assert_eq!(live_frontier(&recovered, 0), 145);
     assert_eq!(recovered.next_sst_seqs.get(&0), Some(&45));
     assert_eq!(
-        std::fs::read(directory.path().join(cntryl_midge_durability::metadata::files::JOURNAL)).unwrap(),
+        std::fs::read(
+            directory
+                .path()
+                .join(cntryl_midge_durability::metadata::files::JOURNAL)
+        )
+        .unwrap(),
         Vec::<u8>::new()
     );
     scenario.teardown();
@@ -3573,8 +3703,10 @@ fn state_on_device(
 
 /// The reservation LEDGER holds on `device`.
 fn persisted_reservation(device: &cntryl_midge_core::simulation::crash_fs::CrashDevice) -> u64 {
-    let wal: Arc<dyn cntryl_midge_core::io::ReadFs> =
-        cntryl_midge_core::io::subdirectory(Arc::new(device.fs()), cntryl_midge_durability::wal::WAL_DIR);
+    let wal: Arc<dyn cntryl_midge_core::io::ReadFs> = cntryl_midge_core::io::subdirectory(
+        Arc::new(device.fs()),
+        cntryl_midge_durability::wal::WAL_DIR,
+    );
     crate::runtime::wal_history::WalHistory::read(&wal)
         .expect("read the WAL ledger")
         .expect("the WAL ledger exists")
@@ -3582,7 +3714,10 @@ fn persisted_reservation(device: &cntryl_midge_core::simulation::crash_fs::Crash
 }
 
 /// Append one put through the WAL actor, as a commit does.
-fn commit_put(state: &mut RuntimeState, key: &'static [u8]) -> cntryl_midge_core::common::MidgeResult<u64> {
+fn commit_put(
+    state: &mut RuntimeState,
+    key: &'static [u8],
+) -> cntryl_midge_core::common::MidgeResult<u64> {
     let mut actor = crate::runtime::actors::WalActor::open(
         state,
         cntryl_midge_durability::wal::DurabilityPolicy::Strict,

@@ -803,7 +803,10 @@ impl RuntimeHandle {
     /// Used by `Engine::commit()` to expose backpressure to clients before
     /// accepting new write transactions.
     #[cfg(test)]
-    pub fn check_write_stall(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> MidgeResult<bool> {
+    pub fn check_write_stall(
+        &self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> MidgeResult<bool> {
         self.check_write_stall_status(cf_id, false)
             .map(|(stalled, _)| stalled)
     }

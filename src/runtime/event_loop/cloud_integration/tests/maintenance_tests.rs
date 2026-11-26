@@ -1,6 +1,6 @@
 use super::*;
-use cntryl_midge_core::io::FsError;
 use crate::runtime::event_loop::compaction::CompactionCoordinator;
+use cntryl_midge_core::io::FsError;
 
 mod compaction_notification_tests;
 mod manual_flush_tests;
@@ -9,7 +9,11 @@ mod wake_tests;
 
 fn cloud_debt(
     files_per_cf: u64,
-) -> cntryl_midge_core::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>, u32)> {
+) -> cntryl_midge_core::common::MidgeResult<(
+    EventLoop,
+    crossbeam::channel::Receiver<RuntimeMsg>,
+    u32,
+)> {
     cloud_debt_with_wal_records(files_per_cf, 1)
 }
 
@@ -22,7 +26,11 @@ fn wal_debt_last_sequence(records: usize) -> u64 {
 fn cloud_debt_with_wal_records(
     files_per_cf: u64,
     wal_record_count: usize,
-) -> cntryl_midge_core::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>, u32)> {
+) -> cntryl_midge_core::common::MidgeResult<(
+    EventLoop,
+    crossbeam::channel::Receiver<RuntimeMsg>,
+    u32,
+)> {
     let mut el = create_test_cloud_event_loop(
         cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
@@ -237,8 +245,8 @@ fn should_fail_queued_manual_waiter_when_compaction_cannot_launch_after_its_turn
     Ok(())
 }
 
-fn local_debt() -> cntryl_midge_core::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>)>
-{
+fn local_debt(
+) -> cntryl_midge_core::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>)> {
     let mut el = crate::runtime::event_loop::tests::create_test_local_event_loop()?;
     let other = el.state.create_cf("remaining-debt".into())?;
     for cf_id in [0, other] {

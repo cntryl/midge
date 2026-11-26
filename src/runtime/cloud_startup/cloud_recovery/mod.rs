@@ -1,9 +1,9 @@
 use super::cloud_io::BlockingCloudIo;
 use super::{CloudSstRecoveryProof, CloudStartupRecovery};
-use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
-use cntryl_midge_durability::RecoveryPolicy;
-use cntryl_midge_core::io::FsError;
 use crate::runtime::RuntimeState;
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_durability::RecoveryPolicy;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -44,7 +44,7 @@ impl CloudStartupRecovery {
     pub(crate) fn cleanup_non_authoritative_compaction_outputs(
         state: &mut RuntimeState,
         storage: &cntryl_midge_storage::HybridStorage,
-        candidates: &[crate::runtime::FileMeta],
+        candidates: &[cntryl_midge_durability::metadata::intent::FileMeta],
     ) -> MidgeResult<std::collections::BTreeSet<String>> {
         let mut cleaned = std::collections::BTreeSet::new();
         for file_meta in candidates {
@@ -87,7 +87,9 @@ impl CloudStartupRecovery {
                     Ok(()) => state
                         .fs
                         .sync_dir(
-                            &cntryl_midge_core::io::FsPath::new(cntryl_midge_table::sst::fs::SST_DIR),
+                            &cntryl_midge_core::io::FsPath::new(
+                                cntryl_midge_table::sst::fs::SST_DIR,
+                            ),
                             cntryl_midge_core::io::Durability::Durable,
                         )
                         .map_err(FsError::into_midge)?,
@@ -145,7 +147,9 @@ impl CloudStartupRecovery {
         for file_name in cntryl_midge_durability::metadata::files::CLOUD_MIRRORED
             .iter()
             .copied()
-            .chain(std::iter::once(cntryl_midge_durability::metadata::files::MANIFEST))
+            .chain(std::iter::once(
+                cntryl_midge_durability::metadata::files::MANIFEST,
+            ))
         {
             if staging_fs
                 .exists(&cntryl_midge_core::io::traits::FsPath::new(file_name))
@@ -227,7 +231,7 @@ impl CloudStartupRecovery {
             scope,
         )
         .map_err(|error| preserve_timeout(error, "committed cloud manifest is invalid"))?;
-        crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+        cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
             &staging_fs,
             RecoveryPolicy::Strict,
         )
@@ -297,7 +301,8 @@ impl CloudStartupRecovery {
             Err(error) => return Err(error),
         };
         local_manifest.validate_persisted()?;
-        let fs: Arc<dyn cntryl_midge_core::io::Fs> = cntryl_midge_core::io::scope_fs(Arc::clone(root), scope.clone());
+        let fs: Arc<dyn cntryl_midge_core::io::Fs> =
+            cntryl_midge_core::io::scope_fs(Arc::clone(root), scope.clone());
         let deadline = scope.deadline();
         // Untimed startup retains the ordinary finite mirror attempt budget.
         let deadline = if deadline.is_bounded() {
@@ -337,7 +342,10 @@ impl CloudStartupRecovery {
             }
         }
         let untracked = store
-            .keys_under(cntryl_midge_core::cloud_layout::CloudObjectLayout::WAL_PREFIX, scope)?
+            .keys_under(
+                cntryl_midge_core::cloud_layout::CloudObjectLayout::WAL_PREFIX,
+                scope,
+            )?
             .into_iter()
             .find(|key| cntryl_midge_durability::wal::parse_segment_object_key(key).is_some());
         if let Some(key) = untracked {
@@ -448,7 +456,12 @@ impl CloudStartupRecovery {
     /// one place that decides which manifest SSTs survive startup.
     fn reconcile_manifest_ssts(
         state: &mut RuntimeState,
-        results: impl Iterator<Item = (cntryl_midge_durability::metadata::FileMeta, Result<u64, SstLoss>)>,
+        results: impl Iterator<
+            Item = (
+                cntryl_midge_durability::metadata::FileMeta,
+                Result<u64, SstLoss>,
+            ),
+        >,
     ) -> MidgeResult<()> {
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
         let original_order = state
@@ -460,7 +473,8 @@ impl CloudStartupRecovery {
             .collect::<std::collections::HashMap<_, _>>();
         let mut manifest_changed = false;
         let mut definitively_lost: Vec<String> = Vec::new();
-        let mut progress = cntryl_midge_core::telemetry::recovery_progress::WorkProgress::new("sst_inventory");
+        let mut progress =
+            cntryl_midge_core::telemetry::recovery_progress::WorkProgress::new("sst_inventory");
 
         let expected_files = state.manifest.files.len();
         let mut completed_files = 0;
@@ -540,19 +554,25 @@ impl CloudStartupRecovery {
         }
         let edits: Vec<cntryl_midge_durability::metadata::ManifestEdit> = definitively_lost
             .iter()
-            .map(|name| cntryl_midge_durability::metadata::ManifestEdit::RemoveSst { name: name.clone() })
+            .map(
+                |name| cntryl_midge_durability::metadata::ManifestEdit::RemoveSst {
+                    name: name.clone(),
+                },
+            )
             .collect();
-        let edit_id = state
-            .manifest_store
-            .append_batch_for(cntryl_midge_durability::metadata::accounting::Origin::Recovery, &edits)?;
+        let edit_id = state.manifest_store.append_batch_for(
+            cntryl_midge_durability::metadata::accounting::Origin::Recovery,
+            &edits,
+        )?;
         let mut durable = state.manifest.clone();
         durable
             .files
             .retain(|file| !definitively_lost.contains(&file.name));
         durable.note_applied_journal_edit(edit_id);
-        state
-            .manifest_store
-            .save_snapshot_for(cntryl_midge_durability::metadata::accounting::Origin::Recovery, &durable)?;
+        state.manifest_store.save_snapshot_for(
+            cntryl_midge_durability::metadata::accounting::Origin::Recovery,
+            &durable,
+        )?;
         state.manifest.replace_files(retained_files);
         state.manifest.note_applied_journal_edit(edit_id);
         Ok(())
@@ -755,8 +775,11 @@ impl CloudStartupRecovery {
 
         state.check_startup_scope("cloud intent SST staging")?;
         Self::stage_sst_bytes(staging_fs, sst_name, &cloud_proof.bytes)?;
-        let staged_path = cntryl_midge_core::io::FsPath::new(cntryl_midge_core::cloud_layout::object_key(sst_name));
-        if let Err(error) = cntryl_midge_table::sst::fs::SstFileIo::open(&staged_path.0, Arc::clone(staging_fs))
+        let staged_path = cntryl_midge_core::io::FsPath::new(
+            cntryl_midge_core::cloud_layout::object_key(sst_name),
+        );
+        if let Err(error) =
+            cntryl_midge_table::sst::fs::SstFileIo::open(&staged_path.0, Arc::clone(staging_fs))
         {
             if matches!(error, MidgeError::Timeout(_)) {
                 return Err(error);
@@ -807,10 +830,19 @@ impl CloudStartupRecovery {
         sst_name: &str,
         data: &[u8],
     ) -> MidgeResult<()> {
-        let temp_path =
-            cntryl_midge_core::io::traits::FsPath::new(cntryl_midge_core::cloud_layout::temp_object_key(sst_name));
-        let target_path = cntryl_midge_core::io::traits::FsPath::new(cntryl_midge_core::cloud_layout::object_key(sst_name));
-        cntryl_midge_core::io::staging::stage_bytes_typed(staging_fs, &temp_path, &target_path, data, || Ok(()))
+        let temp_path = cntryl_midge_core::io::traits::FsPath::new(
+            cntryl_midge_core::cloud_layout::temp_object_key(sst_name),
+        );
+        let target_path = cntryl_midge_core::io::traits::FsPath::new(
+            cntryl_midge_core::cloud_layout::object_key(sst_name),
+        );
+        cntryl_midge_core::io::staging::stage_bytes_typed(
+            staging_fs,
+            &temp_path,
+            &target_path,
+            data,
+            || Ok(()),
+        )
     }
 
     pub(crate) fn cloud_recovery_sst_proofs_for_intent_replay(
@@ -819,8 +851,13 @@ impl CloudStartupRecovery {
         let mut proofs = std::collections::BTreeMap::<String, CloudSstRecoveryProof>::new();
         for intent in &state.intent_log {
             match intent {
-                crate::runtime::IntentLogEntry::FlushPublish { file_meta, .. }
-                | crate::runtime::IntentLogEntry::SstAdded { file_meta } => {
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish {
+                    file_meta,
+                    ..
+                }
+                | cntryl_midge_durability::metadata::intent::IntentLogEntry::SstAdded {
+                    file_meta,
+                } => {
                     proofs
                         .entry(file_meta.name.clone())
                         .and_modify(|proof| {
@@ -828,8 +865,14 @@ impl CloudStartupRecovery {
                         })
                         .or_insert_with(|| CloudSstRecoveryProof::from_runtime(file_meta));
                 }
-                crate::runtime::IntentLogEntry::CompactionPublish { added, .. }
-                | crate::runtime::IntentLogEntry::CompactionApplied { added, .. } => {
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                    added,
+                    ..
+                }
+                | cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionApplied {
+                    added,
+                    ..
+                } => {
                     for file_meta in added {
                         proofs
                             .entry(file_meta.name.clone())
@@ -875,8 +918,11 @@ fn stage_legacy_metadata_cache(
         }
     }
     if removed {
-        fs.sync_dir(&cntryl_midge_core::io::FsPath::new(""), cntryl_midge_core::io::Durability::Durable)
-            .map_err(FsError::into_midge)?;
+        fs.sync_dir(
+            &cntryl_midge_core::io::FsPath::new(""),
+            cntryl_midge_core::io::Durability::Durable,
+        )
+        .map_err(FsError::into_midge)?;
     }
     Ok(())
 }

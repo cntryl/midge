@@ -1,11 +1,11 @@
 //! Pin-safe loop capture for a permanently unselectable-key inventory pass.
 
 use super::{EventLoop, MirrorContinuation};
-use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::hybrid_persistence::{
     sweep_sst_orphans_within, visit_intent_sources, InventoryCursor, OrphanSweepContext,
     OrphanSweepProgress, SstOrphanProtection,
 };
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use std::collections::HashSet;
 use std::sync::Arc;
 

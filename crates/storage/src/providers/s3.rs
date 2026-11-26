@@ -961,10 +961,8 @@ struct S3Backend {
 
 /// A path-style backend against a test HTTP endpoint, for the provider
 /// contract table.
-#[cfg(test)]
-pub(super) fn contract_test_backend(
-    endpoint: String,
-) -> std::sync::Arc<dyn crate::cloud::CloudBackend> {
+#[cfg(any(test, feature = "internal-testing"))]
+pub fn contract_test_backend(endpoint: String) -> std::sync::Arc<dyn crate::cloud::CloudBackend> {
     std::sync::Arc::new(S3Backend::new(
         S3Config::custom("bucket".into(), "us-east-1".into(), endpoint, true),
         CloudExecutor::new(None).expect("cloud executor"),
@@ -1309,7 +1307,7 @@ impl crate::cloud::CloudReadCapability for S3Backend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let url = self.object_url(&key);

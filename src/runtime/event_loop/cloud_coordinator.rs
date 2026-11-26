@@ -59,7 +59,10 @@ impl CloudCoordinator {
                 .is_some_and(|storage| storage.ephemeral_sst_cache_enabled())
     }
 
-    pub(super) fn attach_hybrid_storage(&mut self, storage: Arc<cntryl_midge_storage::HybridStorage>) {
+    pub(super) fn attach_hybrid_storage(
+        &mut self,
+        storage: Arc<cntryl_midge_storage::HybridStorage>,
+    ) {
         self.hybrid_storage = Some(storage);
     }
 
@@ -81,13 +84,17 @@ impl CloudCoordinator {
         publication_lock: &crate::runtime::MetadataPublicationLock,
         deadline: &cntryl_midge_core::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
-        validate_lease: impl FnMut(&cntryl_midge_core::common::OperationDeadline) -> cntryl_midge_core::common::MidgeResult<()>,
+        validate_lease: impl FnMut(
+            &cntryl_midge_core::common::OperationDeadline,
+        ) -> cntryl_midge_core::common::MidgeResult<()>,
     ) -> cntryl_midge_core::common::MidgeResult<()> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(());
         };
         let authority = authority.ok_or_else(|| {
-            cntryl_midge_core::common::MidgeError::Fenced("cloud metadata mirror has no leader store".into())
+            cntryl_midge_core::common::MidgeError::Fenced(
+                "cloud metadata mirror has no leader store".into(),
+            )
         })?;
         crate::runtime::hybrid_persistence::mirror_control_metadata_within(
             crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {

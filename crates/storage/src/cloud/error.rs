@@ -162,7 +162,7 @@ impl std::fmt::Display for CloudError {
 
 impl std::error::Error for CloudError {}
 
-pub(crate) fn contextualize_operation_error(
+pub fn contextualize_operation_error(
     error: &CloudError,
     context: impl std::fmt::Display,
     deadline: &cntryl_midge_core::OperationDeadline,

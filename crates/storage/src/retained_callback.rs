@@ -14,7 +14,7 @@ pub(crate) fn retain_calls_on_this_thread() -> usize {
     RETAIN_CALLS.with(std::cell::Cell::get)
 }
 
-pub(crate) fn retain<T: Send + 'static>(
+pub fn retain<T: Send + 'static>(
     callback: mpsc::Sender<T>,
     reservation: Arc<ResourceReservation>,
 ) -> cntryl_midge_core::MidgeResult<mpsc::Sender<T>> {

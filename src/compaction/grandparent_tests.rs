@@ -1,8 +1,8 @@
 use super::*;
 use cntryl_midge_core::io::{Fs, MockFs};
+use cntryl_midge_core::types::EntryType;
 use cntryl_midge_durability::metadata::FileMeta;
 use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory};
-use cntryl_midge_core::types::EntryType;
 use std::sync::Arc;
 
 fn parent(name: &str, lower: &[u8], upper: &[u8], bytes: u64) -> FileMeta {
@@ -61,7 +61,8 @@ fn should_bound_grandparent_overlap_when_complete_disjoint_spans_are_feasible(
     assert_eq!(overlap_rolls.load(std::sync::atomic::Ordering::Relaxed), 2);
     let mut keys_seen = Vec::new();
     for name in outputs {
-        let summary = cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs(&name, factory.output_fs())?;
+        let summary =
+            cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs(&name, factory.output_fs())?;
         let overlap: u64 = parents
             .iter()
             .filter(|parent| {

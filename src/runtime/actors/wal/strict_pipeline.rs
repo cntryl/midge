@@ -4,10 +4,10 @@ use super::{
     FloorEdit, PendingStrictIo, PendingStrictSync, PreparedTransactionAppend, SyncCadence,
     WalActor, WalTransitionOperation,
 };
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition::WalSyncTicket;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_durability::wal::traits::{WalSyncCompletion, WalSyncPrefix};
 use cntryl_midge_durability::wal::DurabilityPolicy;
 
@@ -135,7 +135,9 @@ impl WalActor {
         ticket: &WalSyncTicket,
         root: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
     ) -> MidgeResult<PendingStrictSync> {
-        cntryl_midge_core::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::txn_after_commit_append_before_sync"
+        );
         self.validate_sync_authority(state)?;
         self.begin_io_transition(WalTransitionOperation::Sync)?;
         WalTransitionBoundary::BeforeFsync.check()?;

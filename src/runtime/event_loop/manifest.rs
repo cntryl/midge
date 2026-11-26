@@ -1,7 +1,7 @@
 use super::{EventLoop, HandleOutcome};
-#[cfg(test)]
-use crate::runtime::FileMeta;
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
+#[cfg(test)]
+use cntryl_midge_durability::metadata::intent::FileMeta;
 use crossbeam::channel::Receiver;
 
 pub(super) struct ManifestCoordinator;
@@ -27,7 +27,8 @@ impl ManifestCoordinator {
 
     fn ddl_authority(
         event_loop: &EventLoop,
-    ) -> cntryl_midge_core::common::MidgeResult<Option<crate::runtime::ddl::DdlLeaseAuthority>> {
+    ) -> cntryl_midge_core::common::MidgeResult<Option<crate::runtime::ddl::DdlLeaseAuthority>>
+    {
         if !event_loop.actors.cloud_coordinator.provider_ddl_fencing {
             return Ok(None);
         }
@@ -414,7 +415,9 @@ impl ManifestCoordinator {
                     waiter.request_id,
                     RuntimeResponse::Error {
                         request_id: waiter.request_id,
-                        error: cntryl_midge_core::common::MidgeError::InvalidArgument(error_message.clone()),
+                        error: cntryl_midge_core::common::MidgeError::InvalidArgument(
+                            error_message.clone(),
+                        ),
                     },
                 );
             }
@@ -429,7 +432,9 @@ impl ManifestCoordinator {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: cntryl_midge_core::common::MidgeError::InvalidArgument(error_message.clone()),
+                    error: cntryl_midge_core::common::MidgeError::InvalidArgument(
+                        error_message.clone(),
+                    ),
                 },
             );
         }

@@ -96,9 +96,10 @@ fn sealed_wal_bytes(segment_id: u64) -> Vec<u8> {
             Some(bytes::Bytes::from_static(b"value")),
             id,
         );
-        (bytes, prev) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(id, 7, prev)
-            .record(&record)
-            .seal();
+        (bytes, prev) =
+            cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(id, 7, prev)
+                .record(&record)
+                .seal();
     }
     bytes
 }
@@ -148,7 +149,11 @@ impl CatalogExpiryFixture {
         let publication_path = directory.path().join("second.wal");
         std::fs::write(&publication_path, &second_wal).unwrap();
         storage
-            .compare_exchange_remote_object(&cntryl_midge_durability::wal::segment_object_key(2, 7), None, second_wal)
+            .compare_exchange_remote_object(
+                &cntryl_midge_durability::wal::segment_object_key(2, 7),
+                None,
+                second_wal,
+            )
             .unwrap();
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
         catalog
@@ -414,7 +419,8 @@ fn strict_recovery(
     remote: &Arc<dyn cntryl_midge_storage::StorageBackend>,
     catalog: &WalPublicationCatalog,
 ) -> crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery {
-    let wal: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_core::io::RealFs::new(root.join("wal")).unwrap());
+    let wal: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(root.join("wal")).unwrap());
     // A cache that joined the catalog: its first segment follows the head.
     let history = match crate::runtime::wal_history::WalHistory::load(Arc::clone(&wal), 0).unwrap()
     {
@@ -511,7 +517,9 @@ fn successor_storage(remote: &Arc<dyn cntryl_midge_storage::StorageBackend>) -> 
 fn retain_local_seal(fixture: &CatalogExpiryFixture) -> (std::path::PathBuf, std::path::PathBuf) {
     let retained = fixture.directory.path().join("retained");
     std::fs::create_dir_all(retained.join("wal")).unwrap();
-    let seal = retained.join("wal").join(cntryl_midge_durability::wal::segment_file_name(1));
+    let seal = retained
+        .join("wal")
+        .join(cntryl_midge_durability::wal::segment_file_name(1));
     std::fs::write(&seal, sealed_wal_bytes(1)).unwrap();
     crate::runtime::wal_history::fixture::record_at(&retained, &[1], 2).unwrap();
     (retained, seal)
@@ -679,7 +687,8 @@ fn should_report_incompatible_catalog_version_without_repairing_from_mirror() {
 fn should_share_catalog_budget_when_maintenance_is_not_yet_configured() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();
-    let local = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(directory.path()).unwrap());
+    let local =
+        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(directory.path()).unwrap());
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         local,
         cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -748,9 +757,10 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
             Some(bytes::Bytes::from_static(b"value")),
             segment_id,
         );
-        let (bytes, link) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(segment_id, 7, prev)
-            .record(&record)
-            .seal();
+        let (bytes, link) =
+            cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(segment_id, 7, prev)
+                .record(&record)
+                .seal();
         let entry = CatalogEntry::from_sealed_bytes(&bytes).expect("verified fixture segment");
         prev = link;
         catalog.append_run(7, &[entry]).unwrap();
@@ -772,7 +782,9 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
     );
     assert_eq!(storage.remote_object_proof(key).unwrap().bytes(), original);
     assert!(storage
-        .remote_object_proof_optional(cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+        .remote_object_proof_optional(
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY
+        )
         .unwrap()
         .is_none());
     let budget = storage.maintenance_memory().unwrap();

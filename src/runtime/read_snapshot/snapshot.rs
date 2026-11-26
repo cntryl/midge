@@ -364,7 +364,10 @@ impl ReadSnapshot {
 
                 match state {
                     KeyState::Value(value, _, exp, _)
-                        if !cntryl_midge_core::common::time::is_expired_at(exp, self.read_time_millis) =>
+                        if !cntryl_midge_core::common::time::is_expired_at(
+                            exp,
+                            self.read_time_millis,
+                        ) =>
                     {
                         Some((key, value.to_vec()))
                     }

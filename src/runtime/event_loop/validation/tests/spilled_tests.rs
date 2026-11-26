@@ -194,11 +194,9 @@ fn should_admit_spilled_insert_when_ttl_expires_after_detached_reads_without_new
     let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::tests::create_test_local_event_loop()?;
     let clock = Arc::new(ManualClock(std::sync::atomic::AtomicU64::new(1_000)));
-    event_loop
-        .state
-        .install_ttl_clock(Arc::new(cntryl_midge_core::common::time::ObservedClock::new(
-            clock.clone(),
-        )));
+    event_loop.state.install_ttl_clock(Arc::new(
+        cntryl_midge_core::common::time::ObservedClock::new(clock.clone()),
+    ));
     let mut seed = request(946_010, b"m", false);
     if let TransactionOp::Put { ttl_seconds, .. } = &mut seed.ops[0] {
         *ttl_seconds = Some(1);
@@ -281,11 +279,9 @@ fn assert_ttl_error_order(expire: bool) -> MidgeResult<()> {
     let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::tests::create_test_local_event_loop()?;
     let clock = Arc::new(ManualClock(std::sync::atomic::AtomicU64::new(1_000)));
-    event_loop
-        .state
-        .install_ttl_clock(Arc::new(cntryl_midge_core::common::time::ObservedClock::new(
-            clock.clone(),
-        )));
+    event_loop.state.install_ttl_clock(Arc::new(
+        cntryl_midge_core::common::time::ObservedClock::new(clock.clone()),
+    ));
     let mut seed = request(946_020, b"m", false);
     if let TransactionOp::Put { ttl_seconds, .. } = &mut seed.ops[0] {
         *ttl_seconds = Some(1);

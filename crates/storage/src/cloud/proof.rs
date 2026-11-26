@@ -4,7 +4,7 @@
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CloudObjectProof {
+pub struct CloudObjectProof {
     pub bytes: Vec<u8>,
     pub metadata: StorageObjectMetadata,
 }
@@ -45,7 +45,7 @@ pub(crate) fn blocking_cloud_object_proof(
     .map_err(|error| error.to_string())
 }
 
-pub(crate) fn blocking_cloud_object_proof_within(
+pub fn blocking_cloud_object_proof_within(
     cloud: &CloudStorage,
     key: &str,
     deadline: &cntryl_midge_core::OperationDeadline,

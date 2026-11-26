@@ -29,11 +29,7 @@ pub(super) struct UploadAttemptAdmission {
 }
 
 impl HybridStorage {
-    pub(crate) fn queue_cloud_metadata_mirror_complete(
-        &self,
-        operation_id: u64,
-        writer_epoch: u64,
-    ) {
+    pub fn queue_cloud_metadata_mirror_complete(&self, operation_id: u64, writer_epoch: u64) {
         Self::queue_storage_event(
             &self.event_queue,
             self.external_event_tx.as_ref(),
@@ -44,11 +40,7 @@ impl HybridStorage {
         );
     }
 
-    pub(crate) fn queue_cloud_wal_publication_complete(
-        &self,
-        operation_id: u64,
-        writer_epoch: u64,
-    ) {
+    pub fn queue_cloud_wal_publication_complete(&self, operation_id: u64, writer_epoch: u64) {
         Self::queue_storage_event(
             &self.event_queue,
             self.external_event_tx.as_ref(),
@@ -61,7 +53,7 @@ impl HybridStorage {
 
     /// Consume an upload's confirmation once. Missing or evicted confirmations
     /// fall back to remote readback; this cache never grants catalog authority.
-    pub(crate) fn take_verified_upload(&self, id: u64, key: &str, bytes: &[u8]) -> bool {
+    pub fn take_verified_upload(&self, id: u64, key: &str, bytes: &[u8]) -> bool {
         self.verified_uploads
             .lock()
             .remove(&id)
@@ -72,11 +64,7 @@ impl HybridStorage {
             })
     }
 
-    pub(crate) fn queue_cloud_wal_prune_complete(
-        &self,
-        segment_id: u64,
-        result: StorageOutcome<()>,
-    ) {
+    pub fn queue_cloud_wal_prune_complete(&self, segment_id: u64, result: StorageOutcome<()>) {
         Self::queue_storage_event(
             &self.event_queue,
             self.external_event_tx.as_ref(),
@@ -84,7 +72,7 @@ impl HybridStorage {
         );
     }
 
-    pub(crate) fn queue_cloud_wal_prune_attempt_failed(&self, segment_id: u64, error: String) {
+    pub fn queue_cloud_wal_prune_attempt_failed(&self, segment_id: u64, error: String) {
         Self::queue_storage_event(
             &self.event_queue,
             self.external_event_tx.as_ref(),
@@ -106,7 +94,7 @@ impl HybridStorage {
         Ok(())
     }
 
-    pub(crate) fn ensure_wal_write_admission(
+    pub fn ensure_wal_write_admission(
         &self,
         held: HeldUploads,
     ) -> cntryl_midge_core::MidgeResult<()> {
@@ -125,7 +113,7 @@ impl HybridStorage {
         )))
     }
 
-    pub(crate) fn is_wal_upload_stalled(&self, held: HeldUploads) -> bool {
+    pub fn is_wal_upload_stalled(&self, held: HeldUploads) -> bool {
         self.upload_queue.lock().is_stalled(held)
     }
 
@@ -134,7 +122,7 @@ impl HybridStorage {
     /// to finish, else until its earliest retry is due, so a segment that
     /// keeps failing does not keep its caller polling. `None` when nothing
     /// is queued.
-    pub(crate) fn next_upload_turn(&self, poll: Duration) -> Option<Duration> {
+    pub fn next_upload_turn(&self, poll: Duration) -> Option<Duration> {
         let upload = self.upload_queue.lock().next_turn(Instant::now(), poll);
         let cleanup = self.next_remote_delete_turn(poll);
         upload.into_iter().chain(cleanup).min()
@@ -142,7 +130,7 @@ impl HybridStorage {
 
     /// Queue a local file for bounded remote publication under an explicit
     /// object key. The runtime owns the meaning of the request id and frontier.
-    pub(crate) fn enqueue_object_upload(
+    pub fn enqueue_object_upload(
         &self,
         request_id: u64,
         object_key: String,

@@ -409,7 +409,7 @@ fn decode_metadata_bytes(
 
 /// Apply point-key admission limits to both endpoints and bound the complete
 /// singleton range block (count, two lengths, sequence, and endpoint bytes).
-pub(crate) fn validate_range_tombstone_size(
+pub fn validate_range_tombstone_size(
     start_len: usize,
     end_len: usize,
 ) -> cntryl_midge_core::common::MidgeResult<()> {

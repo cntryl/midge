@@ -70,7 +70,10 @@ fn complete_build(
     Ok(built)
 }
 
-fn publication_task(fs: Arc<dyn cntryl_midge_core::io::Fs>, build: &FlushBuildCompletion) -> FlushPublishTask {
+fn publication_task(
+    fs: Arc<dyn cntryl_midge_core::io::Fs>,
+    build: &FlushBuildCompletion,
+) -> FlushPublishTask {
     FlushPublishTask {
         build: FlushBuildOutput {
             identity: build.identity,
@@ -117,7 +120,8 @@ fn complete_mirror_phases(
     fs: Arc<dyn cntryl_midge_core::io::Fs>,
     delta: &FlushPublicationDelta,
 ) -> MidgeResult<()> {
-    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
+    let deadline =
+        cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
     actor.submit_mirror(mirror_task(
         Arc::clone(&fs),
         delta,

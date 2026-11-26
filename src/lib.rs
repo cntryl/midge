@@ -154,16 +154,16 @@ pub mod __internal {
         }
     }
     pub mod recovery {
-        pub use cntryl_midge_durability::metadata::recovery_progress_fixture::{
-            run_journal_recovery_progress_fixture, JournalRecoveryProgressFixtureResult,
-        };
-        pub use cntryl_midge_durability::metadata::ManifestPersistence;
         pub use crate::runtime::cloud_startup::recovery_progress_fixture::{
             prepare_inventory_progress_fixture, prepare_recovery_progress_fixture,
             PreparedRecoveryProgressFixture, RecoveryProgressFixtureMode,
             RecoveryProgressFixtureResult,
         };
         pub use crate::runtime::{IntentLogEntry, IntentPersistence};
+        pub use cntryl_midge_durability::metadata::recovery_progress_fixture::{
+            run_journal_recovery_progress_fixture, JournalRecoveryProgressFixtureResult,
+        };
+        pub use cntryl_midge_durability::metadata::ManifestPersistence;
     }
     pub mod sst {
         /// Read-only SST point reader exposing exact decoder work to benchmarks.
@@ -183,7 +183,8 @@ pub mod __internal {
                     cntryl_midge_core::io::RealFs::open_existing(database_root)
                         .map_err(cntryl_midge_core::io::FsError::into_midge)?,
                 );
-                let reader = cntryl_midge_table::sst::fs::SstFileIo::open(&format!("sst/{sst_name}"), fs)?;
+                let reader =
+                    cntryl_midge_table::sst::fs::SstFileIo::open(&format!("sst/{sst_name}"), fs)?;
                 Ok(Self(reader))
             }
 
@@ -202,7 +203,9 @@ pub mod __internal {
         }
 
         pub mod decoder {
-            pub use cntryl_midge_table::sst::fs::reader_io::{validate_data_block, validate_index_block};
+            pub use cntryl_midge_table::sst::fs::reader_io::{
+                validate_data_block, validate_index_block,
+            };
         }
         pub mod bloom {
             pub use cntryl_midge_table::sst::bloom::{BlockBloomFilter, BloomReader, BloomWriter};
@@ -241,6 +244,10 @@ pub mod __internal {
     }
     /// Simulated storage for crash and fault campaigns.
     pub mod simulation {
+        pub use crate::simulation::oracle::{
+            Commit, CommitId, Histories, History, Key, Logging, Mismatch, Recovery, Verdict,
+            Violation,
+        };
         pub use cntryl_midge_core::simulation::clock::SimulatedClock;
         pub use cntryl_midge_core::simulation::crash_fs::{
             CrashDevice, Decision, Fault, FaultEffect, FaultError, FaultId, FaultOp, Subject,
@@ -249,10 +256,6 @@ pub mod __internal {
         pub use cntryl_midge_storage::simulation::{
             Failure, Fate, Operation, RequestId, Schedule, SimulatedObjectStore, StoreImage,
             FAILURE_MESSAGE,
-        };
-        pub use crate::simulation::oracle::{
-            Commit, CommitId, Histories, History, Key, Logging, Mismatch, Recovery, Verdict,
-            Violation,
         };
     }
     pub mod types {
@@ -264,7 +267,9 @@ pub mod __internal {
             segment_object_key, WalOpKind, WalRecord,
         };
         pub mod encoding {
-            pub use cntryl_midge_durability::wal::encoding::{decode, decode_view, encode, encode_into};
+            pub use cntryl_midge_durability::wal::encoding::{
+                decode, decode_view, encode, encode_into,
+            };
         }
         /// WAL segment format v2 (#843), for integration fixtures.
         pub mod segment {
@@ -305,27 +310,17 @@ pub use cntryl_midge_core::cloud_layout::CloudObjectLayout;
 pub use cntryl_midge_core::common::{LatencySummary, MidgeError, MidgeResult, Severity};
 
 // Engine / Transactions
+pub use cntryl_midge_core::types::ColumnFamilyId;
 pub use engine::{
     BackupManifest, BackupObject, BackupStorageKind, ColumnFamilyHandle, ConflictPolicy, Engine,
     EngineMetrics, StorageVerifier, Transaction, TransactionMode,
 };
-pub use cntryl_midge_core::types::ColumnFamilyId;
 
 // Scan API
-pub use engine::{Direction, IteratorState, Query, ScanIterator};
 pub use cntryl_midge_table::sst::cache::CacheFill;
+pub use engine::{Direction, IteratorState, Query, ScanIterator};
 
 // Observability and diagnostics
-pub use config::AmortizedSyncFloor;
-pub use config::CompactionLevelConfig;
-pub use cntryl_midge_storage::config::{
-    AwsS3Config, AzureBlobConfig, AzureCredentialSource, CloudCheckCode, CloudCheckOutcome,
-    CloudPreflightOptions, CloudProviderConfig, CloudProviderKind, CloudStorageLocation,
-    CloudStorageRole, CloudStorageTopology, CloudValidationFinding, CloudValidationMode,
-    CloudValidationReport, GcsApiStyle, GcsConfig, GcsCredentialSource, OciCredentialSource,
-    OciObjectStorageConfig, S3CompatibleConfig, S3CredentialSource,
-};
-pub use config::WriteBackpressureConfig;
 pub use cntryl_midge_core::types::{
     DurabilityFrontiersSnapshot, ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot,
     RuntimeLatencySummaries, RuntimeMetricsSnapshot, SnapshotPinSnapshot, StorageFileLayout,
@@ -336,6 +331,16 @@ pub use cntryl_midge_core::types::{
     EngineHealth, HybridStorageBudgetSnapshot, LocalStorageUsage, StorageAdmissionBlock,
     StorageAdmissionKind, StorageAdmissionReason,
 };
+pub use cntryl_midge_storage::config::{
+    AwsS3Config, AzureBlobConfig, AzureCredentialSource, CloudCheckCode, CloudCheckOutcome,
+    CloudPreflightOptions, CloudProviderConfig, CloudProviderKind, CloudStorageLocation,
+    CloudStorageRole, CloudStorageTopology, CloudValidationFinding, CloudValidationMode,
+    CloudValidationReport, GcsApiStyle, GcsConfig, GcsCredentialSource, OciCredentialSource,
+    OciObjectStorageConfig, S3CompatibleConfig, S3CredentialSource,
+};
+pub use config::AmortizedSyncFloor;
+pub use config::CompactionLevelConfig;
+pub use config::WriteBackpressureConfig;
 
 // Configuration
 pub use engine::{
@@ -354,8 +359,8 @@ pub use cntryl_midge_core::common::time::{Clock, SystemClock};
 // to depend on the `bytes` crate directly.
 
 // `engine::Key` is a public alias to `bytes::Bytes`; re-export it as `Bytes`.
-pub use engine::Key as Bytes;
 pub use cntryl_midge_storage::cloud::CloudRetryPolicy;
+pub use engine::Key as Bytes;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 

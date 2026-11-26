@@ -205,14 +205,16 @@ mod validity_tests {
             "db".into(),
         ));
         let directory = tempfile::tempdir().unwrap();
-        let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-            cntryl_midge_durability::lease::CloudLeaseConfig {
-                bucket: "bucket".into(),
-                prefix: "db".into(),
-            },
-            directory.path().into(),
-            cloud,
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "bucket".into(),
+                    prefix: "db".into(),
+                },
+                directory.path().into(),
+                cloud,
+            ),
+        );
         let _guard = Arc::clone(&lease).try_acquire().unwrap();
         let validity = lease.lease_validity();
         let healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -225,8 +227,9 @@ mod validity_tests {
             leader_holder_id: Some(lease.holder_id()),
         };
         backend.clear_history();
-        let deadline =
-            cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            std::time::Duration::from_secs(5),
+        );
 
         // Act
         for _ in 0..10 {
@@ -237,7 +240,10 @@ mod validity_tests {
 
         // Assert
         assert_eq!(backend.get_downloads(), Vec::<String>::new());
-        assert!(matches!(expired, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
+        assert!(matches!(
+            expired,
+            Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+        ));
         assert!(!healthy.load(std::sync::atomic::Ordering::Acquire));
     }
 
@@ -264,7 +270,10 @@ mod validity_tests {
         // Act
         let result = fence.check_health();
         // Assert
-        assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
+        assert!(matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+        ));
     }
 }
 
@@ -330,7 +339,10 @@ mod takeover_tests {
         let result = fence.check_health();
         // Assert
         assert!(successor.epoch() > predecessor.epoch());
-        assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
+        assert!(matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+        ));
         assert_eq!(
             successor
                 .get_leader_store()

@@ -2,8 +2,8 @@
 
 use super::super::durability_sync::CompletionSource;
 use super::super::EventLoop;
-use cntryl_midge_core::common::OperationDeadline;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+use cntryl_midge_core::common::OperationDeadline;
 use cntryl_midge_durability::wal::publish::OwedSegment;
 
 /// Failed upload attempts a cloud-durability waiter waits through. From then
@@ -126,7 +126,10 @@ impl EventLoop {
             cntryl_midge_storage::StorageEvent::CloudWalPruneComplete { segment_id, result } => {
                 self.handle_storage_event_cloud_wal_prune_complete(segment_id, result);
             }
-            cntryl_midge_storage::StorageEvent::CloudWalPruneAttemptFailed { segment_id, error } => {
+            cntryl_midge_storage::StorageEvent::CloudWalPruneAttemptFailed {
+                segment_id,
+                error,
+            } => {
                 self.actors
                     .cloud_coordinator
                     .cloud_wal
@@ -182,12 +185,14 @@ impl EventLoop {
                      the upload keeps retrying, so treat the outcome as unknown: {error}"
                 ))
             }
-            CloudUploadFailureKind::Corruption => cntryl_midge_core::common::MidgeError::Corruption(format!(
-                "cloud WAL segment {segment_id} cannot be uploaded: {error}"
-            )),
-            CloudUploadFailureKind::Fenced => cntryl_midge_core::common::MidgeError::Fenced(format!(
-                "cloud WAL segment {segment_id} upload stopped: {error}"
-            )),
+            CloudUploadFailureKind::Corruption => {
+                cntryl_midge_core::common::MidgeError::Corruption(format!(
+                    "cloud WAL segment {segment_id} cannot be uploaded: {error}"
+                ))
+            }
+            CloudUploadFailureKind::Fenced => cntryl_midge_core::common::MidgeError::Fenced(
+                format!("cloud WAL segment {segment_id} upload stopped: {error}"),
+            ),
         };
         if !failure_kind.ends_upload() {
             self.fail_cloud_upload_waiters(segment_id, &error);
@@ -211,7 +216,8 @@ impl EventLoop {
         error: &cntryl_midge_core::common::MidgeError,
         deadline: &OperationDeadline,
     ) -> bool {
-        let contention = cntryl_midge_core::common::resource_budget::ResourceContention::from_error(error);
+        let contention =
+            cntryl_midge_core::common::resource_budget::ResourceContention::from_error(error);
         if !deadline.is_expired()
             && contention.is_some_and(|contention| {
                 self.actors
@@ -574,7 +580,11 @@ impl EventLoop {
 
     /// A storage-owned upload of `segment_id` spent the attempts its waiters
     /// are owed. Fail them; the storage queue keeps the upload and retries it.
-    fn fail_cloud_upload_waiters(&mut self, segment_id: u64, error: &cntryl_midge_core::common::MidgeError) {
+    fn fail_cloud_upload_waiters(
+        &mut self,
+        segment_id: u64,
+        error: &cntryl_midge_core::common::MidgeError,
+    ) {
         if !self.owns_cloud_upload(segment_id) {
             tracing::warn!(
                 segment_id,
@@ -590,7 +600,11 @@ impl EventLoop {
     /// of every later cloud durability generation. An earlier sealed
     /// generation can still close independently when its acknowledgement
     /// arrives.
-    fn fail_blocked_waiters(&mut self, segment_id: u64, error: &cntryl_midge_core::common::MidgeError) {
+    fn fail_blocked_waiters(
+        &mut self,
+        segment_id: u64,
+        error: &cntryl_midge_core::common::MidgeError,
+    ) {
         self.state.mark_persistence_anomaly();
         tracing::error!(segment_id, error = %error, "Cloud upload failed");
         let waiters = self
@@ -604,8 +618,8 @@ impl EventLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cntryl_midge_core::common::MidgeError;
     use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
+    use cntryl_midge_core::common::MidgeError;
 
     #[test]
     fn should_keep_retry_classification_given_retryable_failure_when_cloud_ack_adds_context() {
@@ -629,7 +643,8 @@ mod tests {
             assert!(
                 matches!(
                     error.severity(),
-                    cntryl_midge_core::common::Severity::Backpressure | cntryl_midge_core::common::Severity::Transient
+                    cntryl_midge_core::common::Severity::Backpressure
+                        | cntryl_midge_core::common::Severity::Transient
                 ),
                 "retryable failure must stay retryable: {error:?}"
             );
@@ -711,8 +726,8 @@ mod tests {
         let _shared_held = shared
             .reserve(shared.limit(), "shared maintenance")
             .unwrap();
-        let other =
-            cntryl_midge_core::common::resource_budget::ResourceBudget::new(10).with_contention_errors();
+        let other = cntryl_midge_core::common::resource_budget::ResourceBudget::new(10)
+            .with_contention_errors();
         let _other_held = other.reserve(10, "other pool").unwrap();
         let error = other.reserve(1, "other request").unwrap_err();
 

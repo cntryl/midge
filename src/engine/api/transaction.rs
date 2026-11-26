@@ -6,7 +6,6 @@
 //! - Rollback and commit semantics
 //! - Column-family scoped transactions
 
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::engine::api::write_options::effective_wal_durability_policy;
 use crate::engine::ingest::IngestCoordinator;
 use crate::engine::ColumnFamilyId;
@@ -15,6 +14,7 @@ use crate::runtime::transaction_spill::{
     IntentEntry, IntentKeyScan, IntentLookup, TransactionMemoryPool, TransactionWriteSet,
 };
 use crate::runtime::{KeyAssertion, RuntimeHandle};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_core::types::ConflictPolicy;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

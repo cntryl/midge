@@ -1,9 +1,9 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
 use super::{FloorEdit, SyncCadence, WalActor, WalSyncReceipt, WalTransitionOperation};
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_durability::wal::DurabilityPolicy;
 use std::time::{Duration, Instant};
 
@@ -43,7 +43,9 @@ impl WalActor {
         last_sequence: u64,
         group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
-        cntryl_midge_core::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::txn_after_commit_append_before_sync"
+        );
         if let Err(error) = self.sync_internal_with_group(state, group) {
             // The strict records are already on disk but not yet in memory.
             // Continuing as `Open` would let the runtime view and the recovery
@@ -230,8 +232,9 @@ impl WalActor {
                         panic_info = ?panic_info,
                         "WAL fsync panic; returning error to unblock event loop"
                     );
-                    let error =
-                        cntryl_midge_core::common::MidgeError::Internal("WAL fsync panicked".to_string());
+                    let error = cntryl_midge_core::common::MidgeError::Internal(
+                        "WAL fsync panicked".to_string(),
+                    );
                     self.fence_transition(state, error.to_string());
                     return Err(error);
                 }
@@ -285,7 +288,9 @@ impl WalActor {
             pending_writes: state.wal.pending_writes,
             pending_sync_count: self.pending_sync_count,
             bytes_since_sync: self.bytes_since_sync,
-            end_offset: self.writer().map(cntryl_midge_durability::wal::WalWriter::current_pos),
+            end_offset: self
+                .writer()
+                .map(cntryl_midge_durability::wal::WalWriter::current_pos),
             writer_epoch: self.current_epoch,
             segment_id: state.wal.open_segment(),
             generation: None,
@@ -380,11 +385,12 @@ impl WalActor {
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
     pub(super) fn after_fsync_boundary() -> MidgeResult<()> {
-        cntryl_midge_core::failpoints::fail_point!("midge::wal::after_fsync_before_durable_frontier", |_| Err(
-            MidgeError::Internal(
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::after_fsync_before_durable_frontier",
+            |_| Err(MidgeError::Internal(
                 "failpoint: WAL fsync completed before logical commit".to_string()
-            )
-        ));
+            ))
+        );
         Ok(())
     }
 

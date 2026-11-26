@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use super::OpenOptions;
+use crate::runtime::{Runtime, RuntimeState};
 #[cfg(test)]
 use cntryl_midge_core::common::MidgeResult;
-use crate::runtime::{Runtime, RuntimeState};
 
 mod assembly;
 mod cloud_format_upgrade;
@@ -84,7 +84,9 @@ fn provider_kind(provider: &cntryl_midge_storage::config::CloudProviderConfig) -
         cntryl_midge_storage::config::CloudProviderConfig::S3Compatible(_) => "s3-compatible",
         cntryl_midge_storage::config::CloudProviderConfig::AzureBlob(_) => "azure-blob",
         cntryl_midge_storage::config::CloudProviderConfig::Gcs(_) => "gcs",
-        cntryl_midge_storage::config::CloudProviderConfig::OciObjectStorage(_) => "oci-object-storage",
+        cntryl_midge_storage::config::CloudProviderConfig::OciObjectStorage(_) => {
+            "oci-object-storage"
+        }
     }
 }
 

@@ -58,13 +58,19 @@ impl Fs for RefuseSstReads {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
             .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
     }
 
-    fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
+    fn open(
+        &self,
+        path: &FsPath,
+        options: OpenOptions,
+    ) -> FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
         self.check(path)?;
         self.inner.open(path, options)
     }
@@ -100,13 +106,20 @@ fn append_record(state: &RuntimeState, sequence: u64, key: &'static [u8]) {
         sequence,
     );
     let mut frame = Vec::new();
-    cntryl_midge_durability::wal::frame::append_frame(&mut frame, &cntryl_midge_durability::wal::encoding::encode(&record).unwrap())
-        .unwrap();
+    cntryl_midge_durability::wal::frame::append_frame(
+        &mut frame,
+        &cntryl_midge_durability::wal::encoding::encode(&record).unwrap(),
+    )
+    .unwrap();
     let mut file = std::fs::OpenOptions::new()
         .append(true)
-        .open(state.host_wal_dir().join(cntryl_midge_durability::wal::segment_file_name(
-            state.wal.history.ledger().open_segment(),
-        )))
+        .open(
+            state
+                .host_wal_dir()
+                .join(cntryl_midge_durability::wal::segment_file_name(
+                    state.wal.history.ledger().open_segment(),
+                )),
+        )
         .unwrap();
     std::io::Write::write_all(&mut file, &frame).unwrap();
     file.sync_all().unwrap();
@@ -121,7 +134,7 @@ fn should_not_read_ssts_to_decide_wal_replay_or_retention() {
     append_record(&state, 1, b"flushed");
     crate::runtime::wal_history::fixture::rotate(&mut state.wal.history).unwrap();
     append_record(&state, 3, b"replay");
-    let output = crate::runtime::FileMeta {
+    let output = cntryl_midge_durability::metadata::intent::FileMeta {
         name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
         level: 0,
         size_bytes: 10,

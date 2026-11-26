@@ -60,7 +60,8 @@ fn should_detect_range_conflict_from_newer_range_tombstone_in_sst() -> MidgeResu
     writer.add_with_meta(b"m", Some(b"old"), 5, EntryType::Put, None)?;
     writer.add_range_tombstone(b"a", b"z", 15)?;
     cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &dir.path().join("range.sst"))?;
-    let summary = cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs("range.sst", Arc::clone(&fs))?;
+    let summary =
+        cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs("range.sst", Arc::clone(&fs))?;
     assert_eq!(summary.largest_seq, 15);
     let snapshot = ReadSnapshot::new(
         Arc::new(SkipListMemtable::new()),
@@ -92,7 +93,8 @@ fn should_detect_range_conflict_from_newer_range_tombstone_in_sst() -> MidgeResu
 }
 
 #[test]
-fn should_reject_conflicting_equal_sequence_ssts_across_reads() -> cntryl_midge_core::common::MidgeResult<()> {
+fn should_reject_conflicting_equal_sequence_ssts_across_reads(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
     let fs: Arc<dyn cntryl_midge_core::io::Fs> =
@@ -252,7 +254,8 @@ fn should_accept_identical_expired_value_replayed_in_memtable() -> MidgeResult<(
 }
 
 #[test]
-fn should_use_shared_block_cache_for_snapshot_sst_reads() -> cntryl_midge_core::common::MidgeResult<()> {
+fn should_use_shared_block_cache_for_snapshot_sst_reads(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
     let fs: Arc<dyn cntryl_midge_core::io::Fs> =
@@ -351,8 +354,8 @@ fn should_share_indexed_sst_view_across_consecutive_snapshots() {
 }
 
 #[test]
-fn should_open_only_adjacent_lower_level_readers_for_point_lookup() -> cntryl_midge_core::common::MidgeResult<()>
-{
+fn should_open_only_adjacent_lower_level_readers_for_point_lookup(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
     let fs: Arc<dyn cntryl_midge_core::io::Fs> =
@@ -504,7 +507,8 @@ fn should_use_one_sequential_cursor_per_complete_lower_level_in_both_directions(
 }
 
 #[test]
-fn should_merge_equal_boundary_key_once_in_each_scan_direction() -> cntryl_midge_core::common::MidgeResult<()> {
+fn should_merge_equal_boundary_key_once_in_each_scan_direction(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
     let fs: Arc<dyn cntryl_midge_core::io::Fs> =
@@ -513,11 +517,17 @@ fn should_merge_equal_boundary_key_once_in_each_scan_direction() -> cntryl_midge
     let mut first_writer = factory.create()?;
     first_writer.add_with_meta(b"a", Some(b"first-a"), 1, EntryType::Put, None)?;
     first_writer.add_with_meta(b"b", Some(b"old-b"), 2, EntryType::Put, None)?;
-    cntryl_midge_table::sst::fs::finish_writer_to_path(first_writer, &temp_dir.path().join("first.sst"))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(
+        first_writer,
+        &temp_dir.path().join("first.sst"),
+    )?;
     let mut second_writer = factory.create()?;
     second_writer.add_with_meta(b"b", Some(b"new-b"), 3, EntryType::Put, None)?;
     second_writer.add_with_meta(b"c", Some(b"second-c"), 4, EntryType::Put, None)?;
-    cntryl_midge_table::sst::fs::finish_writer_to_path(second_writer, &temp_dir.path().join("second.sst"))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(
+        second_writer,
+        &temp_dir.path().join("second.sst"),
+    )?;
     let files = vec![
         FileMeta {
             name: "first.sst".to_string(),
@@ -584,7 +594,10 @@ fn should_not_skip_range_tombstone_when_manifest_bounds_are_narrow(
 
     let mut old_writer = factory.create()?;
     old_writer.add_with_meta(b"b", Some(b"old"), 1, EntryType::Put, None)?;
-    cntryl_midge_table::sst::fs::finish_writer_to_path(old_writer, &temp_dir.path().join("old.sst"))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(
+        old_writer,
+        &temp_dir.path().join("old.sst"),
+    )?;
 
     let mut tombstone_writer = factory.create()?;
     tombstone_writer.add_with_meta(b"m", Some(b"new"), 3, EntryType::Put, None)?;

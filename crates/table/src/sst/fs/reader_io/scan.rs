@@ -1,10 +1,10 @@
 use super::{KeyState, SstFileIo, SstPointReadStats};
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 use bytes::Bytes;
 use cntryl_midge_core::common::MidgeResult;
 
 impl SstFileIo {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn get_state_at_with_time_and_stats(
         &self,
         key: &[u8],
@@ -23,7 +23,7 @@ impl SstFileIo {
         Ok((visible_state, read_stats))
     }
 
-    pub(crate) fn get_raw_state_at_with_stats(
+    pub fn get_raw_state_at_with_stats(
         &self,
         key: &[u8],
         snapshot_seq: u64,
@@ -82,7 +82,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         )?))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn scan_range_raw_state(
         &self,
         start: Option<&[u8]>,
@@ -113,7 +113,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         Ok(result)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn get_state(&self, key: &[u8]) -> MidgeResult<cntryl_midge_core::types::KeyState> {
         if self.key_outside_persisted_range(key) {
             return Ok(cntryl_midge_core::types::KeyState::Absent);
@@ -144,7 +144,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn get_state_at_with_time(
         &self,
         key: &[u8],
@@ -155,7 +155,7 @@ impl crate::sst::SstStateReader for SstFileIo {
             .map(|(state, _stats)| state)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn get_state_at(
         &self,
         key: &[u8],
@@ -165,7 +165,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         self.get_state_at_with_time(key, snapshot_seq, now_millis)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn scan_range_state_with_time(
         &self,
         start: Option<&[u8]>,
@@ -212,7 +212,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         Ok(result)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn scan_range_state(
         &self,
         start: Option<&[u8]>,

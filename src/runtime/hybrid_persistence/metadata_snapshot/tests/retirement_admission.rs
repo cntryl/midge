@@ -3,11 +3,11 @@ use super::super::{
     CloudMetadataMirrorContext, SharedMetadataSnapshot,
 };
 use super::Fixture;
+use crate::runtime::hybrid_persistence::metadata_cuts::tests::HeldReadbackBackend;
 use cntryl_midge_core::common::resource_budget::ResourceBudget;
 use cntryl_midge_core::common::{MidgeError, OperationDeadline};
 use cntryl_midge_durability::lease::{CloudMetadataGeneration, LeaderStore, SharedGenerationId};
 use cntryl_midge_durability::metadata::{files, Manifest};
-use crate::runtime::hybrid_persistence::metadata_cuts::tests::HeldReadbackBackend;
 use cntryl_midge_storage::cloud::{CloudStorage, MockCloudBackend};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -91,11 +91,18 @@ fn should_refuse_dense_selected_slots_before_decoding_retirement_authority() {
         let fixture = Fixture::new();
         let mut raw = serde_json::to_value(Manifest::default()).unwrap();
         raw["files"] = serde_json::json!(vec![serde_json::json!(["", 0, 0]); 8192]);
-        let bytes = cntryl_midge_durability::metadata::codec::encode(cntryl_midge_durability::metadata::codec::MANIFEST, &raw).unwrap();
-        let decoded: Manifest =
-            cntryl_midge_durability::metadata::codec::decode(cntryl_midge_durability::metadata::codec::MANIFEST, &bytes).unwrap();
-        let actual_slots =
-            decoded.files.capacity() * std::mem::size_of::<cntryl_midge_durability::metadata::FileMeta>();
+        let bytes = cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &raw,
+        )
+        .unwrap();
+        let decoded: Manifest = cntryl_midge_durability::metadata::codec::decode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &bytes,
+        )
+        .unwrap();
+        let actual_slots = decoded.files.capacity()
+            * std::mem::size_of::<cntryl_midge_durability::metadata::FileMeta>();
         drop(decoded);
         let generation = publish_raw_snapshot(&fixture, &bytes);
         // The compatibility backend separately owns a 64 KiB completion
@@ -189,11 +196,19 @@ fn should_retain_typed_charge_for_the_full_retirement_manifest_lifetime() {
         raw["files"] = serde_json::Value::Array(
             (1..=64)
                 .map(|sequence| {
-                    serde_json::json!([cntryl_midge_core::cloud_layout::file_name(0, 0, sequence), 0, 3,])
+                    serde_json::json!([
+                        cntryl_midge_core::cloud_layout::file_name(0, 0, sequence),
+                        0,
+                        3,
+                    ])
                 })
                 .collect(),
         );
-        let bytes = cntryl_midge_durability::metadata::codec::encode(cntryl_midge_durability::metadata::codec::MANIFEST, &raw).unwrap();
+        let bytes = cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &raw,
+        )
+        .unwrap();
         let generation = publish_raw_snapshot(&fixture, &bytes);
         let initial = initial_charge(&generation);
         let root = ResourceBudget::new(512 * 1024);

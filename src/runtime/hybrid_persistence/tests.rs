@@ -63,9 +63,13 @@ impl CloudPersistence {
                 entry.max_sequence()
             ));
         }
-        validate_remote_wal(self, &entry, &cntryl_midge_core::common::OperationDeadline::unbounded())
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        validate_remote_wal(
+            self,
+            &entry,
+            &cntryl_midge_core::common::OperationDeadline::unbounded(),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     }
 
     pub(crate) fn verify_manifest_cloud_objects(&self, manifest: &Manifest) -> Result<(), String> {
@@ -115,9 +119,12 @@ impl CloudPersistence {
         let expected_crc = crc32c::crc32c(data);
         validate_sst_object_bytes(sst_name, expected_size, None, None, data)
             .map_err(MidgeError::Internal)?;
-        cntryl_midge_core::failpoints::fail_point!("midge::cloud::inject_fail_sst_upload", |_| Err(
-            MidgeError::Internal("failpoint: cloud SST upload failed".to_string())
-        ));
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::cloud::inject_fail_sst_upload",
+            |_| Err(MidgeError::Internal(
+                "failpoint: cloud SST upload failed".to_string()
+            ))
+        );
 
         let key = cntryl_midge_core::cloud_layout::object_key(sst_name);
         self.publish_immutable_object_within(&key, data, deadline)?;
@@ -165,7 +172,9 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
     let segment_id = 1;
     let max_sequence = 11;
     let bytes = valid_wal_bytes(segment_id, max_sequence);
-    let local_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(segment_id));
+    let local_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write stale publisher local WAL");
     let object_key = cntryl_midge_durability::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &object_key, bytes);
@@ -192,8 +201,10 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
     let catalog_proof = storage
         .remote_object_proof(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY)
         .expect("read winning WAL catalog");
-    let catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
-        .expect("decode winning WAL catalog");
+    let catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
+        catalog_proof.bytes(),
+    )
+    .expect("decode winning WAL catalog");
     assert!(catalog.entry(segment_id).is_none());
     assert_cloud_object_exists(&storage, &object_key);
 }
@@ -206,7 +217,9 @@ fn should_converge_catalog_copies_after_publication() {
     let segment_id = 1;
     let max_sequence = 11;
     let bytes = valid_wal_bytes(segment_id, max_sequence);
-    let local_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(segment_id));
+    let local_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write mirrored catalog local WAL");
     let object_key = cntryl_midge_durability::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &object_key, bytes);
@@ -247,10 +260,11 @@ fn should_converge_catalog_copies_after_takeover() {
 fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
     // Arrange
     let mock_cloud = Arc::new(MockCloudBackend::new());
-    let winning_catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::empty(7)
-        .expect("create winning catalog")
-        .encode()
-        .expect("encode winning catalog");
+    let winning_catalog =
+        cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::empty(7)
+            .expect("create winning catalog")
+            .encode()
+            .expect("encode winning catalog");
     let racing_cloud = Arc::new(WinningInitialCatalogCasBackend {
         inner: Arc::clone(&mock_cloud),
         winning_catalog: winning_catalog.clone(),
@@ -281,7 +295,9 @@ fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
     );
     assert!(
         storage
-            .remote_object_proof_optional(cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+            .remote_object_proof_optional(
+                cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY
+            )
             .expect("check losing mirror")
             .is_none(),
         "a draft that lost primary authority must never be published to the mirror"
@@ -314,12 +330,15 @@ fn should_refuse_publication_whose_first_segment_does_not_link_the_catalog_head(
         last_seq: 1,
         digest: [0x5a; 16],
     };
-    let (second, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(2, 1, stranger)
-        .record(&put(2))
-        .seal();
+    let (second, _) =
+        cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(2, 1, stranger)
+            .record(&put(2))
+            .seal();
     let mut locations = Vec::new();
     for (segment_id, bytes) in [(1, first), (2, second)] {
-        let local_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(segment_id));
+        let local_path = tmp
+            .path()
+            .join(cntryl_midge_durability::wal::segment_file_name(segment_id));
         std::fs::write(&local_path, &bytes).expect("write unchained publisher local WAL");
         write_cloud_object(
             &storage,
@@ -372,7 +391,9 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
     let segment_id = 1;
     let max_sequence = 11;
     let bytes = valid_wal_bytes(segment_id, max_sequence);
-    let local_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(segment_id));
+    let local_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write publisher local WAL");
     let object_key = cntryl_midge_durability::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &object_key, bytes);
@@ -406,12 +427,17 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
         .expect_err("stale publisher must lose catalog authority");
 
     // Assert
-    assert!(matches!(error, cntryl_midge_core::common::MidgeError::Fenced(_)));
+    assert!(matches!(
+        error,
+        cntryl_midge_core::common::MidgeError::Fenced(_)
+    ));
     let catalog_proof = storage
         .remote_object_proof(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY)
         .expect("read takeover catalog");
-    let catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
-        .expect("decode takeover catalog");
+    let catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
+        catalog_proof.bytes(),
+    )
+    .expect("decode takeover catalog");
     assert_eq!(catalog.fencing_epoch(), 3);
     assert!(catalog.entry(segment_id).is_none());
     assert_cloud_object_exists(&storage, &object_key);
@@ -428,7 +454,9 @@ fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
     let holding_bytes = valid_wal_bytes(holding_segment_id, holding_max_sequence);
     let holding_local_path = tmp
         .path()
-        .join(cntryl_midge_durability::wal::segment_file_name(holding_segment_id));
+        .join(cntryl_midge_durability::wal::segment_file_name(
+            holding_segment_id,
+        ));
     std::fs::write(&holding_local_path, &holding_bytes).expect("write lock-holding local WAL");
     write_cloud_object(
         &storage,
@@ -441,7 +469,9 @@ fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
     let waiting_bytes = valid_wal_bytes(waiting_segment_id, waiting_max_sequence);
     let waiting_local_path = tmp
         .path()
-        .join(cntryl_midge_durability::wal::segment_file_name(waiting_segment_id));
+        .join(cntryl_midge_durability::wal::segment_file_name(
+            waiting_segment_id,
+        ));
     std::fs::write(&waiting_local_path, &waiting_bytes).expect("write lock-waiting local WAL");
     write_cloud_object(
         &storage,
@@ -499,8 +529,10 @@ fn should_reject_stale_catalog_compare_exchange_after_takeover() {
         .remote_object_proof(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY)
         .expect("read pre-takeover WAL catalog");
     let mut takeover_catalog =
-        cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(stale_proof.bytes())
-            .expect("decode pre-takeover WAL catalog");
+        cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
+            stale_proof.bytes(),
+        )
+        .expect("decode pre-takeover WAL catalog");
     takeover_catalog
         .fence_to(3)
         .expect("advance winning takeover epoch");
@@ -512,8 +544,10 @@ fn should_reject_stale_catalog_compare_exchange_after_takeover() {
         )
         .expect("publish winning takeover catalog");
     let mut losing_catalog =
-        cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(stale_proof.bytes())
-            .expect("decode stale WAL catalog");
+        cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
+            stale_proof.bytes(),
+        )
+        .expect("decode stale WAL catalog");
     losing_catalog
         .fence_to(4)
         .expect("prepare losing catalog mutation");
@@ -526,13 +560,18 @@ fn should_reject_stale_catalog_compare_exchange_after_takeover() {
     );
 
     // Assert
-    assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Busy(_))));
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Busy(_))
+    ));
     let winning_proof = storage
         .remote_object_proof(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY)
         .expect("read winning WAL catalog");
     let winning_catalog =
-        cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(winning_proof.bytes())
-            .expect("decode winning WAL catalog");
+        cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
+            winning_proof.bytes(),
+        )
+        .expect("decode winning WAL catalog");
     assert_eq!(winning_catalog.fencing_epoch(), 3);
 }
 
@@ -616,7 +655,8 @@ impl cntryl_midge_storage::cloud::CloudWriteCapability for WinningInitialCatalog
         headers: Vec<(String, String)>,
         callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
-        let is_initial_catalog_compare_exchange = key == cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY
+        let is_initial_catalog_compare_exchange = key
+            == cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY
             && headers
                 .iter()
                 .any(|(name, value)| name.eq_ignore_ascii_case("if-none-match") && value == "*");
@@ -682,7 +722,8 @@ impl cntryl_midge_storage::cloud::CloudWriteCapability for PausingCatalogCasBack
         headers: Vec<(String, String)>,
         callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
-        let is_catalog_compare_exchange = key == cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY
+        let is_catalog_compare_exchange = key
+            == cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY
             && headers
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("if-match"));
@@ -815,7 +856,9 @@ fn should_preserve_committed_publication_when_takeover_occurs_during_mirror_comp
     let segment_id = 1;
     let max_sequence = 11;
     let bytes = valid_wal_bytes(segment_id, max_sequence);
-    let local_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(segment_id));
+    let local_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write publication WAL");
     let object_key = cntryl_midge_durability::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &object_key, bytes);
@@ -902,7 +945,10 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
     // Act
     storage
         .enqueue_wal_segment(
-            &cntryl_midge_core::io::FsLocation::new(root, cntryl_midge_durability::wal::segment_key(17)),
+            &cntryl_midge_core::io::FsLocation::new(
+                root,
+                cntryl_midge_durability::wal::segment_key(17),
+            ),
             17,
             17,
         )
@@ -950,7 +996,10 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
 }
 
 fn valid_sst_bytes(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
-    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 4096);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(cntryl_midge_core::io::MockFs::new()),
+        4096,
+    );
     let mut writer = factory.create().expect("create SST writer");
     writer
         .add_with_meta(key, Some(value), seq, EntryType::Put, None)
@@ -972,9 +1021,11 @@ fn valid_wal_bytes(segment_id: u64, seq: u64) -> Vec<u8> {
 
 /// `record` as one bare WAL frame.
 fn frame_wal(record: &cntryl_midge_durability::wal::WalRecord) -> Vec<u8> {
-    let payload = cntryl_midge_durability::wal::encoding::encode(record).expect("encode WAL record");
+    let payload =
+        cntryl_midge_durability::wal::encoding::encode(record).expect("encode WAL record");
     let mut bytes = Vec::new();
-    cntryl_midge_durability::wal::frame::append_frame(&mut bytes, &payload).expect("append WAL frame");
+    cntryl_midge_durability::wal::frame::append_frame(&mut bytes, &payload)
+        .expect("append WAL frame");
     bytes
 }
 
@@ -1002,32 +1053,38 @@ fn write_authoritative_cloud_wal(
     catalog_max_sequence: u64,
     bytes: Vec<u8>,
 ) -> String {
-    let (epoch, body) = match cntryl_midge_durability::wal::format::segment::SegmentHeader::decode(&bytes) {
-        Ok(header) => {
-            let end = cntryl_midge_durability::wal::format::segment::sealed_footer(&bytes)
-                .expect("scan a test WAL segment")
-                .map_or(bytes.len(), |footer| {
-                    usize::try_from(footer.data_len).expect("footer offset")
-                });
-            (
-                header.epoch,
-                bytes[cntryl_midge_durability::wal::format::HEADER_LEN..end].to_vec(),
-            )
-        }
-        Err(_) => (1, bytes),
-    };
+    let (epoch, body) =
+        match cntryl_midge_durability::wal::format::segment::SegmentHeader::decode(&bytes) {
+            Ok(header) => {
+                let end = cntryl_midge_durability::wal::format::segment::sealed_footer(&bytes)
+                    .expect("scan a test WAL segment")
+                    .map_or(bytes.len(), |footer| {
+                        usize::try_from(footer.data_len).expect("footer offset")
+                    });
+                (
+                    header.epoch,
+                    bytes[cntryl_midge_durability::wal::format::HEADER_LEN..end].to_vec(),
+                )
+            }
+            Err(_) => (1, bytes),
+        };
     let catalog_proof = storage
         .remote_object_proof(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY)
         .expect("read test WAL catalog");
-    let mut catalog =
-        cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
-            .expect("decode test WAL catalog");
-    let (bytes, _) =
-        cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(segment_id, epoch, catalog.head())
-            .bytes(&body)
-            .seal();
-    let publication = cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
-        .expect("a sealed test WAL segment");
+    let mut catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
+        catalog_proof.bytes(),
+    )
+    .expect("decode test WAL catalog");
+    let (bytes, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
+        segment_id,
+        epoch,
+        catalog.head(),
+    )
+    .bytes(&body)
+    .seal();
+    let publication =
+        cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+            .expect("a sealed test WAL segment");
     // The catalog names what the object holds: a caller expecting
     // `catalog_max_sequence` sees any difference when it verifies.
     let _ = catalog_max_sequence;
@@ -1113,7 +1170,10 @@ impl StorageBackend for PanickingWriteBackend {
             request,
             callback,
             |key, precondition, callback| {
-                let result = if matches!(precondition, cntryl_midge_storage::StoragePrecondition::None) {
+                let result = if matches!(
+                    precondition,
+                    cntryl_midge_storage::StoragePrecondition::None
+                ) {
                     StorageOutcome::Ok(())
                 } else {
                     StorageOutcome::Err(cntryl_midge_storage::StorageError::precondition_failed(
@@ -1197,7 +1257,10 @@ impl StorageBackend for AlwaysFailingWriteBackend {
             request,
             callback,
             |key, precondition, callback| {
-                let result = if matches!(precondition, cntryl_midge_storage::StoragePrecondition::None) {
+                let result = if matches!(
+                    precondition,
+                    cntryl_midge_storage::StoragePrecondition::None
+                ) {
                     StorageOutcome::Ok(())
                 } else {
                     StorageOutcome::Err(cntryl_midge_storage::StorageError::precondition_failed(
@@ -1390,18 +1453,22 @@ impl StorageBackend for RacingReadDeleteBackend {
         request: cntryl_midge_storage::StorageRequest,
         callback: cntryl_midge_storage::MetadataReadCallback,
     ) {
-        cntryl_midge_storage::dispatch_metadata_read_request(request, callback, |_, _, callback| {
-            let snapshot = self.object.lock().clone();
-            self.read_started.wait();
-            self.release_read.wait();
-            let result = snapshot
-                .map(|bytes| {
-                    let metadata = Self::metadata(&bytes);
-                    (bytes, metadata)
-                })
-                .ok_or_else(|| cntryl_midge_storage::StorageError::not_found("object"));
-            let _ = callback.send(result);
-        });
+        cntryl_midge_storage::dispatch_metadata_read_request(
+            request,
+            callback,
+            |_, _, callback| {
+                let snapshot = self.object.lock().clone();
+                self.read_started.wait();
+                self.release_read.wait();
+                let result = snapshot
+                    .map(|bytes| {
+                        let metadata = Self::metadata(&bytes);
+                        (bytes, metadata)
+                    })
+                    .ok_or_else(|| cntryl_midge_storage::StorageError::not_found("object"));
+                let _ = callback.send(result);
+            },
+        );
     }
 
     fn submit_head_request(
@@ -1465,7 +1532,10 @@ impl StorageBackend for RacingReadDeleteBackend {
             data,
             callback,
             |key, precondition, data, callback| {
-                if !matches!(precondition, cntryl_midge_storage::StoragePrecondition::None) {
+                if !matches!(
+                    precondition,
+                    cntryl_midge_storage::StoragePrecondition::None
+                ) {
                     let _ = callback.send(StorageEvent::WriteComplete {
                         key: key.to_string(),
                         result: StorageOutcome::Err(
@@ -1668,7 +1738,9 @@ fn manifest_for_ssts(files: &[(&str, u64)]) -> cntryl_midge_durability::metadata
     manifest_for_ssts_with_crc(&files_with_crc)
 }
 
-fn manifest_for_ssts_with_crc(files: &[(&str, u64, Option<u32>)]) -> cntryl_midge_durability::metadata::Manifest {
+fn manifest_for_ssts_with_crc(
+    files: &[(&str, u64, Option<u32>)],
+) -> cntryl_midge_durability::metadata::Manifest {
     let mut manifest = cntryl_midge_durability::metadata::Manifest::default();
     manifest.files = files
         .iter()
@@ -2147,7 +2219,9 @@ fn should_not_overwrite_existing_remote_wal_during_upload() {
     let existing_bytes = valid_wal_bytes(segment_id, upload_max_sequence + 100);
     write_cloud_object(&storage, &key, existing_bytes.clone());
 
-    let wal_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(segment_id));
+    let wal_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id));
     std::fs::write(&wal_path, valid_wal_bytes(segment_id, upload_max_sequence))
         .expect("write local WAL");
     storage
@@ -2210,7 +2284,9 @@ fn should_acknowledge_wal_upload_when_remote_object_holds_the_same_bytes() {
     let bytes = valid_wal_bytes(segment_id, max_sequence);
     let key = cntryl_midge_durability::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &key, bytes.clone());
-    let wal_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(segment_id));
+    let wal_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id));
     std::fs::write(&wal_path, &bytes).expect("write local WAL");
     storage
         .enqueue_wal_segment(
@@ -2284,7 +2360,9 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
     let tmp = tempfile::tempdir().expect("create WAL dir");
     let segment_id = 9;
     let max_sequence = 13;
-    let wal_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(segment_id));
+    let wal_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id));
     std::fs::write(&wal_path, valid_wal_bytes(segment_id, max_sequence)).expect("write local WAL");
 
     mock_cloud.clear_history();
@@ -2488,7 +2566,9 @@ fn should_end_wal_upload_without_attempting_it_when_writer_is_fenced() {
     let storage = CloudPersistence::new(hybrid);
     let segment_id = 13;
     let max_sequence = 23;
-    let wal_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(segment_id));
+    let wal_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id));
     std::fs::write(&wal_path, valid_wal_bytes(segment_id, max_sequence)).expect("write local WAL");
     storage
         .enqueue_wal_segment(
@@ -2518,8 +2598,12 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create bounded upload test dir");
     let cloud = Arc::new(NeverCompletesBackend::default());
-    let first_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(1));
-    let second_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(2));
+    let first_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(1));
+    let second_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(2));
     let wal_bytes = valid_wal_bytes(1, 1);
     std::fs::write(&first_path, &wal_bytes).expect("write first WAL");
     std::fs::write(&second_path, valid_wal_bytes(2, 1)).expect("write second WAL");
@@ -2538,22 +2622,37 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
         ),
     ));
     storage
-        .enqueue_wal_segment(&cntryl_midge_core::io::FsLocation::host_file(&first_path), 1, 1)
+        .enqueue_wal_segment(
+            &cntryl_midge_core::io::FsLocation::host_file(&first_path),
+            1,
+            1,
+        )
         .expect("first upload must fit");
     assert!(matches!(
-        storage.ensure_wal_write_admission(cntryl_midge_storage::hybrid::backend::HeldUploads::default()),
+        storage.ensure_wal_write_admission(
+            cntryl_midge_storage::hybrid::backend::HeldUploads::default()
+        ),
         Err(cntryl_midge_core::common::MidgeError::WriteStall(_))
     ));
 
     // Act
     let error = storage
-        .enqueue_wal_segment(&cntryl_midge_core::io::FsLocation::host_file(&second_path), 2, 1)
+        .enqueue_wal_segment(
+            &cntryl_midge_core::io::FsLocation::host_file(&second_path),
+            2,
+            1,
+        )
         .expect_err("second upload must be rejected at capacity");
 
     // Assert
-    assert!(matches!(error, cntryl_midge_core::common::MidgeError::WriteStall(_)));
     assert!(matches!(
-        storage.ensure_wal_write_admission(cntryl_midge_storage::hybrid::backend::HeldUploads::default()),
+        error,
+        cntryl_midge_core::common::MidgeError::WriteStall(_)
+    ));
+    assert!(matches!(
+        storage.ensure_wal_write_admission(
+            cntryl_midge_storage::hybrid::backend::HeldUploads::default()
+        ),
         Err(cntryl_midge_core::common::MidgeError::WriteStall(_))
     ));
     assert_eq!(storage.pending_upload_count(), 1);
@@ -2581,15 +2680,27 @@ fn should_restore_wal_admission_after_upload_capacity_drains() {
             limits,
         ),
     ));
-    let first_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(21));
-    let second_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(22));
+    let first_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(21));
+    let second_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(22));
     std::fs::write(&first_path, valid_wal_bytes(21, 21)).expect("write first WAL");
     std::fs::write(&second_path, valid_wal_bytes(22, 22)).expect("write second WAL");
     storage
-        .enqueue_wal_segment(&cntryl_midge_core::io::FsLocation::host_file(&first_path), 21, 21)
+        .enqueue_wal_segment(
+            &cntryl_midge_core::io::FsLocation::host_file(&first_path),
+            21,
+            21,
+        )
         .expect("enqueue first upload");
     let _ = storage
-        .enqueue_wal_segment(&cntryl_midge_core::io::FsLocation::host_file(&second_path), 22, 22)
+        .enqueue_wal_segment(
+            &cntryl_midge_core::io::FsLocation::host_file(&second_path),
+            22,
+            22,
+        )
         .expect_err("capacity must reject second upload");
     assert!(storage
         .ensure_wal_write_admission(cntryl_midge_storage::hybrid::backend::HeldUploads::default())
@@ -2600,7 +2711,9 @@ fn should_restore_wal_admission_after_upload_capacity_drains() {
     let deadline = Instant::now() + Duration::from_secs(1);
     while Instant::now() < deadline
         && storage
-            .ensure_wal_write_admission(cntryl_midge_storage::hybrid::backend::HeldUploads::default())
+            .ensure_wal_write_admission(
+                cntryl_midge_storage::hybrid::backend::HeldUploads::default(),
+            )
             .is_err()
     {
         storage.process_uploads();
@@ -2632,14 +2745,22 @@ fn should_keep_storage_reservation_for_retry_when_upload_callbacks_are_lost() {
             limits,
         ),
     ));
-    let wal_path = tmp.path().join(cntryl_midge_durability::wal::segment_file_name(3));
+    let wal_path = tmp
+        .path()
+        .join(cntryl_midge_durability::wal::segment_file_name(3));
     std::fs::write(&wal_path, valid_wal_bytes(3, 3)).expect("write WAL");
     storage
-        .enqueue_wal_segment(&cntryl_midge_core::io::FsLocation::host_file(&wal_path), 3, 3)
+        .enqueue_wal_segment(
+            &cntryl_midge_core::io::FsLocation::host_file(&wal_path),
+            3,
+            3,
+        )
         .expect("enqueue WAL upload");
     assert!(
         storage
-            .ensure_wal_write_admission(cntryl_midge_storage::hybrid::backend::HeldUploads::default())
+            .ensure_wal_write_admission(
+                cntryl_midge_storage::hybrid::backend::HeldUploads::default()
+            )
             .is_err(),
         "the only queue reservation must close write admission while upload is stuck"
     );
@@ -2664,7 +2785,9 @@ fn should_keep_storage_reservation_for_retry_when_upload_callbacks_are_lost() {
     assert_eq!(storage.pending_upload_count(), 1);
     assert!(
         storage
-            .ensure_wal_write_admission(cntryl_midge_storage::hybrid::backend::HeldUploads::default())
+            .ensure_wal_write_admission(
+                cntryl_midge_storage::hybrid::backend::HeldUploads::default()
+            )
             .is_err(),
         "the retained upload keeps its queue reservation"
     );
@@ -2742,7 +2865,8 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
             limits,
         ),
     ));
-    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_millis(500));
+    let deadline =
+        cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_millis(500));
 
     // Act
     let started = Instant::now();
@@ -2755,7 +2879,10 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
 
     // Assert
     assert!(
-        matches!(result, Err(cntryl_midge_core::common::MidgeError::Timeout(_))),
+        matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::Timeout(_))
+        ),
         "deadline expiry must remain typed as Timeout: {result:?}"
     );
     assert!(
@@ -2795,12 +2922,16 @@ impl SharedRetirementFixture {
         use cntryl_midge_durability::lease::LeaderStore;
         let directory = tempfile::tempdir().unwrap();
         let fs = cntryl_midge_core::io::real::test_root(directory.path());
-        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
-        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&fs, manifest).unwrap();
-        let store = Arc::new(cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
-            Arc::clone(&fs),
-            cntryl_midge_durability::lease::LeaseClock::default(),
-        ));
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())
+            .unwrap();
+        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&fs, manifest)
+            .unwrap();
+        let store = Arc::new(
+            cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
+                Arc::clone(&fs),
+                cntryl_midge_durability::lease::LeaseClock::default(),
+            ),
+        );
         store
             .acquire_leadership_with_minimum_epoch("writer", 1)
             .unwrap();
@@ -2814,14 +2945,17 @@ impl SharedRetirementFixture {
     }
 
     pub(crate) fn publish(&self, manifest: &Manifest) {
-        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&self.fs, manifest).unwrap();
+        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&self.fs, manifest)
+            .unwrap();
         mirror_control_metadata_within(
             CloudMetadataMirrorContext {
                 cloud: &self.cloud,
                 fs: self.fs.as_ref(),
                 publication_lock: &self.lock,
                 lock_wait_budget: Duration::from_secs(5),
-                deadline: &cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+                deadline: &cntryl_midge_core::common::OperationDeadline::from_budget(
+                    Duration::from_secs(5),
+                ),
                 authority: CloudMetadataMirrorAuthority {
                     store: self.store.as_ref(),
                     holder_id: "writer",
@@ -2842,7 +2976,9 @@ impl SharedRetirementFixture {
             2,
             self.lock.clone(),
         )
-        .committed_retirement_authority_within(&cntryl_midge_core::common::OperationDeadline::unbounded())
+        .committed_retirement_authority_within(
+            &cntryl_midge_core::common::OperationDeadline::unbounded(),
+        )
         .unwrap()
     }
 }
@@ -2869,7 +3005,8 @@ fn should_retain_remote_wal_until_the_family_frontier_is_committed_to_shared_met
     let fixture = SharedRetirementFixture::new(&manifest);
     fixture.publish(&manifest);
     fixture_manifest_frontier(&mut manifest, 0, 7);
-    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&fixture.fs, &manifest).unwrap();
+    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&fixture.fs, &manifest)
+        .unwrap();
     let old_authority = fixture.authority();
     let deadline = cntryl_midge_core::common::OperationDeadline::unbounded();
 
@@ -2957,11 +3094,13 @@ fn should_retain_a_newer_flushed_family_until_the_oldest_family_is_dropped() {
 
     // A durable family drop removes the oldest prefix's remaining obligation.
     manifest
-        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::DropColumnFamilyAt {
-            id: family,
-            drop_sequence: 8,
-            dropped_sst_names: Vec::new(),
-        })
+        .apply_edit(
+            &cntryl_midge_durability::metadata::ManifestEdit::DropColumnFamilyAt {
+                id: family,
+                drop_sequence: 8,
+                dropped_sst_names: Vec::new(),
+            },
+        )
         .unwrap();
     fixture.publish(&manifest);
     storage

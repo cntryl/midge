@@ -36,17 +36,19 @@ impl MetadataPublicationLock {
     }
     #[cfg(test)]
     pub(crate) fn capture_contention(&self, error: &cntryl_midge_core::common::MidgeError) -> bool {
-        cntryl_midge_core::common::resource_budget::ResourceContention::from_error(error).is_some_and(
-            |contention| {
+        cntryl_midge_core::common::resource_budget::ResourceContention::from_error(error)
+            .is_some_and(|contention| {
                 self.capture_memory
                     .get()
                     .is_some_and(|memory| contention.is_blocked_by(memory))
-            },
-        )
+            })
     }
-    pub(crate) fn capture_admission_retryable(&self, error: &cntryl_midge_core::common::MidgeError) -> bool {
-        cntryl_midge_core::common::resource_budget::ResourceContention::from_error(error).is_some_and(
-            |contention| {
+    pub(crate) fn capture_admission_retryable(
+        &self,
+        error: &cntryl_midge_core::common::MidgeError,
+    ) -> bool {
+        cntryl_midge_core::common::resource_budget::ResourceContention::from_error(error)
+            .is_some_and(|contention| {
                 self.capture_memory
                     .get()
                     .is_some_and(|memory| contention.is_for_pool(memory))
@@ -54,8 +56,7 @@ impl MetadataPublicationLock {
                         .capture_slots
                         .get()
                         .is_some_and(|slots| contention.is_for_pool(slots))
-            },
-        )
+            })
     }
     pub(crate) fn lock_for(
         &self,

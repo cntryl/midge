@@ -192,7 +192,7 @@ pub struct SkipList {
     seed: u64,
     retained_bytes: AtomicUsize,
     /// Nodes visited by range scans, so tests can pin a scan's cost (#920).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     nodes_visited: AtomicUsize,
 }
 
@@ -220,17 +220,17 @@ impl SkipList {
             top_level: AtomicUsize::new(1),
             seed,
             retained_bytes: AtomicUsize::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "internal-testing"))]
             nodes_visited: AtomicUsize::new(0),
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn nodes_visited(&self) -> usize {
         self.nodes_visited.load(AO::Relaxed)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn note_node_visited(&self) {
         self.nodes_visited.fetch_add(1, AO::Relaxed);
     }

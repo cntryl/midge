@@ -21,7 +21,10 @@ impl<'a> BlockingCloudIo<'a> {
         }
     }
 
-    pub(crate) fn within(cloud: &'a CloudStorage, scope: &cntryl_midge_core::common::DeadlineScope) -> Self {
+    pub(crate) fn within(
+        cloud: &'a CloudStorage,
+        scope: &cntryl_midge_core::common::DeadlineScope,
+    ) -> Self {
         Self {
             cloud,
             deadline: scope.deadline(),
@@ -65,6 +68,10 @@ impl<'a> BlockingCloudIo<'a> {
         &self,
         key: &str,
     ) -> MidgeResult<Option<cntryl_midge_storage::cloud::CloudObjectProof>> {
-        cntryl_midge_storage::cloud::blocking_cloud_object_proof_within(self.cloud, key, &self.deadline)
+        cntryl_midge_storage::cloud::blocking_cloud_object_proof_within(
+            self.cloud,
+            key,
+            &self.deadline,
+        )
     }
 }

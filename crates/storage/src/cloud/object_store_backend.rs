@@ -26,7 +26,7 @@ fn read_identity_matches(expected: &StorageObjectMetadata, actual: &StorageObjec
 }
 
 impl CloudStorage {
-    pub(crate) fn from_object_store(store: Arc<dyn ObjectStore>, timeout: Duration) -> Self {
+    pub fn from_object_store(store: Arc<dyn ObjectStore>, timeout: Duration) -> Self {
         Self::new_with_timeout(
             Arc::new(ObjectStoreBackend { store, timeout }),
             String::new(),
@@ -300,7 +300,7 @@ impl crate::cloud::CloudReadCapability for ObjectStoreBackend {
         });
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let result = self.get(key, self.timeout).and_then(|(bytes, _)| {
             let start = usize::try_from(start)

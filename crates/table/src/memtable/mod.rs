@@ -4,23 +4,24 @@
 //! bounds.
 
 pub(crate) mod range_tombstone_index;
-pub(crate) mod size_bound;
+#[doc(hidden)]
+pub mod size_bound;
 pub(crate) mod skiplist;
 
 /// Validated memory allocations used by the memtable and transaction writer.
 #[derive(Debug, Clone)]
-pub(crate) struct MemtableConfig {
-    pub(crate) size_limit: usize,
-    pub(crate) flush_threshold: usize,
-    pub(crate) transaction_pool_size: usize,
+pub struct MemtableConfig {
+    pub size_limit: usize,
+    pub flush_threshold: usize,
+    pub transaction_pool_size: usize,
 }
 
 /// Caller overrides are kept separate from derived allocations until build.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct MemtableConfigInput {
-    pub(crate) size_limit: Option<usize>,
-    pub(crate) flush_threshold: Option<usize>,
-    pub(crate) transaction_pool_size: Option<usize>,
+pub struct MemtableConfigInput {
+    pub size_limit: Option<usize>,
+    pub flush_threshold: Option<usize>,
+    pub transaction_pool_size: Option<usize>,
 }
 
 /// Raw skiplist access for this crate's benchmark harnesses only.
@@ -51,7 +52,7 @@ use std::sync::Arc;
 ///
 /// Spelled out rather than reusing the encoded byte, so the two numbering
 /// schemes are never conflated.
-pub(crate) fn entry_type_of(op: OpType) -> EntryType {
+pub fn entry_type_of(op: OpType) -> EntryType {
     match op {
         OpType::Put => EntryType::Put,
         OpType::Delete => EntryType::Delete,
@@ -110,17 +111,17 @@ impl SkipListMemtable {
     }
 
     /// Skiplist nodes visited by range scans over this memtable (#920).
-    #[cfg(test)]
-    pub(crate) fn scan_nodes_visited(&self) -> usize {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn scan_nodes_visited(&self) -> usize {
         self.skiplist.nodes_visited()
     }
 
     #[must_use]
-    pub(crate) fn contains_key_sequence(&self, key: &[u8], sequence: u64) -> bool {
+    pub fn contains_key_sequence(&self, key: &[u8], sequence: u64) -> bool {
         self.skiplist.contains_sequence(key, sequence)
     }
 
-    pub(crate) fn encoded_size_upper_bound(&self) -> usize {
+    pub fn encoded_size_upper_bound(&self) -> usize {
         self.encoded_size_bound
             .load(std::sync::atomic::Ordering::Acquire)
     }
@@ -133,12 +134,12 @@ impl SkipListMemtable {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn is_expired(expiration: Option<u64>) -> bool {
         Self::is_expired_at(expiration, Self::current_time_millis())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn current_time_millis() -> u64 {
         cntryl_midge_core::common::time::unix_time_millis()
     }
@@ -147,7 +148,7 @@ impl SkipListMemtable {
         cntryl_midge_core::common::time::is_expired_at(expiration, now_millis)
     }
 
-    pub(crate) fn visit_frozen_versions(
+    pub fn visit_frozen_versions(
         &self,
         budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
         visit: impl FnMut(&[u8], Option<&[u8]>, u64, Option<u64>, OpType) -> MidgeResult<()>,
@@ -155,7 +156,7 @@ impl SkipListMemtable {
         self.skiplist.visit_versions(budget, visit)
     }
 
-    pub(crate) fn visit_frozen_ranges(
+    pub fn visit_frozen_ranges(
         &self,
         mut visit: impl FnMut(&RangeTombstone) -> MidgeResult<()>,
     ) -> MidgeResult<()> {
@@ -202,7 +203,7 @@ impl SkipListMemtable {
     /// # Errors
     ///
     /// Returns an error when the underlying memtable cannot service the lookup.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn get_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Vec<u8>>> {
         let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
 
@@ -227,7 +228,7 @@ impl SkipListMemtable {
     /// # Errors
     ///
     /// Returns an error when the underlying memtable cannot service the lookup.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn get_key_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState> {
         self.get_key_state_at_with_time(key, snapshot_seq, Self::current_time_millis())
     }
@@ -248,7 +249,7 @@ impl SkipListMemtable {
         ))
     }
 
-    pub(crate) fn get_raw_key_state_at(&self, key: &[u8], snapshot_seq: u64) -> KeyState {
+    pub fn get_raw_key_state_at(&self, key: &[u8], snapshot_seq: u64) -> KeyState {
         self.skiplist
             .get_visible_entry_with_exp(key, snapshot_seq)
             .map_or(KeyState::Absent, |entry| {
@@ -281,7 +282,7 @@ impl SkipListMemtable {
     /// # Errors
     ///
     /// Returns an error when the underlying memtable cannot service the lookup.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn get_bytes(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
 
@@ -352,7 +353,7 @@ impl SkipListMemtable {
             .collect()
     }
 
-    pub(crate) fn range_raw_state_at(
+    pub fn range_raw_state_at(
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
@@ -365,7 +366,7 @@ impl SkipListMemtable {
 
     /// Lazily yield `(key, state)` visible at `snapshot_seq` in `[start, end)`,
     /// forward or reverse; a scan's cost follows the rows it takes (#920).
-    pub(crate) fn range_state_cursor(
+    pub fn range_state_cursor(
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
@@ -584,7 +585,7 @@ impl Default for SkipListMemtable {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 impl SkipListMemtable {
     pub fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
         let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
@@ -604,7 +605,7 @@ impl SkipListMemtable {
 
 /// The highest sequence among `tombstones` visible at `snapshot_seq` that
 /// cover `key`.
-pub(crate) fn max_covering_seq<'a>(
+pub fn max_covering_seq<'a>(
     tombstones: impl IntoIterator<Item = &'a RangeTombstone>,
     key: &[u8],
     snapshot_seq: u64,

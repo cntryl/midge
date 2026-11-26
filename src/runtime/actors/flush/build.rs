@@ -35,7 +35,7 @@ pub(super) fn write(
     factory: &cntryl_midge_table::sst::FsSstFactoryIo,
     task: &mut FlushBuildTask,
     budget: &ResourceBudget,
-) -> MidgeResult<crate::runtime::FileMeta> {
+) -> MidgeResult<cntryl_midge_durability::metadata::intent::FileMeta> {
     if !factory.compaction_scratch_cleanup_verified() {
         return Err(MidgeError::ResourceLimit(
             "prior flush scratch cleanup is unconfirmed; retain disk admission until recovery"
@@ -45,15 +45,19 @@ pub(super) fn write(
     let fs = factory.output_fs();
     let staging_path = cntryl_midge_table::sst::fs::fs_relative_sst_path(&fs, &task.staging_path)?;
     if let Some(parent) = std::path::Path::new(&staging_path.0).parent() {
-        fs.create_dir_all(&cntryl_midge_core::io::FsPath::new(parent.to_string_lossy()))
-            .map_err(FsError::into_midge)?;
+        fs.create_dir_all(&cntryl_midge_core::io::FsPath::new(
+            parent.to_string_lossy(),
+        ))
+        .map_err(FsError::into_midge)?;
     }
     // Streaming scratch and final output can coexist. Admission must precede
     // creation of the writer, which can write scratch on its first full block.
     task.reservation = FlushActor::reserve_flush(
         task.hybrid_storage.as_ref(),
         task.identity.cf_id,
-        cntryl_midge_table::memtable::size_bound::flush_staging_bytes(task.memtable.encoded_size_upper_bound()),
+        cntryl_midge_table::memtable::size_bound::flush_staging_bytes(
+            task.memtable.encoded_size_upper_bound(),
+        ),
     )?;
     let mut writer = factory.create_for_flush(budget.clone())?;
     cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::after_scratch_creation");
@@ -89,8 +93,9 @@ pub(super) fn write(
     };
     let (largest_key, _last_charge) = bounds.last.expect("first key implies last key");
     cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &task.staging_path)?;
-    let (size_bytes, checksum) = cntryl_midge_table::sst::fs::file_identity_with_fs(&fs, &task.staging_path)?;
-    Ok(crate::runtime::FileMeta {
+    let (size_bytes, checksum) =
+        cntryl_midge_table::sst::fs::file_identity_with_fs(&fs, &task.staging_path)?;
+    Ok(cntryl_midge_durability::metadata::intent::FileMeta {
         name: String::new(),
         level: 0,
         size_bytes,

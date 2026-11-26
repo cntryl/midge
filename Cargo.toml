@@ -104,6 +104,7 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
 [dev-dependencies]
 crc32fast = "1.5"
+md5 = { package = "md-5", version = "0.11" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 num_cpus = "1.17"
 proptest = "1.12"

@@ -165,7 +165,7 @@ impl MidgeError {
     /// failure says nothing about the bytes, so dropping them would destroy
     /// acknowledged records.
     #[must_use]
-    pub(crate) fn is_salvageable(&self) -> bool {
+    pub fn is_salvageable(&self) -> bool {
         matches!(self, Self::Corruption(_))
     }
 
@@ -266,7 +266,7 @@ impl MidgeError {
 
 /// Preserve a definite rejection only with proof that this transaction left
 /// no effects. All other commit failures may still become visible on replay.
-pub(crate) fn classify_commit_error(error: MidgeError, unchanged: bool) -> MidgeError {
+pub fn classify_commit_error(error: MidgeError, unchanged: bool) -> MidgeError {
     if unchanged || matches!(error, MidgeError::OutcomeUnknown(_)) {
         error
     } else {

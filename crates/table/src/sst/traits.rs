@@ -1,11 +1,11 @@
 //! SST traits for readers and writers
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 use bytes::Bytes;
 use std::path::Path;
 
 use cntryl_midge_core::common::MidgeResult;
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 use cntryl_midge_core::types::KeyState;
 use cntryl_midge_core::types::{EntryType, RangeTombstone};
 
@@ -27,13 +27,13 @@ pub struct RawSstVersion {
 pub type RawSstVersionCursor =
     Box<dyn Iterator<Item = MidgeResult<RawSstVersion>> + Send + 'static>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 struct MaterializedRawVersionCursor {
     versions: std::vec::IntoIter<RawSstVersion>,
     _reservation: Option<cntryl_midge_core::common::resource_budget::ResourceReservation>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 impl Iterator for MaterializedRawVersionCursor {
     type Item = MidgeResult<RawSstVersion>;
 
@@ -52,7 +52,7 @@ pub trait SstStateReader: Send + Sync {
     ///
     /// Applies wall-clock TTL expiry. Production reads pass their own clock
     /// through test-only `get_state_at_with_time`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState>;
 
     /// Scan a key range returning presence state for each key
@@ -60,7 +60,7 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be scanned or decoded.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn scan_range_state(
         &self,
         start: Option<&[u8]>,
@@ -68,7 +68,7 @@ pub trait SstStateReader: Send + Sync {
     ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
 
     /// Snapshot-aware range lookup with a caller-owned TTL clock.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn scan_range_state_with_time(
         &self,
         start: Option<&[u8]>,
@@ -78,7 +78,7 @@ pub trait SstStateReader: Send + Sync {
 
     /// Scan persisted state without interpreting TTL expiration. Recovery and
     /// compaction use this to preserve raw value-plus-expiration metadata.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn scan_range_raw_state(
         &self,
         start: Option<&[u8]>,
@@ -91,7 +91,7 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the requested range cannot be read or decoded.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn raw_version_cursor(
         self: Box<Self>,
         start: Option<Vec<u8>>,
@@ -119,11 +119,11 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be read or decoded.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState>;
 
     /// Snapshot-aware lookup with a caller-owned TTL clock.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn get_state_at_with_time(
         &self,
         key: &[u8],
@@ -147,8 +147,8 @@ pub trait SstStateReader: Send + Sync {
 
 /// Materializing cursor for explicit test doubles. Production readers must
 /// implement bounded streaming in their own reader implementation.
-#[cfg(test)]
-pub(crate) fn materialized_raw_cursor_for_test<R: SstStateReader + ?Sized>(
+#[cfg(any(test, feature = "internal-testing"))]
+pub fn materialized_raw_cursor_for_test<R: SstStateReader + ?Sized>(
     reader: &R,
     start: Option<&[u8]>,
     end: Option<&[u8]>,
@@ -190,7 +190,8 @@ pub(crate) fn materialized_raw_cursor_for_test<R: SstStateReader + ?Sized>(
     }))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
+#[macro_export]
 macro_rules! test_reader_required_methods {
     () => {
         fn scan_range_state_with_time(
@@ -207,7 +208,7 @@ macro_rules! test_reader_required_methods {
                     .map(|(key, state)| {
                         (
                             key,
-                            crate::sst::traits::test_state_at_time(state, now_millis),
+                            $crate::sst::traits::test_state_at_time(state, now_millis),
                         )
                     })
                     .collect()
@@ -219,8 +220,8 @@ macro_rules! test_reader_required_methods {
             start: Option<Vec<u8>>,
             end: Option<Vec<u8>>,
             budget: Option<cntryl_midge_core::common::resource_budget::ResourceBudget>,
-        ) -> cntryl_midge_core::common::MidgeResult<crate::sst::traits::RawSstVersionCursor> {
-            crate::sst::traits::materialized_raw_cursor_for_test(
+        ) -> cntryl_midge_core::common::MidgeResult<$crate::sst::traits::RawSstVersionCursor> {
+            $crate::sst::traits::materialized_raw_cursor_for_test(
                 self.as_ref(),
                 start.as_deref(),
                 end.as_deref(),
@@ -257,18 +258,18 @@ macro_rules! test_reader_required_methods {
                 if sequence > snapshot_seq {
                     cntryl_midge_core::types::KeyState::Absent
                 } else {
-                    crate::sst::traits::test_state_at_time(state, now_millis)
+                    $crate::sst::traits::test_state_at_time(state, now_millis)
                 }
             })
         }
     };
 }
 
-#[cfg(test)]
-pub(crate) use test_reader_required_methods;
+#[cfg(any(test, feature = "internal-testing"))]
+pub use crate::test_reader_required_methods;
 
-#[cfg(test)]
-pub(crate) fn test_state_at_time(state: KeyState, now_millis: u64) -> KeyState {
+#[cfg(any(test, feature = "internal-testing"))]
+pub fn test_state_at_time(state: KeyState, now_millis: u64) -> KeyState {
     match state {
         KeyState::Value(_, sequence, expiration, _)
             if cntryl_midge_core::common::time::is_expired_at(expiration, now_millis) =>
@@ -322,7 +323,7 @@ pub trait DynSstWriter: Send {
     /// # Errors
     ///
     /// Returns an error when the entry cannot be appended to the SST.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn add_with_meta(
         &mut self,
         key: &[u8],
@@ -417,7 +418,7 @@ pub trait SstFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the writer cannot be created.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>>;
 
     /// Create a writer for a budgeted compaction operation.
@@ -447,7 +448,7 @@ pub trait SstFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be opened or decoded.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn SstReaderExt>>;
 }
 
@@ -527,7 +528,7 @@ mod tests {
             })
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "internal-testing"))]
         fn scan_range_state(
             &self,
             start: Option<&[u8]>,
@@ -540,7 +541,7 @@ mod tests {
                 .collect())
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "internal-testing"))]
         fn scan_range_raw_state(
             &self,
             start: Option<&[u8]>,
@@ -598,7 +599,7 @@ mod tests {
             None
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "internal-testing"))]
         fn add_with_meta(
             &mut self,
             key: &[u8],

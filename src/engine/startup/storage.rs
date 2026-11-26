@@ -3,11 +3,11 @@ use super::{
     CloudStartupRecovery, RuntimeState, RuntimeStorageMaterialization, StartupLease,
     StartupStoragePath,
 };
-use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult};
 use crate::config::Storage;
-use cntryl_midge_durability::RecoveryPolicy;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult};
+use cntryl_midge_durability::RecoveryPolicy;
 use std::sync::Arc;
 
 struct CloudClassStores {
@@ -46,8 +46,10 @@ fn remote_block_cache(
     if share == 0 {
         return None;
     }
-    match cntryl_midge_storage::remote_block_cache::RemoteBlockCache::open(Arc::clone(&path.root), share)
-    {
+    match cntryl_midge_storage::remote_block_cache::RemoteBlockCache::open(
+        Arc::clone(&path.root),
+        share,
+    ) {
         Ok(cache) => Some(Arc::new(cache)),
         Err(error) => {
             // Advisory: a database without the cache works, it just pays
@@ -187,7 +189,10 @@ fn load_cloud_wal_history(
         |scope| cntryl_midge_core::io::scope_fs(Arc::clone(&path.root), scope.clone()),
     );
     cntryl_midge_durability::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
-    let wal = cntryl_midge_core::io::subdirectory(Arc::clone(root), cntryl_midge_durability::wal::WAL_DIR);
+    let wal = cntryl_midge_core::io::subdirectory(
+        Arc::clone(root),
+        cntryl_midge_durability::wal::WAL_DIR,
+    );
     Ok(
         match crate::runtime::wal_history::WalHistory::load_with_fence(
             Arc::clone(&wal),
@@ -550,20 +555,30 @@ impl StartupLease {
                     }
                     // A store that did not answer in time is unavailable for
                     // acquisition, as before the timeout had its own variant.
-                    cntryl_midge_durability::lease::LeaseError::Timeout(message) if scope.is_some() => {
+                    cntryl_midge_durability::lease::LeaseError::Timeout(message)
+                        if scope.is_some() =>
+                    {
                         MidgeError::Timeout(message)
                     }
                     cntryl_midge_durability::lease::LeaseError::IoError(message)
                     | cntryl_midge_durability::lease::LeaseError::Timeout(message) => {
                         MidgeError::LeaseUnavailable(message)
                     }
-                    cntryl_midge_durability::lease::LeaseError::RenewalFailed(message) => MidgeError::Fenced(message),
+                    cntryl_midge_durability::lease::LeaseError::RenewalFailed(message) => {
+                        MidgeError::Fenced(message)
+                    }
                     cntryl_midge_durability::lease::LeaseError::Indeterminate(message) => {
                         MidgeError::LeaseIndeterminate(message)
                     }
-                    cntryl_midge_durability::lease::LeaseError::EpochExhausted => MidgeError::LeaseEpochExhausted,
-                    cntryl_midge_durability::lease::LeaseError::AlreadyAcquired(message) => MidgeError::Busy(message),
-                    cntryl_midge_durability::lease::LeaseError::Internal(message) => MidgeError::Internal(message),
+                    cntryl_midge_durability::lease::LeaseError::EpochExhausted => {
+                        MidgeError::LeaseEpochExhausted
+                    }
+                    cntryl_midge_durability::lease::LeaseError::AlreadyAcquired(message) => {
+                        MidgeError::Busy(message)
+                    }
+                    cntryl_midge_durability::lease::LeaseError::Internal(message) => {
+                        MidgeError::Internal(message)
+                    }
                 });
             }
         };
@@ -581,7 +596,11 @@ impl StartupLease {
             scope.map_or_else(
                 || store.clone(),
                 |scope| {
-                    cntryl_midge_durability::lease::scoped_leader_store(store.clone(), scope.clone(), per_io_timeout)
+                    cntryl_midge_durability::lease::scoped_leader_store(
+                        store.clone(),
+                        scope.clone(),
+                        per_io_timeout,
+                    )
                 },
             )
         });
@@ -610,11 +629,12 @@ impl StartupLease {
         &mut self,
         lease_loss_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> MidgeResult<()> {
-        let mut lease_heartbeat = cntryl_midge_durability::lease::LeaseHeartbeat::new_with_healthy_and_validity(
-            Arc::clone(&self.lease),
-            Arc::clone(&self.lease_healthy),
-            self.lease_validity.as_ref().map(Arc::clone),
-        );
+        let mut lease_heartbeat =
+            cntryl_midge_durability::lease::LeaseHeartbeat::new_with_healthy_and_validity(
+                Arc::clone(&self.lease),
+                Arc::clone(&self.lease_healthy),
+                self.lease_validity.as_ref().map(Arc::clone),
+            );
         if let Some(hook) = lease_loss_hook {
             lease_heartbeat.set_loss_hook(hook);
         }
@@ -697,7 +717,9 @@ impl StartupLease {
         }
     }
 
-    pub(super) fn take_heartbeat(&mut self) -> MidgeResult<cntryl_midge_durability::lease::LeaseHeartbeat> {
+    pub(super) fn take_heartbeat(
+        &mut self,
+    ) -> MidgeResult<cntryl_midge_durability::lease::LeaseHeartbeat> {
         self.lease_heartbeat.take().ok_or_else(|| {
             MidgeError::Internal("startup lease heartbeat was already transferred".to_string())
         })
@@ -755,7 +777,8 @@ impl RuntimeStorageMaterialization {
     fn bootstrap_staging_fs() -> MidgeResult<Arc<dyn cntryl_midge_core::io::Fs>> {
         // In-memory staging keeps failed first opens retryable independently
         // of temporary-directory permissions and local cache authority.
-        let staging_fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
+        let staging_fs: Arc<dyn cntryl_midge_core::io::Fs> =
+            Arc::new(cntryl_midge_core::io::MockFs::new());
         cntryl_midge_core::io::staging::stage_bytes(
             &staging_fs,
             &cntryl_midge_core::io::FsPath::new("FORMAT.tmp"),
@@ -792,12 +815,22 @@ impl RuntimeStorageMaterialization {
         let head = leader_store
             .read_committed_metadata(scope.map_or(timeout, |scope| scope.clamp(timeout)))
             .map_err(|error| {
-                if scope.is_some() && matches!(error, cntryl_midge_durability::lease::LeaseError::Timeout(_)) {
+                if scope.is_some()
+                    && matches!(
+                        error,
+                        cntryl_midge_durability::lease::LeaseError::Timeout(_)
+                    )
+                {
                     return MidgeError::Timeout(format!(
                         "cloud metadata authority bootstrap: {error}"
                     ));
                 }
-                if scope.is_some() && matches!(error, cntryl_midge_durability::lease::LeaseError::Indeterminate(_)) {
+                if scope.is_some()
+                    && matches!(
+                        error,
+                        cntryl_midge_durability::lease::LeaseError::Indeterminate(_)
+                    )
+                {
                     return MidgeError::LeaseIndeterminate(format!(
                         "cloud metadata authority bootstrap: {error}"
                     ));
@@ -845,7 +878,11 @@ impl RuntimeStorageMaterialization {
             ));
         }
         let deadline = scope.map_or_else(
-            || cntryl_midge_core::common::OperationDeadline::from_budget(timeout.saturating_mul(16)),
+            || {
+                cntryl_midge_core::common::OperationDeadline::from_budget(
+                    timeout.saturating_mul(16),
+                )
+            },
             DeadlineScope::deadline,
         );
         crate::runtime::ddl::require_empty_registry_for_metadata_bootstrap(
@@ -1173,7 +1210,8 @@ impl RuntimeStorageMaterialization {
     ) {
         let wal_backend: Arc<dyn cntryl_midge_storage::StorageBackend> = wal_storage.clone();
         let sst_backend: Arc<dyn cntryl_midge_storage::StorageBackend> = sst_storage.clone();
-        let control_backend: Arc<dyn cntryl_midge_storage::StorageBackend> = metadata_storage.clone();
+        let control_backend: Arc<dyn cntryl_midge_storage::StorageBackend> =
+            metadata_storage.clone();
 
         let (tx, rx) = crossbeam::channel::bounded::<cntryl_midge_storage::StorageEvent>(
             cntryl_midge_storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
@@ -1411,14 +1449,16 @@ mod authority_tests {
             Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
             "startup-ddl-expiry".into(),
         ));
-        let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-            cntryl_midge_durability::lease::CloudLeaseConfig {
-                bucket: "startup-ddl-expiry".into(),
-                prefix: "test/".into(),
-            },
-            directory.path().join("lease"),
-            Arc::clone(&cloud),
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "startup-ddl-expiry".into(),
+                    prefix: "test/".into(),
+                },
+                directory.path().join("lease"),
+                Arc::clone(&cloud),
+            ),
+        );
         let validity = lease.lease_validity();
         let lease_object: Arc<dyn cntryl_midge_durability::lease::PrimaryLease> = lease;
         let startup =

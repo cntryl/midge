@@ -4,9 +4,7 @@ use super::{CloudProviderConfig, S3CredentialSource};
 use crate::cloud::CloudBackend;
 use cntryl_midge_core::{MidgeError, MidgeResult};
 
-pub(super) fn try_resolve(
-    provider: &CloudProviderConfig,
-) -> MidgeResult<Option<Arc<dyn CloudBackend>>> {
+pub fn try_resolve(provider: &CloudProviderConfig) -> MidgeResult<Option<Arc<dyn CloudBackend>>> {
     match provider {
         CloudProviderConfig::AwsS3(_)
         | CloudProviderConfig::S3Compatible(_)

@@ -9,12 +9,14 @@ pub(crate) struct FlushManifestPublication<'a> {
     pub(crate) origin: Origin,
     pub(crate) cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub(crate) sequence: u64,
-    pub(crate) file_meta: &'a crate::runtime::FileMeta,
+    pub(crate) file_meta: &'a cntryl_midge_durability::metadata::intent::FileMeta,
     pub(crate) next_sst_seq: u64,
     pub(crate) require_snapshot: bool,
 }
 
-fn flush_record_is_bounded(file_meta: &crate::runtime::FileMeta) -> bool {
+fn flush_record_is_bounded(
+    file_meta: &cntryl_midge_durability::metadata::intent::FileMeta,
+) -> bool {
     // Bound deferred-record encoding before cloning metadata or allocating
     // JSON. JSON escapes consume at most six bytes per name byte; key
     // bounds are hex. The fixed allowance covers numeric fields, both
@@ -88,7 +90,10 @@ fn l0_level_order_violations(
 
 impl RuntimeState {
     #[cfg(test)]
-    pub fn append_intent(&mut self, entry: crate::runtime::IntentLogEntry) -> MidgeResult<()> {
+    pub fn append_intent(
+        &mut self,
+        entry: cntryl_midge_durability::metadata::intent::IntentLogEntry,
+    ) -> MidgeResult<()> {
         let mut proposed = self.intent_log.clone();
         proposed.push(entry);
         self.persist_intent_entries(&proposed)?;
@@ -112,11 +117,12 @@ impl RuntimeState {
                 )
                 .map_err(|error| error.to_string())?;
             }
-            let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
-                &self.fs,
-                cntryl_midge_durability::RecoveryPolicy::Strict,
-            )?;
-            crate::runtime::IntentPersistence::load_with_fs_and_policy(
+            let manifest =
+                cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
+                    &self.fs,
+                    cntryl_midge_durability::RecoveryPolicy::Strict,
+                )?;
+            cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy(
                 &self.fs,
                 cntryl_midge_durability::RecoveryPolicy::Strict,
             )
@@ -169,12 +175,12 @@ impl RuntimeState {
 
     pub(super) fn persist_intent_entries(
         &mut self,
-        intents: &[crate::runtime::IntentLogEntry],
+        intents: &[cntryl_midge_durability::metadata::intent::IntentLogEntry],
     ) -> MidgeResult<()> {
         self.ensure_metadata_current()?;
         if !self.is_memory_mode() {
             let format_10 = self.manifest_store.uses_format_10();
-            if let Err(error) = crate::runtime::IntentPersistence::save_for_selected_format(
+            if let Err(error) = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_for_selected_format(
                 &self.fs, intents, format_10,
             ) {
                 if format_10 {
@@ -197,7 +203,7 @@ impl RuntimeState {
         &mut self,
         cf_id: cntryl_midge_core::types::ColumnFamilyId,
         removed: Vec<String>,
-        added: Vec<crate::runtime::FileMeta>,
+        added: Vec<cntryl_midge_durability::metadata::intent::FileMeta>,
     ) -> MidgeResult<Vec<String>> {
         if added.iter().any(|file_meta| file_meta.cf_id != cf_id) {
             return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
@@ -212,17 +218,18 @@ impl RuntimeState {
                     removed.iter().map(String::as_str),
                 )
         };
-        let same_outputs = |existing_added: &[crate::runtime::FileMeta]| {
-            !existing_added.is_empty()
-                && !added.is_empty()
-                && Self::same_file_name_set(
-                    existing_added.iter().map(|meta| meta.name.as_str()),
-                    added.iter().map(|meta| meta.name.as_str()),
-                )
-        };
+        let same_outputs =
+            |existing_added: &[cntryl_midge_durability::metadata::intent::FileMeta]| {
+                !existing_added.is_empty()
+                    && !added.is_empty()
+                    && Self::same_file_name_set(
+                        existing_added.iter().map(|meta| meta.name.as_str()),
+                        added.iter().map(|meta| meta.name.as_str()),
+                    )
+            };
 
         for entry in &self.intent_log {
-            let crate::runtime::IntentLogEntry::CompactionPublish {
+            let cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
                 phase,
                 cf_id: existing_cf_id,
                 removed: existing_removed,
@@ -248,7 +255,7 @@ impl RuntimeState {
         let mut proposed = self.intent_log.clone();
         let mut superseded_outputs = Vec::new();
         proposed.retain(|entry| {
-            let crate::runtime::IntentLogEntry::CompactionPublish {
+            let cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
                 phase: PublicationPhase::OutputDurable,
                 cf_id: existing_cf_id,
                 removed: existing_removed,
@@ -269,12 +276,14 @@ impl RuntimeState {
             }
             !replace
         });
-        proposed.push(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: PublicationPhase::OutputDurable,
-            cf_id,
-            removed,
-            added,
-        });
+        proposed.push(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id,
+                removed,
+                added,
+            },
+        );
         self.persist_intent_entries(&proposed)?;
         self.intent_log = proposed;
         superseded_outputs.sort();
@@ -289,7 +298,7 @@ impl RuntimeState {
     ) -> MidgeResult<()> {
         let mut proposed = self.intent_log.clone();
         for entry in &mut proposed {
-            if let crate::runtime::IntentLogEntry::FlushPublish {
+            if let cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish {
                 phase: current_phase,
                 file_meta,
                 ..
@@ -309,22 +318,24 @@ impl RuntimeState {
         &mut self,
         cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sequence: u64,
-        file_meta: &crate::runtime::FileMeta,
+        file_meta: &cntryl_midge_durability::metadata::intent::FileMeta,
     ) -> MidgeResult<()> {
         let mut proposed = self.intent_log.clone();
         proposed.retain(|entry| {
             !matches!(
                 entry,
-                crate::runtime::IntentLogEntry::FlushPublish { file_meta: existing, .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish { file_meta: existing, .. }
                     if existing.name == file_meta.name
             )
         });
-        proposed.push(crate::runtime::IntentLogEntry::FlushPublish {
-            phase: PublicationPhase::OutputDurable,
-            cf_id,
-            sequence,
-            file_meta: file_meta.clone(),
-        });
+        proposed.push(
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id,
+                sequence,
+                file_meta: file_meta.clone(),
+            },
+        );
         self.persist_intent_entries(&proposed)?;
         self.intent_log = proposed;
         Ok(())
@@ -335,7 +346,7 @@ impl RuntimeState {
         proposed.retain(|entry| {
             !matches!(
                 entry,
-                crate::runtime::IntentLogEntry::FlushPublish { file_meta, .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish { file_meta, .. }
                     if file_meta.name == sst_name
             )
         });
@@ -349,7 +360,7 @@ impl RuntimeState {
         &mut self,
         cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sequence: u64,
-        file_meta: &crate::runtime::FileMeta,
+        file_meta: &cntryl_midge_durability::metadata::intent::FileMeta,
         next_sst_seq: u64,
         require_snapshot: bool,
     ) -> MidgeResult<()> {
@@ -480,7 +491,9 @@ impl RuntimeState {
                 )));
             }
             None => {
-                cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::before_manifest_persist");
+                cntryl_midge_core::failpoints::fail_point!(
+                    "midge::flush_worker::before_manifest_persist"
+                );
                 let batch = cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
                     cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
                         cf_id,
@@ -506,7 +519,9 @@ impl RuntimeState {
                     }
                 }
                 appended = true;
-                cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
+                cntryl_midge_core::failpoints::fail_point!(
+                    "midge::flush_worker::after_manifest_journal"
+                );
             }
         }
         self.finish_local_flush_intent(&file_meta.name, retained_phase)?;
@@ -546,7 +561,7 @@ impl RuntimeState {
         let mut proposed = self.intent_log.clone();
         let mut matched = 0usize;
         for entry in &mut proposed {
-            if let crate::runtime::IntentLogEntry::CompactionPublish {
+            if let cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
                 phase: current_phase,
                 removed,
                 added,
@@ -585,7 +600,7 @@ impl RuntimeState {
         proposed.retain(|entry| {
             !matches!(
                 entry,
-                crate::runtime::IntentLogEntry::CompactionPublish { removed, added, .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish { removed, added, .. }
                     if Self::same_file_name_set(
                         removed.iter().map(String::as_str),
                         input_ssts.iter().map(String::as_str),
@@ -620,7 +635,7 @@ impl RuntimeState {
         self.intent_log.iter().any(|entry| {
             matches!(
                 entry,
-                crate::runtime::IntentLogEntry::CompactionPublish { removed, added, .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish { removed, added, .. }
                     if Self::same_file_name_set(
                         removed.iter().map(String::as_str),
                         input_ssts.iter().map(String::as_str),
@@ -650,7 +665,7 @@ impl RuntimeState {
 
     pub(super) fn insert_manifest_file_if_missing(
         &mut self,
-        file_meta: &crate::runtime::FileMeta,
+        file_meta: &cntryl_midge_durability::metadata::intent::FileMeta,
     ) -> bool {
         if self.manifest_has_file(&file_meta.name) {
             return false;
@@ -663,7 +678,7 @@ impl RuntimeState {
     pub(super) fn apply_compaction_to_manifest(
         &mut self,
         removed: &[String],
-        added: &[crate::runtime::FileMeta],
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
     ) -> bool {
         let mut changed = false;
         let mut compacted_l0 = Vec::new();
@@ -704,7 +719,7 @@ impl RuntimeState {
 
     pub(super) fn append_manifest_add_sst(
         &self,
-        file_meta: &crate::runtime::FileMeta,
+        file_meta: &cntryl_midge_durability::metadata::intent::FileMeta,
     ) -> MidgeResult<()> {
         if self.is_memory_mode() {
             return Ok(());
@@ -721,7 +736,7 @@ impl RuntimeState {
     pub(super) fn append_manifest_compaction_batch(
         &self,
         removed: &[String],
-        added: &[crate::runtime::FileMeta],
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
     ) -> MidgeResult<()> {
         if self.is_memory_mode() {
             return Ok(());
@@ -729,10 +744,14 @@ impl RuntimeState {
 
         let mut edits = Vec::with_capacity(removed.len() + added.len());
         for name in removed {
-            edits.push(cntryl_midge_durability::metadata::ManifestEdit::RemoveSst { name: name.clone() });
+            edits.push(cntryl_midge_durability::metadata::ManifestEdit::RemoveSst {
+                name: name.clone(),
+            });
         }
         for file_meta in added {
-            edits.push(cntryl_midge_durability::metadata::ManifestEdit::AddSst(file_meta.into()));
+            edits.push(cntryl_midge_durability::metadata::ManifestEdit::AddSst(
+                file_meta.into(),
+            ));
         }
 
         if edits.is_empty() {
@@ -762,7 +781,12 @@ impl RuntimeState {
 mod l0_level_order_tests {
     use super::l0_level_order_violations;
 
-    fn l0(name: &str, first: &[u8], last: &[u8], seqs: (u64, u64)) -> cntryl_midge_durability::metadata::FileMeta {
+    fn l0(
+        name: &str,
+        first: &[u8],
+        last: &[u8],
+        seqs: (u64, u64),
+    ) -> cntryl_midge_durability::metadata::FileMeta {
         cntryl_midge_durability::metadata::FileMeta {
             name: name.to_string(),
             level: 0,
@@ -866,7 +890,7 @@ mod checkpoint_bound_tests {
     fn should_bound_framed_flush_record_before_deferring_large_key_metadata() {
         // Arrange
         for key_bytes in [0, 16, 512, 1024, 65_536] {
-            let meta = crate::runtime::FileMeta {
+            let meta = cntryl_midge_durability::metadata::intent::FileMeta {
                 name: "000000_00_18446744073709551615.sst".into(),
                 level: u32::MAX,
                 size_bytes: u64::MAX,

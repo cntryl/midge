@@ -1,8 +1,8 @@
 //! Committed shared metadata authority for WAL retirement.
 
 use super::super::{CloudCoordinator, EventLoop};
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::hybrid_persistence::SharedMetadataSnapshot;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 
 impl CloudCoordinator {
     pub(in crate::runtime::event_loop) fn metadata_snapshot_for_wal_cleanup(
@@ -66,6 +66,9 @@ mod tests {
         // Act
         let result = el.cloud_metadata_snapshot_for_wal_cleanup();
         // Assert
-        assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
+        assert!(matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+        ));
     }
 }

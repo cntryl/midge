@@ -24,10 +24,12 @@
 //!
 //! Higher layers (SST, WAL, storage) depend on this via trait objects:
 
-mod buffered_read;
-#[cfg(any(test, feature = "internal-testing"))]
+#[doc(hidden)]
+pub mod buffered_read;
+#[cfg(test)]
 mod conformance_tests;
-mod durable_dir;
+#[doc(hidden)]
+pub mod durable_dir;
 mod location;
 pub mod mock;
 pub mod real;
@@ -40,7 +42,7 @@ pub mod traits;
 pub mod transient_read;
 mod whole_file;
 
-pub(crate) use location::FsLocation;
+pub use location::FsLocation;
 pub use mock::MockFs;
 pub use real::RealFs;
 pub use scoped_fs::{scope_fs, scope_read_fs};

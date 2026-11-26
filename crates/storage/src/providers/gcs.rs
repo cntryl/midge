@@ -929,7 +929,7 @@ enum GcsBackendMode {
 
 /// A JSON-API backend against a test HTTP endpoint, for the provider
 /// contract table.
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 pub(super) fn contract_test_json_backend(
     endpoint: String,
 ) -> std::sync::Arc<dyn crate::cloud::CloudBackend> {
@@ -942,8 +942,8 @@ pub(super) fn contract_test_json_backend(
 
 /// An XML-API backend against a test HTTP endpoint, for the provider
 /// contract table.
-#[cfg(test)]
-pub(super) fn contract_test_xml_backend(
+#[cfg(any(test, feature = "internal-testing"))]
+pub fn contract_test_xml_backend(
     endpoint: String,
 ) -> std::sync::Arc<dyn crate::cloud::CloudBackend> {
     std::sync::Arc::new(GcsBackend::xml(
@@ -1414,7 +1414,7 @@ impl crate::cloud::CloudReadCapability for GcsBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let mode = self.mode;

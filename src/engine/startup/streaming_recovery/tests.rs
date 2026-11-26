@@ -115,9 +115,10 @@ fn should_set_aside_cataloged_segment_that_breaks_the_chain_when_salvaging() {
         digest: [0x42; 16],
         ..link
     };
-    let (second, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(2, epoch, forged)
-        .record(&record(2))
-        .seal();
+    let (second, _) =
+        cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(2, epoch, forged)
+            .record(&record(2))
+            .seal();
     publish_segments(dir.path(), &[(1, first, 1), (2, second, 2)]);
     let salvage = OpenOptions::cloud_simulated(dir.path(), "bucket", "streaming-recovery")
         .local_storage_budget(1024 * 1024)
@@ -165,7 +166,8 @@ fn publish_records(
     }
     let (bytes, _) = segment.seal();
     let publication =
-        cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).expect("sealed WAL");
+        cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+            .expect("sealed WAL");
     assert_eq!(publication.max_sequence(), maximum);
     let object = path.join("cloud_store").join(publication.object_key());
     std::fs::create_dir_all(object.parent().expect("parent")).expect("object directory");
@@ -511,9 +513,14 @@ fn publish_two_family_records(path: &std::path::Path, second_id: u32) -> Vec<u8>
         operation.txn_id = Some(1);
         operation.key = bytes::Bytes::from_static(b"atomic");
         operation.cf_id = second_id;
-        let payload =
-            cntryl_midge_durability::wal::encoding::encode_txn_batch_payload(1, 2, 4, second_id, &[operation])
-                .expect("transaction payload");
+        let payload = cntryl_midge_durability::wal::encoding::encode_txn_batch_payload(
+            1,
+            2,
+            4,
+            second_id,
+            &[operation],
+        )
+        .expect("transaction payload");
         let mut batch = cntryl_midge_durability::wal::WalRecord::new(
             cntryl_midge_durability::wal::WalOpKind::TxnBatch,
             bytes::Bytes::from_static(b"txn"),
@@ -560,8 +567,8 @@ fn should_recover_every_family_after_only_first_family_checkpoint_is_published()
     // Assert
     assert_child_output(&output, 73);
     assert_observed_peak(dir.path(), budget);
-    let manifest =
-        cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("checkpoint manifest");
+    let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path())
+        .expect("checkpoint manifest");
     assert!(manifest.files.iter().any(|file| file.cf_id == 0));
     assert!(
         !manifest.files.iter().any(|file| file.cf_id == second_id),
@@ -680,7 +687,8 @@ fn should_recover_accepted_spilled_transaction_above_configured_spill_threshold(
         !catalog.entries().is_empty(),
         "accepted transaction must have replayable remote WAL"
     );
-    let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("manifest");
+    let manifest =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("manifest");
     assert!(
         manifest.files.is_empty(),
         "test must recover spilled transaction from WAL"
@@ -735,8 +743,8 @@ fn should_abandon_orphan_names_when_checkpoint_publication_is_interrupted() {
             .env("MIDGE_RECOVERY_CRASH_POINT", crash_point)
             .output().expect("crash child");
         assert_child_output(&output, 73);
-        let before =
-            cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("crashed manifest");
+        let before = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path())
+            .expect("crashed manifest");
         let cloud_ssts = dir.path().join("cloud_store/sst");
         let orphan_names: Vec<_> = std::fs::read_dir(&cloud_ssts)
             .into_iter()
@@ -754,8 +762,8 @@ fn should_abandon_orphan_names_when_checkpoint_publication_is_interrupted() {
         let mut recovered = Engine::open(opts).expect("resume interrupted recovery");
 
         // Assert
-        let after =
-            cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("recovered manifest");
+        let after = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path())
+            .expect("recovered manifest");
         assert!(
             after.next_sst_seqs.get(&0) >= before.next_sst_seqs.get(&0),
             "{crash_point}"
@@ -879,7 +887,8 @@ fn should_not_reuse_flush_sst_name_when_crash_follows_remote_upload() {
         .output()
         .expect("crash child");
     assert_child_output(&output, 75);
-    let crashed = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("crashed manifest");
+    let crashed = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path())
+        .expect("crashed manifest");
     let orphans: Vec<String> = std::fs::read_dir(dir.path().join("cloud_store/sst"))
         .into_iter()
         .flatten()
@@ -914,7 +923,8 @@ fn should_not_reuse_flush_sst_name_when_crash_follows_remote_upload() {
         .expect("flush must not collide with the orphaned SST name");
 
     // Assert
-    let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("manifest");
+    let recovered =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("manifest");
     for orphan in &orphans {
         assert!(
             !recovered.files.iter().any(|file| &file.name == orphan),
@@ -1047,5 +1057,8 @@ fn should_reject_startup_publication_when_validity_expires_without_watchdog() {
     // Act
     let result = super::validate_lease(&config);
     // Assert
-    assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+    ));
 }

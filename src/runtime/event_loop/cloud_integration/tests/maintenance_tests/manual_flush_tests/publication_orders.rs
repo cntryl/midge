@@ -1,8 +1,8 @@
 use super::*;
-use cntryl_midge_durability::lease::PrimaryLease as _;
 use crate::runtime::actors::compaction::publication::CompactionPublishActor;
 use crate::runtime::actors::flush::FlushWorkerResult;
 use crate::runtime::event_loop::coordination::ManifestPublicationOwner;
+use cntryl_midge_durability::lease::PrimaryLease as _;
 use cntryl_midge_storage::cloud::{CloudBackend, CloudCallback, CloudStorage, MockCloudBackend};
 
 const PUBLISHER_READ_WAIT: Duration = Duration::from_secs(30);
@@ -237,7 +237,9 @@ fn name_work_snapshot(
     })
 }
 
-fn read_committed_manifest(metadata: &MetadataFixture) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
+fn read_committed_manifest(
+    metadata: &MetadataFixture,
+) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
     let directory = tempfile::tempdir()?;
     let store = metadata
         .lease
@@ -250,7 +252,8 @@ fn read_committed_manifest(metadata: &MetadataFixture) -> MidgeResult<cntryl_mid
         directory.path(),
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
-    cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).map_err(MidgeError::Internal)
+    cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path())
+        .map_err(MidgeError::Internal)
 }
 
 fn assert_committed_files(

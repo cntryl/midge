@@ -1,12 +1,12 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
 use super::TransactionApplyOp;
 use super::{TxnSequencePlan, WalActor};
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_durability::wal::DurabilityPolicy;
 use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
-use bytes::Bytes;
 use std::time::Instant;
 
 struct SpilledTransactionContext<'a> {
@@ -24,7 +24,8 @@ impl WalActor {
         source: &crate::runtime::transaction_spill::TransactionOpSource,
         memory: Option<&cntryl_midge_core::common::resource_budget::ResourceBudget>,
     ) -> MidgeResult<usize> {
-        let mut replay_bytes = cntryl_midge_durability::wal::recovery::streaming::pending_txn_overhead_bytes();
+        let mut replay_bytes =
+            cntryl_midge_durability::wal::recovery::streaming::pending_txn_overhead_bytes();
         source.for_each_bounded(memory, |_, op| {
             let (key_len, value_len, range_end_len) = match &op {
                 crate::runtime::TransactionOp::Put { key, value, .. } => {
@@ -35,12 +36,13 @@ impl WalActor {
                     start_key, end_key, ..
                 } => (start_key.len(), 0, end_key.len()),
             };
-            replay_bytes =
-                replay_bytes.saturating_add(cntryl_midge_durability::wal::recovery::streaming::pending_record_bytes(
+            replay_bytes = replay_bytes.saturating_add(
+                cntryl_midge_durability::wal::recovery::streaming::pending_record_bytes(
                     key_len,
                     value_len,
                     range_end_len,
-                ));
+                ),
+            );
             Ok(())
         })?;
         Ok(replay_bytes)
@@ -103,7 +105,9 @@ impl WalActor {
             commit_time_millis,
             None,
         )?;
-        let previous_position = self.writer().map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
+        let previous_position = self
+            .writer()
+            .map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
         let mut wal_may_have_changed = false;
         let append_result = self.append_spilled_wal_records(
             request_id,
@@ -219,7 +223,9 @@ impl WalActor {
             commit_time_millis,
             Some(memory),
         )?;
-        let previous_position = self.writer().map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
+        let previous_position = self
+            .writer()
+            .map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
         let mut wal_may_have_changed = false;
         let append_result = self.append_spilled_wal_records(
             request_id,
@@ -348,7 +354,9 @@ impl WalActor {
         // so replay keeps or drops it whole whatever frontier a later flush
         // publishes; an appended unit's outcome is unknown.
         self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)
-            .map_err(|error| cntryl_midge_core::common::error::classify_commit_error(error, !logged))?;
+            .map_err(|error| {
+                cntryl_midge_core::common::error::classify_commit_error(error, !logged)
+            })?;
         // The WAL now holds the unit and `state.sequence` is past its commit.
         // A lease that lapsed since is a failed apply.
         let mut applied_ops = 0_usize;
@@ -608,7 +616,9 @@ impl WalActor {
                 self.append_spilled_record(&record, wal_may_have_changed, group)
             })?;
 
-        cntryl_midge_core::failpoints::fail_point!("midge::wal::spilled_txn_after_ops_append_before_commit");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::spilled_txn_after_ops_append_before_commit"
+        );
         cntryl_midge_core::failpoints::fail_point!(
             "midge::wal::inject_no_space_on_txn_commit_append",
             |_| Err(MidgeError::NoSpace(
@@ -629,7 +639,9 @@ impl WalActor {
         if let Err(error) = WalTransitionBoundary::AfterAppendBeforeAccounting.check() {
             return Err(Self::appended_unit_error(error));
         }
-        cntryl_midge_core::failpoints::fail_point!("midge::wal::spilled_after_append_batch_before_sync");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::spilled_after_append_batch_before_sync"
+        );
         tracing::trace!(request_id, "appended split transaction WAL frames");
         Ok((total_bytes, context.source.len().saturating_add(2)))
     }
@@ -651,9 +663,13 @@ impl WalActor {
                 Some(capability) => {
                     capability.append_batch_in_group(std::slice::from_ref(record), group)
                 }
-                None => Err(cntryl_midge_durability::wal::traits::WalAppendError::unchanged(
-                    MidgeError::Internal("strict spill lost its writer group capability".into()),
-                )),
+                None => Err(
+                    cntryl_midge_durability::wal::traits::WalAppendError::unchanged(
+                        MidgeError::Internal(
+                            "strict spill lost its writer group capability".into(),
+                        ),
+                    ),
+                ),
             },
             None => writer.append_record_accounted(record),
         };

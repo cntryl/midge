@@ -530,7 +530,10 @@ impl SnapshotScan {
             }
 
             if let KeyState::Value(value, _, expiration, _) = best {
-                if !cntryl_midge_core::common::time::is_expired_at(expiration, self.snapshot.read_time_millis) {
+                if !cntryl_midge_core::common::time::is_expired_at(
+                    expiration,
+                    self.snapshot.read_time_millis,
+                ) {
                     return Ok(Some((key, value)));
                 }
             }

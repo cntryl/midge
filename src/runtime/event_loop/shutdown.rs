@@ -1,7 +1,7 @@
 use super::{EventLoop, HandleOutcome};
-use cntryl_midge_core::common::MidgeError;
 use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
+use cntryl_midge_core::common::MidgeError;
 
 impl EventLoop {
     pub(super) fn handle_shutdown_request(&mut self, request_id: Option<u64>) -> HandleOutcome {
@@ -341,7 +341,9 @@ impl EventLoop {
         let storage_pending = storage.pending_upload_count();
         let runtime_pending = self.actors.cloud_coordinator.cloud_wal.backlog().len();
         if storage_pending > 0 || runtime_pending > 0 {
-            cntryl_midge_core::failpoints::fail_point!("midge::shutdown::after_cloud_upload_drain_timeout");
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::shutdown::after_cloud_upload_drain_timeout"
+            );
             tracing::warn!(
                 storage_pending,
                 runtime_pending,
@@ -356,7 +358,9 @@ impl EventLoop {
         }
     }
 
-    fn drain_shutdown_compaction_publication(&mut self) -> cntryl_midge_core::common::MidgeResult<()> {
+    fn drain_shutdown_compaction_publication(
+        &mut self,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         while self.actors.compaction_publish_actor.is_inflight()
             || crate::runtime::event_loop::compaction::CompactionCoordinator::has_pending_capture(
                 self,
@@ -411,7 +415,10 @@ impl EventLoop {
                     "cloud shutdown checkpoint exceeded the durability deadline".to_string(),
                 ));
             }
-            self.freeze_active_memtable_for(cf_id, cntryl_midge_durability::metadata::accounting::Origin::Shutdown)?;
+            self.freeze_active_memtable_for(
+                cf_id,
+                cntryl_midge_durability::metadata::accounting::Origin::Shutdown,
+            )?;
         }
         self.drain_shutdown_flush_pipeline_within(deadline)
     }
@@ -632,7 +639,10 @@ mod tests {
             Ok(0)
         }
 
-        fn sync_with_timeout(&self, _timeout: Duration) -> cntryl_midge_core::common::MidgeResult<()> {
+        fn sync_with_timeout(
+            &self,
+            _timeout: Duration,
+        ) -> cntryl_midge_core::common::MidgeResult<()> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -648,7 +658,8 @@ mod tests {
         fn seal_facts(
             &self,
             _timeout: std::time::Duration,
-        ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_durability::wal::format::SealedFacts> {
+        ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_durability::wal::format::SealedFacts>
+        {
             cntryl_midge_durability::wal::traits::unsealable::seal()
         }
 

@@ -18,7 +18,10 @@ impl SeededInputs {
         let directory = tempfile::tempdir()?;
         let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
         let factory = Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(
-            Arc::new(cntryl_midge_core::io::RealFs::new(state.host_sst_dir()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(state.host_sst_dir())
+                    .map_err(FsError::into_midge)?,
+            ),
             4096,
         ));
         let mut plan = crate::compaction::CompactionPlan::new(0, source_level, target_level)

@@ -251,7 +251,9 @@ impl ActiveWalFixture {
         // Release the ledger recovery opened, then record segment 1 open
         // with the acknowledged record and reopen it.
         state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
-        let segment = database.join("wal").join(cntryl_midge_durability::wal::segment_file_name(1));
+        let segment = database
+            .join("wal")
+            .join(cntryl_midge_durability::wal::segment_file_name(1));
         std::fs::remove_file(&segment).unwrap();
         std::fs::write(&segment, &body).unwrap();
         let wal: Arc<dyn cntryl_midge_core::io::Fs> =
@@ -264,13 +266,15 @@ impl ActiveWalFixture {
             cntryl_midge_storage::filesystem::FileSystem::new(directory.path().join("cloud-store"))
                 .unwrap(),
         );
-        let storage = Arc::new(cntryl_midge_storage::HybridStorage::with_test_upload_limits(
-            cloud,
-            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
-            1,
-            // The sealed segment adds a footer to `bytes`.
-            bytes.len() as u64 + 256,
-        ));
+        let storage = Arc::new(
+            cntryl_midge_storage::HybridStorage::with_test_upload_limits(
+                cloud,
+                cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
+                1,
+                // The sealed segment adds a footer to `bytes`.
+                bytes.len() as u64 + 256,
+            ),
+        );
         crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::clone(&storage))
             .fence_cloud_wal_catalog(1)
             .unwrap();
@@ -300,7 +304,9 @@ fn should_seal_actual_recovered_active_wal_when_short_open_budget_precedes_large
         let fixture = ActiveWalFixture::new();
         let budget = Duration::from_millis(500);
         assert!(fixture.config.storage_io_timeout > budget);
-        let scope = DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::from_budget(budget));
+        let scope = DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::from_budget(
+            budget,
+        ));
         let (runtime, _) = Runtime::new();
 
         // Act: always release/join an actual prepared worker before asserting.
@@ -323,9 +329,11 @@ fn should_seal_actual_recovered_active_wal_when_short_open_budget_precedes_large
         prepared.unwrap();
         let sealed_bytes = sealed_bytes.expect("the recovered tail survives");
         assert!(sealed_bytes.starts_with(&fixture.bytes));
-        assert!(cntryl_midge_durability::wal::format::segment::footer_link(&sealed_bytes)
-            .unwrap()
-            .is_some());
+        assert!(
+            cntryl_midge_durability::wal::format::segment::footer_link(&sealed_bytes)
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 1);
         assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
         assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
@@ -341,13 +349,21 @@ impl cntryl_midge_durability::lease::LeaderStore for HeldStartupAuthority {
     fn acquire_leadership(
         &self,
         _: &str,
-    ) -> Result<cntryl_midge_durability::lease::LeaderRecord, cntryl_midge_durability::lease::LeaseError> {
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaderRecord,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         Err(cntryl_midge_durability::lease::LeaseError::Internal(
             "unused fixture acquisition".into(),
         ))
     }
 
-    fn read_current(&self) -> Result<Option<cntryl_midge_durability::lease::LeaderRecord>, cntryl_midge_durability::lease::LeaseError> {
+    fn read_current(
+        &self,
+    ) -> Result<
+        Option<cntryl_midge_durability::lease::LeaderRecord>,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         Ok(Some(cntryl_midge_durability::lease::LeaderRecord {
             epoch: 1,
             holder_id: "startup-owner".into(),
@@ -355,7 +371,11 @@ impl cntryl_midge_durability::lease::LeaderStore for HeldStartupAuthority {
         }))
     }
 
-    fn validate_epoch(&self, holder: &str, epoch: u64) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
+    fn validate_epoch(
+        &self,
+        holder: &str,
+        epoch: u64,
+    ) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
         // Only the fixture's authority read has this 80ms deadline. Its clock
         // starts after actual method entry, independently of worker creation.
         self.validate_epoch_with_timeout(holder, epoch, Duration::from_millis(80))

@@ -4,11 +4,11 @@
 use super::durability_sync::CompletionSource;
 use super::write_batch::CoalescedTransactionBatch;
 use super::EventLoop;
-use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::actors::wal::{PendingStrictIo, StrictIoCompletion};
 use crate::runtime::wal_transition::WalSyncTicket;
 use crate::runtime::{RuntimeMsg, RuntimeResponse, TransactionOp};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::time::Duration;

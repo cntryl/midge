@@ -142,9 +142,11 @@ impl EventLoop {
         error: &cntryl_midge_core::common::MidgeError,
     ) -> cntryl_midge_core::common::MidgeError {
         match error {
-            cntryl_midge_core::common::MidgeError::Busy(message) => cntryl_midge_core::common::MidgeError::Aborted(
-                format!("column family drop abandoned by a failed flush: {message}"),
-            ),
+            cntryl_midge_core::common::MidgeError::Busy(message) => {
+                cntryl_midge_core::common::MidgeError::Aborted(format!(
+                    "column family drop abandoned by a failed flush: {message}"
+                ))
+            }
             other => other.replay(),
         }
     }

@@ -4,8 +4,8 @@
 //! caller submission distinct here preserves its snapshot sequence,
 //! assertions, error, and timing attribution.
 
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::{next_request_id, RuntimeHandle, RuntimeResponse, TransactionSubmission};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 

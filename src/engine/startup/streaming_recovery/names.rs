@@ -32,7 +32,9 @@ impl Names {
             *range = publish(self.count)?;
         }
         range.next().ok_or_else(|| {
-            cntryl_midge_core::common::MidgeError::Internal("empty recovery SST name reservation".into())
+            cntryl_midge_core::common::MidgeError::Internal(
+                "empty recovery SST name reservation".into(),
+            )
         })
     }
 }

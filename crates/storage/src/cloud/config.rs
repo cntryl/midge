@@ -61,7 +61,7 @@ impl Default for CloudWritePolicy {
 }
 
 impl CloudWritePolicy {
-    pub(crate) fn validate(&self) -> MidgeResult<()> {
+    pub fn validate(&self) -> MidgeResult<()> {
         if !(1..=64).contains(&self.wal_upload_concurrency) || self.wal_upload_memory_bytes == 0 {
             return Err(MidgeError::InvalidArgument(
                 "cloud WAL uploads need 1..=64 workers and a nonzero memory budget".into(),
@@ -93,10 +93,10 @@ impl CloudWritePolicy {
 
 /// Cloud storage and shutdown controls owned by the cloud subsystem.
 #[derive(Debug, Clone)]
-pub(crate) struct CloudWritePolicyConfig {
-    pub(crate) policy: CloudWritePolicy,
-    pub(crate) shutdown_drain_timeout: Duration,
-    pub(crate) local_storage_budget_bytes: Option<u64>,
+pub struct CloudWritePolicyConfig {
+    pub policy: CloudWritePolicy,
+    pub shutdown_drain_timeout: Duration,
+    pub local_storage_budget_bytes: Option<u64>,
 }
 
 impl Default for CloudWritePolicyConfig {
@@ -110,7 +110,7 @@ impl Default for CloudWritePolicyConfig {
 }
 
 impl CloudWritePolicyConfig {
-    pub(crate) fn set_policy(&mut self, policy: CloudWritePolicy) {
+    pub fn set_policy(&mut self, policy: CloudWritePolicy) {
         self.policy = policy;
     }
 }

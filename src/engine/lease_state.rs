@@ -1,5 +1,5 @@
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::{Runtime, RuntimeHandle};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -184,7 +184,9 @@ impl LeaseState {
 
     /// Retry release for no longer than the lease TTL. An unreleased lease
     /// expires after its heartbeat stops.
-    fn release_lease_bounded(lease: &dyn cntryl_midge_durability::lease::PrimaryLease) -> MidgeResult<()> {
+    fn release_lease_bounded(
+        lease: &dyn cntryl_midge_durability::lease::PrimaryLease,
+    ) -> MidgeResult<()> {
         const MAX_BACKOFF: Duration = Duration::from_secs(1);
         let deadline = std::time::Instant::now() + lease.ttl();
         let mut backoff = Duration::from_millis(1);
@@ -193,7 +195,11 @@ impl LeaseState {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() || matches!(error, cntryl_midge_durability::lease::LeaseError::Internal(_))
+                    if remaining.is_zero()
+                        || matches!(
+                            error,
+                            cntryl_midge_durability::lease::LeaseError::Internal(_)
+                        )
                     {
                         tracing::warn!(%error, "primary lease release failed; it will expire at its TTL");
                         return Err(MidgeError::LeaseUnavailable(format!(
@@ -433,7 +439,10 @@ mod tests {
     impl PrimaryLease for TestLease {
         fn try_acquire(
             self: Arc<Self>,
-        ) -> Result<cntryl_midge_durability::lease::LeaseGuard, cntryl_midge_durability::lease::LeaseError> {
+        ) -> Result<
+            cntryl_midge_durability::lease::LeaseGuard,
+            cntryl_midge_durability::lease::LeaseError,
+        > {
             Ok(cntryl_midge_durability::lease::LeaseGuard::token())
         }
 
@@ -463,7 +472,12 @@ mod tests {
         // Arrange
         let lease: Arc<dyn PrimaryLease> = Arc::new(TestLease);
         let heartbeat = cntryl_midge_durability::lease::LeaseHeartbeat::new(Arc::clone(&lease));
-        let mut state = LeaseState::new(lease, cntryl_midge_durability::lease::LeaseGuard::token(), heartbeat, None);
+        let mut state = LeaseState::new(
+            lease,
+            cntryl_midge_durability::lease::LeaseGuard::token(),
+            heartbeat,
+            None,
+        );
 
         // Act
         let resources = state.take_resources();
@@ -481,7 +495,12 @@ mod tests {
         // Arrange
         let lease: Arc<dyn PrimaryLease> = Arc::new(TestLease);
         let heartbeat = cntryl_midge_durability::lease::LeaseHeartbeat::new(Arc::clone(&lease));
-        let mut state = LeaseState::new(lease, cntryl_midge_durability::lease::LeaseGuard::token(), heartbeat, None);
+        let mut state = LeaseState::new(
+            lease,
+            cntryl_midge_durability::lease::LeaseGuard::token(),
+            heartbeat,
+            None,
+        );
 
         // Act
         let result = state.schedule_cleanup_with_spawner(Ok(()), |_, _| {

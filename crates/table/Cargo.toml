@@ -27,13 +27,14 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 cntryl-stress = "0.5.1"
+proptest = "1.12"
 bytes = { version = "1.12", features = ["serde"] }
 tempfile = "3.27"
 cntryl-midge-table = { path = ".", features = ["internal-testing"] }
 
 [features]
 default = []
-internal-testing = []
+internal-testing = ["cntryl-midge-core/internal-testing"]
 failpoints = ["cntryl-midge-core/failpoints"]
 
 [lints]

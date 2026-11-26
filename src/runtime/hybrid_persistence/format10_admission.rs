@@ -544,8 +544,13 @@ fn validate_objects(
             cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF => {
                 cntryl_midge_durability::metadata::files::MAX_CLOUD_CUT_PROOF_BYTES as u64
             }
-            name if cntryl_midge_durability::metadata::local_authority::closure_path_parts(name).is_ok() => {
-                let (_, body) = cntryl_midge_durability::metadata::local_authority::closure_path_parts(name)?;
+            name if cntryl_midge_durability::metadata::local_authority::closure_path_parts(
+                name,
+            )
+            .is_ok() =>
+            {
+                let (_, body) =
+                    cntryl_midge_durability::metadata::local_authority::closure_path_parts(name)?;
                 has_manifest_base |= body == "manifest/base";
                 has_intent_base |= body == "intent/base";
                 cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES

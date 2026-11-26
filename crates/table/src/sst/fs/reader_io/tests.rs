@@ -483,9 +483,8 @@ fn should_classify_truncated_nonlegacy_sst_as_corruption() -> MidgeResult<()> {
 #[test]
 fn should_reject_legacy_v2_sst_without_falling_back_to_unchecksummed_blocks() -> MidgeResult<()> {
     // Arrange
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/compatibility/v2_compressed_sst_db/sst");
-    let file_name = "000001_00_00000000000000000001.sst";
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sst");
+    let file_name = "v2_compressed.sst";
     let fs: Arc<dyn Fs> =
         Arc::new(cntryl_midge_core::io::RealFs::new(&fixture_dir).map_err(FsError::into_midge)?);
 
@@ -503,9 +502,8 @@ fn should_reject_legacy_v2_sst_without_falling_back_to_unchecksummed_blocks() ->
 fn should_reject_format_nine_sst_v4_directly_with_compatibility_error() -> MidgeResult<()> {
     // Arrange: this fixture has a current metadata marker and a real V4 SST,
     // so opening the SST directly exercises the reader's version boundary.
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/compatibility/v9_populated_v4_sst_db/sst");
-    let file_name = "000000_00_00000000000000000001.sst";
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sst");
+    let file_name = "v9_populated_v4.sst";
     let fs: Arc<dyn Fs> =
         Arc::new(cntryl_midge_core::io::RealFs::new(&fixture_dir).map_err(FsError::into_midge)?);
 

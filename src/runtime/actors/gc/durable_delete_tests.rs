@@ -1,11 +1,11 @@
 use super::*;
+use crate::runtime::hybrid_persistence::{
+    mirror_control_metadata_within, CloudMetadataMirrorAuthority, CloudMetadataMirrorContext,
+};
 use cntryl_midge_core::common::OperationDeadline;
 use cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore;
 use cntryl_midge_durability::lease::LeaderStore;
 use cntryl_midge_durability::metadata::{FileMeta, ManifestEdit, ManifestPersistence};
-use crate::runtime::hybrid_persistence::{
-    mirror_control_metadata_within, CloudMetadataMirrorAuthority, CloudMetadataMirrorContext,
-};
 use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
 
 struct Fixture {
@@ -23,13 +23,14 @@ fn should_defer_cloud_sst_deletion_when_v10_metadata_reload_is_required() {
     // Arrange
     let mut fixture = Fixture::new();
     let format_10 = cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1;
-    fixture.state.manifest_store =
-        Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new_with_format(
+    fixture.state.manifest_store = Arc::new(
+        cntryl_midge_durability::metadata::store::ManifestStore::new_with_format(
             Arc::clone(&fixture.state.fs),
             cntryl_midge_durability::metadata::accounting::Owner::new(),
             cntryl_midge_durability::metadata::accounting::Medium::Persistent,
             format_10,
-        ));
+        ),
+    );
     fixture.state.fence_metadata_until_reloaded();
     let mut actor = GcActor::new();
 
@@ -54,7 +55,11 @@ impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
-        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&state.fs, directory.path()).unwrap();
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(
+            &state.fs,
+            directory.path(),
+        )
+        .unwrap();
         std::fs::create_dir_all(state.host_sst_dir()).unwrap();
         let original = b"original";
         let file = FileMeta {
@@ -73,7 +78,10 @@ impl Fixture {
         };
         let id = state
             .manifest_store
-            .append_for(cntryl_midge_durability::metadata::accounting::Origin::Administration, &edit)
+            .append_for(
+                cntryl_midge_durability::metadata::accounting::Origin::Administration,
+                &edit,
+            )
             .unwrap();
         state.manifest.apply_edit(&edit).unwrap();
         state.manifest.note_applied_journal_edit(id);
@@ -131,7 +139,9 @@ impl Fixture {
             &self.cloud,
             &OperationDeadline::from_budget(Duration::from_secs(5)),
         )
-        .get_optional(&cntryl_midge_core::cloud_layout::object_key(&self.file.name))
+        .get_optional(&cntryl_midge_core::cloud_layout::object_key(
+            &self.file.name,
+        ))
         .unwrap()
     }
 }
@@ -218,7 +228,10 @@ fn should_recheck_pending_cuts_inside_physical_retired_sst_worker() {
     );
 
     // Assert: the final worker-owned check prevents both physical effects.
-    assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Busy(_))));
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Busy(_))
+    ));
     assert_eq!(fixture.remote().unwrap(), b"original");
     assert!(fixture
         .state
@@ -246,9 +259,11 @@ fn should_rediscover_original_delete_obligation_when_cloud_recovery_loses_local_
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )
     .unwrap();
-    let recovered =
-        ManifestPersistence::load_with_fs_and_policy(&fs, cntryl_midge_durability::RecoveryPolicy::Strict)
-            .unwrap();
+    let recovered = ManifestPersistence::load_with_fs_and_policy(
+        &fs,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
+    )
+    .unwrap();
     fixture.state.manifest.replace(recovered);
     let mut restarted = GcActor::new();
     restarted.restore_durable_sst_deletes(&fixture.state, true);

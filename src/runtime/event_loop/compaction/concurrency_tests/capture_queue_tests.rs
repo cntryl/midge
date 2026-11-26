@@ -9,7 +9,9 @@ fn capture_fixture() -> MidgeResult<(ConcurrentFixture, ResourceBudget, String)>
         .event_loop
         .actors
         .cloud_coordinator
-        .cloud_metadata_storage = Some(Arc::new(cntryl_midge_storage::cloud::CloudStorage::with_mock()));
+        .cloud_metadata_storage = Some(Arc::new(
+        cntryl_midge_storage::cloud::CloudStorage::with_mock(),
+    ));
     let memory = ResourceBudget::new(1024 * 1024);
     fixture
         .event_loop

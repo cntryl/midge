@@ -73,7 +73,7 @@ cargo package --workspace --locked
 docker compose up -d sqrzl
 docker build --network=host --file Dockerfile.tests --tag midge-tests:local .
 cargo test --locked -p cntryl-midge-storage --lib --features sqrzl-tests \
-  storage::providers::qualification -- --test-threads=1
+  providers::qualification -- --test-threads=1
 cargo test --locked -p cntryl-midge --test cloud_provider_engine_qualification \
   --features sqrzl-tests,failpoints -- --test-threads=1
 ```

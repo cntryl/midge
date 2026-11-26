@@ -47,8 +47,9 @@ impl EventLoop {
     /// message without one cannot reach here: it could not have been classified
     /// as `Reject` in the first place.
     fn reject_under_verification_barrier(&mut self, msg: RuntimeMsg, request_id: u64) {
-        let error =
-            cntryl_midge_core::common::MidgeError::Busy("storage verification barrier is active".to_string());
+        let error = cntryl_midge_core::common::MidgeError::Busy(
+            "storage verification barrier is active".to_string(),
+        );
         let response = RuntimeResponse::Error { request_id, error };
         match msg {
             RuntimeMsg::ApplyTransaction {

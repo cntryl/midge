@@ -28,7 +28,7 @@ impl CloudObjectLayout {
 
     /// Object key for a mutable recovery-metadata file in the control store.
     #[must_use]
-    pub(crate) fn metadata_key(file_name: &str) -> String {
+    pub fn metadata_key(file_name: &str) -> String {
         format!("{}{file_name}", Self::METADATA_PREFIX)
     }
 }
@@ -39,10 +39,10 @@ impl CloudObjectLayout {
 /// persistence boundary prevents absolute paths, parent traversal, Windows
 /// drive/ADS syntax, and nested paths from ever reaching filesystem joins.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct PersistedSstName(String);
+pub struct PersistedSstName(String);
 
 impl PersistedSstName {
-    pub(crate) fn parse(name: &str) -> MidgeResult<Self> {
+    pub fn parse(name: &str) -> MidgeResult<Self> {
         let path = Path::new(name);
         let mut components = path.components();
         let is_single_normal_component =
@@ -64,29 +64,29 @@ impl PersistedSstName {
         Ok(Self(name.to_owned()))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub(crate) fn join_under(&self, root: &Path) -> PathBuf {
+    pub fn join_under(&self, root: &Path) -> PathBuf {
         root.join(self.as_str())
     }
 }
 
 /// Pad generated SST sequence names to the full `u64` width so filesystem and
 /// object-store listings sort in the same order as creation sequence.
-pub(crate) const SST_SEQUENCE_WIDTH: usize = 20;
+pub const SST_SEQUENCE_WIDTH: usize = 20;
 
 /// Format a canonical SST filename. Storage roots already encode the object
 /// type via the `sst/` directory or cloud prefix, so the file name only carries
 /// ordering identity.
 #[must_use]
-pub(crate) fn file_name(cf_id: u32, level: u32, sequence: u64) -> String {
+pub fn file_name(cf_id: u32, level: u32, sequence: u64) -> String {
     format!("{cf_id:06}_{level:02}_{sequence:0SST_SEQUENCE_WIDTH$}.sst")
 }
 
 /// Parse only a canonical, complete flush object identity.
-pub(crate) fn parse_file_name(name: &str) -> Option<(u32, u32, u64)> {
+pub fn parse_file_name(name: &str) -> Option<(u32, u32, u64)> {
     let mut parts = name.strip_suffix(".sst")?.split('_');
     let parsed = (
         parts.next()?.parse().ok()?,
@@ -99,12 +99,7 @@ pub(crate) fn parse_file_name(name: &str) -> Option<(u32, u32, u64)> {
 /// Format a deterministic compaction partition filename. One compaction
 /// generation owns every zero-based partition ordinal in its replacement set.
 #[must_use]
-pub(crate) fn compaction_file_name(
-    cf_id: u32,
-    level: u32,
-    generation: u64,
-    partition: u32,
-) -> String {
+pub fn compaction_file_name(cf_id: u32, level: u32, generation: u64, partition: u32) -> String {
     format!("{cf_id:06}_{level:02}_{generation:0SST_SEQUENCE_WIDTH$}_{partition:010}.sst")
 }
 
@@ -112,7 +107,7 @@ pub(crate) fn compaction_file_name(
 ///
 /// This remains internal because partition identity is an implementation detail,
 /// not part of the stable SST naming API.
-pub(crate) fn parse_compaction_file_name(name: &str) -> Option<(u32, u32, u64, u32)> {
+pub fn parse_compaction_file_name(name: &str) -> Option<(u32, u32, u64, u32)> {
     let stem = name.strip_suffix(".sst")?;
     let mut parts = stem.split('_');
     let cf = parts.next()?;
@@ -138,13 +133,13 @@ pub(crate) fn parse_compaction_file_name(name: &str) -> Option<(u32, u32, u64, u
 
 /// Format the cloud object key for an SST file.
 #[must_use]
-pub(crate) fn object_key(file_name: &str) -> String {
+pub fn object_key(file_name: &str) -> String {
     format!("{}{file_name}", CloudObjectLayout::SST_PREFIX)
 }
 
 /// Format the temporary staging path for an SST file inside the local SST root.
 #[must_use]
-pub(crate) fn temp_object_key(file_name: &str) -> String {
+pub fn temp_object_key(file_name: &str) -> String {
     format!("{}{file_name}.tmp", CloudObjectLayout::SST_PREFIX)
 }
 

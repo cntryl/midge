@@ -93,16 +93,16 @@ pub const BLOCK_TRAILER_SIZE: usize = 5;
 /// bound than their conservative reservation bound. Keeping both values avoids
 /// a drift between the WAL streaming preflight and the SST read path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DecompressedLenHint {
-    pub(crate) decode_limit: usize,
-    pub(crate) reservation_limit: usize,
+pub struct DecompressedLenHint {
+    pub decode_limit: usize,
+    pub reservation_limit: usize,
 }
 
 /// Determine the bounded decoded-size hint for one compressed payload.
 ///
 /// The returned reservation limit is suitable for accounting before a decode;
 /// the decode limit is the maximum output passed to the decoder itself.
-pub(crate) fn decompressed_len_hint(
+pub fn decompressed_len_hint(
     algo: CompressionAlgo,
     compressed: &[u8],
 ) -> MidgeResult<DecompressedLenHint> {
@@ -450,9 +450,7 @@ pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
 
 /// Borrow a passthrough value so the WAL frame can copy it directly into its
 /// final buffer. A compressed result retains the compressor's owned buffer.
-pub(crate) fn compress_wal_value_borrowed(
-    value: &[u8],
-) -> (std::borrow::Cow<'_, [u8]>, Option<u8>) {
+pub fn compress_wal_value_borrowed(value: &[u8]) -> (std::borrow::Cow<'_, [u8]>, Option<u8>) {
     if value.len() < MIN_COMPRESSION_INPUT_BYTES {
         return (std::borrow::Cow::Borrowed(value), None);
     }

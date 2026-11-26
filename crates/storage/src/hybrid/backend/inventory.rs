@@ -12,7 +12,7 @@ pub(super) struct ObjectInventories {
 }
 
 impl HybridStorage {
-    pub(crate) fn configure_object_inventories(
+    pub fn configure_object_inventories(
         &self,
         wal: Arc<dyn ObjectInventory>,
         sst: Arc<dyn ObjectInventory>,
@@ -22,11 +22,11 @@ impl HybridStorage {
             .map_err(|_| MidgeError::Internal("object inventories were already configured".into()))
     }
 
-    pub(crate) fn has_object_inventory(&self) -> bool {
+    pub fn has_object_inventory(&self) -> bool {
         self.object_inventories.get().is_some()
     }
 
-    pub(crate) fn list_remote_page_within(
+    pub fn list_remote_page_within(
         &self,
         prefix: &str,
         page: CloudListPageRequest,

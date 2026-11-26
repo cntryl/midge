@@ -2,14 +2,14 @@
 
 use super::super::tests::receive_owned_compaction_completion;
 use super::{CompactionCoordinator, EventLoop};
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::compaction::strategy::CompactionPurpose;
 use crate::compaction::{CompactionPlan, LeveledCompactionConfig};
 use crate::runtime::actors::compaction::CompactionActor;
 use crate::runtime::{RuntimeMsg, RuntimeState};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::types::EntryType;
 use cntryl_midge_table::sst::traits::RawSstVersion;
 use cntryl_midge_table::sst::SstFactory as _;
-use cntryl_midge_core::types::EntryType;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -85,8 +85,9 @@ impl FragmentFixture {
     ) -> MidgeResult<cntryl_midge_durability::metadata::FileMeta> {
         let name = cntryl_midge_core::cloud_layout::file_name(0, level, sequence);
         std::fs::create_dir_all(self.el.state.host_sst_dir())?;
-        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&self.el.state.fs), 4096)
-            .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::None);
+        let factory =
+            cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&self.el.state.fs), 4096)
+                .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::None);
         let mut writer = factory.create()?;
         for key in keys {
             let historical_key = level == 1 && sequence == 1 && *key == b"c0";
@@ -129,8 +130,11 @@ impl FragmentFixture {
     }
 
     fn persist(&self) -> MidgeResult<()> {
-        cntryl_midge_durability::metadata::ManifestPersistence::save(&self.el.state.db_path, &self.el.state.manifest)
-            .map_err(MidgeError::Internal)
+        cntryl_midge_durability::metadata::ManifestPersistence::save(
+            &self.el.state.db_path,
+            &self.el.state.manifest,
+        )
+        .map_err(MidgeError::Internal)
     }
 
     fn plan(&mut self) -> MidgeResult<CompactionPlan> {
@@ -278,8 +282,9 @@ fn should_recover_fragmented_source_when_critical_l0_work_interrupts_promotion()
         // These fixture ingests must be durable inputs before real moves can
         // journal their promotion. A later compaction checkpoint is optional.
         fixture.persist()?;
-        let durable = cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.el.state.db_path)
-            .map_err(MidgeError::Internal)?;
+        let durable =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.el.state.db_path)
+                .map_err(MidgeError::Internal)?;
         assert!(fixture
             .el
             .state
@@ -484,22 +489,23 @@ fn should_reject_fragment_publication_when_cut_or_source_neighbors_change() -> M
 fn should_recover_fragment_when_publication_stops_after_durable_manifest_batch() -> MidgeResult<()>
 {
     // Arrange: real source fragmentation has completed under the ordinary publication owner.
-    let (mut fixture, expected, completion) = cntryl_midge_core::failpoints::with_read_gate(|| {
-        let mut fixture = FragmentFixture::new()?;
-        let names = fixture
-            .el
-            .state
-            .manifest
-            .files
-            .iter()
-            .map(|file| file.name.clone())
-            .collect::<Vec<_>>();
-        let expected = fixture.raw_rows(&names)?;
-        let plan = fixture.plan()?;
-        assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
-        let completion = fixture.compute(plan)?;
-        Ok::<_, MidgeError>((fixture, expected, completion))
-    })?;
+    let (mut fixture, expected, completion) =
+        cntryl_midge_core::failpoints::with_read_gate(|| {
+            let mut fixture = FragmentFixture::new()?;
+            let names = fixture
+                .el
+                .state
+                .manifest
+                .files
+                .iter()
+                .map(|file| file.name.clone())
+                .collect::<Vec<_>>();
+            let expected = fixture.raw_rows(&names)?;
+            let plan = fixture.plan()?;
+            assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
+            let completion = fixture.compute(plan)?;
+            Ok::<_, MidgeError>((fixture, expected, completion))
+        })?;
     let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let (inputs, outputs) = match &completion {

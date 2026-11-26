@@ -35,7 +35,9 @@ impl WriteAdmission {
         let _ = self.config.set(config.clone());
     }
 
-    pub(crate) fn limiter(&self) -> Option<Arc<cntryl_midge_core::common::write_rate::BackgroundWriteLimiter>> {
+    pub(crate) fn limiter(
+        &self,
+    ) -> Option<Arc<cntryl_midge_core::common::write_rate::BackgroundWriteLimiter>> {
         self.limiter.get().cloned()
     }
 

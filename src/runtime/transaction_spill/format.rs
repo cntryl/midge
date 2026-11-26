@@ -4,11 +4,11 @@ use super::{
     SpillDiskCharge, SpillReaderCache, SpillRoot, SpillRun, TransactionMemoryPool, TransactionOp,
     MAX_FRAME_BYTES, RUN_HEADER_LEN, RUN_MAGIC, RUN_VERSION, SPARSE_INDEX_STRIDE,
 };
+use bytes::Bytes;
 use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_core::io::stream::{FileReader, FileWriter};
 use cntryl_midge_core::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
-use bytes::Bytes;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 

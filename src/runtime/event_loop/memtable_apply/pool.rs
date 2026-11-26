@@ -1,6 +1,6 @@
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::actors::wal::{MemtableApplyAuthority, MemtableApplyJob};
 use crate::runtime::RuntimeMsg;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crossbeam::channel::{Receiver, Sender, TrySendError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

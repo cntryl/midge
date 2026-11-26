@@ -171,8 +171,8 @@ mod tests {
     #[test]
     fn should_preserve_path_style_http_endpoint_given_shared_key() {
         // Arrange
+        use crate::config::AzureBlobConfig;
         use crate::providers::test_support::spawn_recording_http_server;
-        use crate::AzureBlobConfig;
 
         let server = spawn_recording_http_server(Vec::new(), Vec::new());
         let provider: CloudProviderConfig = AzureBlobConfig::new("admin", "container")

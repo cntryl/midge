@@ -1,9 +1,9 @@
 use super::*;
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::event_loop::tests::{
     create_test_cloud_event_loop, create_test_local_event_loop,
 };
 use crate::runtime::RuntimeMsg;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::time::Instant;
 
 #[test]

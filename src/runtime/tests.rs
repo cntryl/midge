@@ -1,6 +1,6 @@
 use super::*;
-use cntryl_midge_core::common::MidgeError;
 use crate::runtime::TestRuntimeMsg;
+use cntryl_midge_core::common::MidgeError;
 use cntryl_midge_durability::wal::DurabilityPolicy;
 use std::sync::Arc;
 use std::thread;
@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 mod compaction_deadline_tests;
 
 #[test]
-fn should_slow_commit_inside_l0_soft_band_without_hard_stall() -> cntryl_midge_core::common::MidgeResult<()> {
+fn should_slow_commit_inside_l0_soft_band_without_hard_stall(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let state = RuntimeState::new(directory.path().to_path_buf(), false);
@@ -176,7 +177,9 @@ impl SpilledRuntime {
         request_id: u64,
         key: &'static [u8],
         value: &'static [u8],
-    ) -> cntryl_midge_core::common::MidgeResult<crate::runtime::transaction_spill::TransactionOpSource> {
+    ) -> cntryl_midge_core::common::MidgeResult<
+        crate::runtime::transaction_spill::TransactionOpSource,
+    > {
         use crate::runtime::transaction_spill::{TransactionMemoryPool, TransactionWriteSet};
         use bytes::Bytes;
 
@@ -218,26 +221,34 @@ impl CloudAsyncRuntime {
         let cloud = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
             db_path.join("cloud-store"),
         )?);
-        let shared_metadata = Arc::new(cntryl_midge_storage::cloud::CloudStorage::from_object_store(
-            cloud.clone(),
-            Duration::from_secs(5),
-        ));
+        let shared_metadata = Arc::new(
+            cntryl_midge_storage::cloud::CloudStorage::from_object_store(
+                cloud.clone(),
+                Duration::from_secs(5),
+            ),
+        );
         let inventory: Arc<dyn cntryl_midge_storage::inventory::ObjectInventory> = cloud.clone();
         let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
             cloud,
             cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         hybrid.configure_object_inventories(Arc::clone(&inventory), inventory)?;
-        let store = Arc::new(cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
-            cntryl_midge_core::io::real::test_root(db_path.join("cloud-store")),
-            cntryl_midge_durability::lease::LeaseClock::default(),
-        ));
+        let store = Arc::new(
+            cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
+                cntryl_midge_core::io::real::test_root(db_path.join("cloud-store")),
+                cntryl_midge_durability::lease::LeaseClock::default(),
+            ),
+        );
         let leader_store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> = store.clone();
         store.acquire_leadership("test-writer")?;
         cntryl_midge_durability::metadata::ensure_or_create_format_marker(&state.fs, &db_path)?;
-        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
-            .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
-        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
+            &state.fs,
+            &state.manifest,
+        )
+        .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
+        let deadline =
+            cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
         crate::runtime::ddl::fence_remote_registry_on_startup(
             &hybrid,
             &crate::runtime::ddl::DdlLeaseAuthority {
@@ -357,7 +368,8 @@ fn request_cloud_async_seal(
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_progress_control_while_cloud_seal_fsync_is_held() -> cntryl_midge_core::common::MidgeResult<()> {
+fn should_progress_control_while_cloud_seal_fsync_is_held(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: start a real CloudAsync runtime before holding its physical WAL sync.
     let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let fixture = CloudAsyncRuntime::new()?;
@@ -583,7 +595,8 @@ fn spilled_strict_message(
 fn begin_runtime_snapshot(
     handle: &RuntimeHandle,
     request_id: u64,
-) -> cntryl_midge_core::common::MidgeResult<(u64, Arc<crate::runtime::read_snapshot::ReadSnapshot>)> {
+) -> cntryl_midge_core::common::MidgeResult<(u64, Arc<crate::runtime::read_snapshot::ReadSnapshot>)>
+{
     let response = handle
         .router
         .register(request_id, "test transaction snapshot");
@@ -618,7 +631,8 @@ fn await_transaction_applied(
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_progress_control_while_spilled_strict_sync_is_held() -> cntryl_midge_core::common::MidgeResult<()> {
+fn should_progress_control_while_spilled_strict_sync_is_held(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     use bytes::Bytes;
 
     // Arrange: start the runtime before holding its physical sync worker.
@@ -757,8 +771,8 @@ fn should_recover_spilled_strict_commit_after_post_sync_apply_failure(
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_return_unknown_outcome_when_spilled_strict_sync_fails() -> cntryl_midge_core::common::MidgeResult<()>
-{
+fn should_return_unknown_outcome_when_spilled_strict_sync_fails(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let fixture = SpilledRuntime::new()?;

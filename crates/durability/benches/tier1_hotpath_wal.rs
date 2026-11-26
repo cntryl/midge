@@ -2,12 +2,9 @@
 //!
 //! Covers WAL record TLV serialization, deserialization, and round trips.
 
-#[path = "./stress_config.rs"]
-mod stress_config;
-
-use cntryl_midge::__internal::wal::encoding::{decode_view, encode, encode_into};
-use cntryl_midge::__internal::wal::{WalOpKind, WalRecord};
-use cntryl_midge::Bytes;
+use bytes::Bytes;
+use cntryl_midge_durability::wal::encoding::{decode_view, encode, encode_into};
+use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 const WAL_ENCODE_BATCH_SIZE_DEFAULT: usize = 4096;
@@ -18,6 +15,15 @@ const WAL_DECODE_BATCH_SIZE_MEDIUM: usize = 65_536;
 const WAL_ROUNDTRIP_BATCH_SIZE_DEFAULT: usize = 262_144;
 const WAL_ROUNDTRIP_BATCH_SIZE_MEDIUM: usize = 65_536;
 const WAL_RECORDS_PER_LOGICAL_OPERATION: usize = 32;
+
+fn measure_hot_path_batch(
+    ctx: &mut StressContext,
+    name: impl Into<String>,
+    logical_operations_per_iteration: u64,
+    f: impl FnMut(),
+) {
+    let _completed = ctx.measure_batch(name, logical_operations_per_iteration, f);
+}
 
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).expect("benchmark count fits in u64")
@@ -110,7 +116,7 @@ fn run_encode_record(ctx: &mut StressContext, scenario: &'static str, record: &W
     let mut buf = Vec::with_capacity(encode(record).unwrap().len());
 
     let measurement_name = format!("encode_{scenario}");
-    stress_config::measure_hot_path_batch(ctx, measurement_name, encode_batch_size as u64, || {
+    measure_hot_path_batch(ctx, measurement_name, encode_batch_size as u64, || {
         let mut encoded = 0usize;
         for record in &records {
             buf.clear();
@@ -173,7 +179,7 @@ fn run_decode_record(ctx: &mut StressContext, scenario: &'static str) {
     ctx.parameter("batch_per_logical_operation", 1);
 
     let measurement_name = format!("decode_{scenario}");
-    stress_config::measure_hot_path_batch(
+    measure_hot_path_batch(
         ctx,
         measurement_name,
         wal_decode_logical_operation_count(decode_batch_size),
@@ -228,7 +234,7 @@ fn run_roundtrip(ctx: &mut StressContext, scenario: &'static str, record: &WalRe
     let mut buf = Vec::with_capacity(encode(record).unwrap().len());
 
     let measurement_name = format!("roundtrip_{scenario}");
-    stress_config::measure_hot_path_batch(ctx, measurement_name, batch_size as u64, || {
+    measure_hot_path_batch(ctx, measurement_name, batch_size as u64, || {
         let mut decoded = 0usize;
         for _ in 0..batch_size {
             buf.clear();

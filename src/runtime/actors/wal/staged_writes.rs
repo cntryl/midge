@@ -141,7 +141,11 @@ impl StagedWriteOverlay {
                     expiration,
                     ..
                 } if *family == cf_id && written.as_ref() == key => Some(
-                    *exists && !cntryl_midge_core::common::time::is_expired_at(*expiration, read_time_millis),
+                    *exists
+                        && !cntryl_midge_core::common::time::is_expired_at(
+                            *expiration,
+                            read_time_millis,
+                        ),
                 ),
                 StagedMutation::Range {
                     cf_id: family,
@@ -157,8 +161,8 @@ impl StagedWriteOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cntryl_midge_core::common::MidgeResult;
     use bytes::Bytes;
+    use cntryl_midge_core::common::MidgeResult;
     use proptest::prelude::*;
 
     fn generated_ops(encoded: &[(u8, u32, u8, u8, u8)]) -> Vec<TransactionApplyOp> {
@@ -273,9 +277,10 @@ mod tests {
                         .map(|range| range.seq)
                         .max();
                     let exists = match (point, covered) {
-                        (cntryl_midge_core::types::KeyState::Value(_, sequence, _, _), Some(range_seq)) => {
-                            sequence > range_seq
-                        }
+                        (
+                            cntryl_midge_core::types::KeyState::Value(_, sequence, _, _),
+                            Some(range_seq),
+                        ) => sequence > range_seq,
                         (cntryl_midge_core::types::KeyState::Value(_, _, _, _), None) => true,
                         _ => false,
                     };

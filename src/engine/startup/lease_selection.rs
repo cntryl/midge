@@ -118,15 +118,11 @@ pub(in crate::engine) fn create_lease_with_validity_and_timeout_and_ttl(
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
             };
-            let store = SimulatedCloud::locate(
-                root.as_ref(),
-                object_store,
-                storage_io_timeout,
-            )
-            .and_then(|location| location.open())
-            .map_err(|error| {
-                LeaseError::IoError(format!("simulated shared lease backend: {error}"))
-            })?;
+            let store = SimulatedCloud::locate(root.as_ref(), object_store, storage_io_timeout)
+                .and_then(|location| location.open())
+                .map_err(|error| {
+                    LeaseError::IoError(format!("simulated shared lease backend: {error}"))
+                })?;
             let cloud = Arc::new(cloud::CloudStorage::from_object_store(
                 store,
                 storage_io_timeout,
@@ -176,8 +172,7 @@ mod tests {
         // Arrange
         let first_cache = tempfile::tempdir().unwrap();
         let second_cache = tempfile::tempdir().unwrap();
-        let backend: Arc<dyn cloud::CloudBackend> =
-            Arc::new(cloud::MockCloudBackend::new());
+        let backend: Arc<dyn cloud::CloudBackend> = Arc::new(cloud::MockCloudBackend::new());
         let make = |directory: &std::path::Path| {
             create_lease_with_validity_and_timeout_and_ttl(
                 &Storage::CloudSimulated {

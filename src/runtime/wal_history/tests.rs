@@ -8,8 +8,10 @@
 use super::{SalvageCut, SetAside, WalHistory, WalHistoryFence};
 use cntryl_midge_core::common::MidgeError;
 use cntryl_midge_core::io::{Durability, Fs, FsPath, OpenMode, OpenOptions, ReadFs};
+use cntryl_midge_core::simulation::crash_fs::{
+    CrashDevice, Fault, FaultEffect, FaultError, FaultOp,
+};
 use cntryl_midge_durability::lease::LeaderStore;
-use cntryl_midge_core::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
 use cntryl_midge_durability::wal::format::{ChainLink, SegmentHeader, HEADER_LEN};
 use cntryl_midge_durability::wal::ledger::SegmentId;
 use std::collections::BTreeMap;
@@ -17,10 +19,16 @@ use std::sync::Arc;
 
 mod fenced_ledger;
 
+#[cfg(feature = "internal-testing")]
+mod same_epoch_reservation;
+
 const POWER_LOSS_SEEDS: u64 = 64;
 
 fn wal(device: &CrashDevice) -> Arc<dyn Fs> {
-    cntryl_midge_core::io::subdirectory(Arc::new(device.fs()), cntryl_midge_durability::wal::WAL_DIR)
+    cntryl_midge_core::io::subdirectory(
+        Arc::new(device.fs()),
+        cntryl_midge_durability::wal::WAL_DIR,
+    )
 }
 
 /// [`wal`] as the read-only view [`WalHistory::read`] takes.
@@ -45,10 +53,12 @@ fn open(device: &CrashDevice) -> WalHistory {
 fn should_fence_stale_history_before_successor_wal_effects() {
     // Arrange
     let wal: Arc<dyn Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
-    let leader = Arc::new(cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
-        Arc::clone(&wal),
-        cntryl_midge_durability::lease::LeaseClock::default(),
-    ));
+    let leader = Arc::new(
+        cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
+            Arc::clone(&wal),
+            cntryl_midge_durability::lease::LeaseClock::default(),
+        ),
+    );
     let predecessor = leader.acquire_leadership("predecessor").unwrap();
     let fence = WalHistoryFence::new(
         leader.clone(),
@@ -174,9 +184,10 @@ fn header_of(device: &CrashDevice, id: SegmentId) -> SegmentHeader {
 /// Replay every member strictly and return the sequences applied.
 fn replayed_sequences(device: &CrashDevice, history: &WalHistory) -> Vec<u64> {
     let storage = wal(device);
-    let segments = cntryl_midge_durability::wal::recovery::ReplaySegments::from_ledger(history.ledger(), |id| {
-        FsPath::new(cntryl_midge_durability::wal::segment_file_name(id))
-    });
+    let segments = cntryl_midge_durability::wal::recovery::ReplaySegments::from_ledger(
+        history.ledger(),
+        |id| FsPath::new(cntryl_midge_durability::wal::segment_file_name(id)),
+    );
     let mut memtables = std::collections::HashMap::new();
     cntryl_midge_durability::wal::recovery::streaming::replay_wal_with_options(
         storage.as_ref(),
@@ -222,9 +233,13 @@ fn should_refuse_genesis_when_segment_files_exist_without_ledger() {
     let device = CrashDevice::new();
     let stray = wal(&device);
     stray.create_dir_all(&FsPath::new("")).expect("WAL dir");
-    let (bytes, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(3, 0, ChainLink::GENESIS)
-        .bytes(&put_frame(3, 1))
-        .seal();
+    let (bytes, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
+        3,
+        0,
+        ChainLink::GENESIS,
+    )
+    .bytes(&put_frame(3, 1))
+    .seal();
     stray
         .open(
             &FsPath::new(name(3)),
@@ -347,8 +362,10 @@ fn should_link_each_segment_to_the_footer_before_it_when_rotating() {
         assert_eq!(header.prev, sealed.link, "segment {id}");
         assert_eq!(header.first_seq, sealed.link.last_seq + 1, "segment {id}");
         assert_eq!(
-            cntryl_midge_durability::wal::format::segment::footer_link(&device.files()[&key(id - 1)])
-                .expect("footer"),
+            cntryl_midge_durability::wal::format::segment::footer_link(
+                &device.files()[&key(id - 1)]
+            )
+            .expect("footer"),
             Some(sealed.link)
         );
     }
@@ -544,9 +561,11 @@ fn should_keep_recovered_tail_when_power_is_lost_after_its_footer_append() {
             Some(bytes::Bytes::from(incompressible(3 * 4096))),
             43,
         );
-        let payload = cntryl_midge_durability::wal::encoding::encode(&record).expect("encode record");
+        let payload =
+            cntryl_midge_durability::wal::encoding::encode(&record).expect("encode record");
         let mut frame = Vec::new();
-        cntryl_midge_durability::wal::frame::append_frame(&mut frame, &payload).expect("frame record");
+        cntryl_midge_durability::wal::frame::append_frame(&mut frame, &payload)
+            .expect("frame record");
         let mut file = wal
             .open(
                 &FsPath::new(name(4)),

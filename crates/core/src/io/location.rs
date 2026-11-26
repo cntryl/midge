@@ -6,19 +6,19 @@ use bytes::Bytes;
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub(crate) struct FsLocation {
+pub struct FsLocation {
     fs: Arc<dyn Fs>,
     path: FsPath,
 }
 
 impl FsLocation {
-    pub(crate) fn new(fs: Arc<dyn Fs>, path: FsPath) -> Self {
+    pub fn new(fs: Arc<dyn Fs>, path: FsPath) -> Self {
         Self { fs, path }
     }
 
     /// The host file at `path`, through a root at its parent directory.
-    #[cfg(test)]
-    pub(crate) fn host_file(path: &std::path::Path) -> Self {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn host_file(path: &std::path::Path) -> Self {
         let parent = path.parent().expect("host file has a parent directory");
         let name = path.file_name().expect("host file has a name");
         Self::new(
@@ -27,11 +27,11 @@ impl FsLocation {
         )
     }
 
-    pub(crate) fn read_all(&self) -> FsResult<Bytes> {
+    pub fn read_all(&self) -> FsResult<Bytes> {
         super::read_all(self.fs.as_ref(), &self.path)
     }
 
-    pub(crate) fn read_exact_size(&self, expected: u64) -> FsResult<Bytes> {
+    pub fn read_exact_size(&self, expected: u64) -> FsResult<Bytes> {
         let file = self.fs.open(&self.path, super::OpenOptions::READ_ONLY)?;
         if file.len()? != expected {
             return Err(super::FsError::Corruption(
@@ -47,7 +47,7 @@ impl FsLocation {
         Ok(bytes)
     }
 
-    pub(crate) fn len(&self) -> FsResult<u64> {
+    pub fn len(&self) -> FsResult<u64> {
         self.fs.metadata(&self.path).map(|metadata| metadata.len)
     }
 }

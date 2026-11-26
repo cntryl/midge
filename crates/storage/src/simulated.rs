@@ -135,13 +135,13 @@ pub fn build_simulated_cloud_stores(
 }
 
 /// Root of the host directory that simulates cloud storage under `db_path`.
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 pub fn simulated_cloud_root(db_path: &std::path::Path) -> PathBuf {
     db_path.join(SIMULATED_CLOUD_DIR)
 }
 
 /// The simulated-cloud stores over the host directory under `db_path`.
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 pub fn host_simulated_cloud(
     db_path: &std::path::Path,
     local_storage_budget_bytes: Option<u64>,

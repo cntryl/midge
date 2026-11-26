@@ -156,7 +156,10 @@ impl WalCoordinator {
         event_loop: &mut EventLoop,
         request: SpilledTransactionRequest,
     ) -> cntryl_midge_core::common::MidgeResult<
-        Option<(SpilledTransactionRequest, Vec<cntryl_midge_core::types::ColumnFamilyId>)>,
+        Option<(
+            SpilledTransactionRequest,
+            Vec<cntryl_midge_core::types::ColumnFamilyId>,
+        )>,
     > {
         let touched_cfs = request.source.touched_cf_ids()?;
         event_loop.ensure_l0_write_admission(&touched_cfs)?;

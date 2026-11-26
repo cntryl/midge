@@ -71,23 +71,28 @@ pub mod cloud;
 pub mod config;
 pub mod filesystem;
 pub mod hybrid;
+pub use hybrid::HybridStorage;
 pub mod inventory;
 pub mod providers;
 pub mod remote_block_cache;
-#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub mod remote_sst;
 pub mod simulated;
 mod write_receipt;
-pub(crate) use write_receipt::FILE_UPLOAD_PART_BYTES;
+pub use write_receipt::FILE_UPLOAD_PART_BYTES;
 pub use write_receipt::{StorageFileUpload, StorageWriteReceipt, WriteReceiptCallback};
 #[cfg(feature = "internal-testing")]
 pub mod object_store;
-pub(crate) mod retained_callback;
+pub mod retained_callback;
 #[cfg(feature = "internal-testing")]
 pub mod simulation {
     pub use crate::object_store::*;
 }
-#[cfg(any(test, feature = "internal-testing"))]
+#[cfg(any(test, feature = "internal-testing", feature = "sqrzl-tests"))]
 pub mod test_support;
+
+#[cfg(test)]
+mod backend_contract_tests;
 // ARCHITECTURE: CLOUD-DURABLE STORAGE RULES
 //
 // Storage subsystem must support CloudAsync durability for WAL and SST.
@@ -154,7 +159,7 @@ pub enum StoragePrecondition {
 }
 
 impl StoragePrecondition {
-    pub(crate) fn headers(&self) -> Result<Vec<(String, String)>, StorageError> {
+    pub fn headers(&self) -> Result<Vec<(String, String)>, StorageError> {
         match self {
             Self::None => Ok(Vec::new()),
             Self::IfAbsent => Ok(vec![("If-None-Match".into(), "*".into())]),
@@ -295,7 +300,7 @@ pub(crate) fn conditional_object_identity<'a>(
 }
 
 impl StorageObjectMetadata {
-    pub(crate) fn same_version(&self, other: &Self) -> bool {
+    pub fn same_version(&self, other: &Self) -> bool {
         let identity = conditional_object_identity(&self.etag, self.generation.as_deref());
         self.size == other.size
             && identity.is_some()
@@ -454,7 +459,7 @@ impl StorageError {
 
     /// Local I/O failure.
     #[must_use]
-    pub(crate) fn io(message: impl std::fmt::Display) -> Self {
+    pub fn io(message: impl std::fmt::Display) -> Self {
         Self::new(StorageErrorKind::Io, message)
     }
 
@@ -466,19 +471,19 @@ impl StorageError {
 
     /// Deadline exceeded; the operation's effect is unknown.
     #[must_use]
-    pub(crate) fn timeout(message: impl std::fmt::Display) -> Self {
+    pub fn timeout(message: impl std::fmt::Display) -> Self {
         Self::new(StorageErrorKind::Timeout, message)
     }
 
     /// Object absent.
     #[must_use]
-    pub(crate) fn not_found(message: impl std::fmt::Display) -> Self {
+    pub fn not_found(message: impl std::fmt::Display) -> Self {
         Self::new(StorageErrorKind::NotFound, message)
     }
 
     /// Conditional write or delete lost its race.
     #[must_use]
-    pub(crate) fn precondition_failed(message: impl std::fmt::Display) -> Self {
+    pub fn precondition_failed(message: impl std::fmt::Display) -> Self {
         Self::new(StorageErrorKind::PreconditionFailed, message)
     }
 }
@@ -549,13 +554,13 @@ pub enum StorageOutcome<T: Clone> {
 
 impl<T: Clone> StorageOutcome<T> {
     /// Check if this is an Ok outcome
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn is_ok(&self) -> bool {
         matches!(self, StorageOutcome::Ok(_))
     }
 
     /// Check if this is an Err outcome
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn is_err(&self) -> bool {
         matches!(self, StorageOutcome::Err(_))
     }
@@ -566,7 +571,7 @@ pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 
 /// Build a timeout failure for the storage callback boundary.
 #[must_use]
-pub(crate) fn storage_timeout_error(message: impl std::fmt::Display) -> StorageError {
+pub fn storage_timeout_error(message: impl std::fmt::Display) -> StorageError {
     StorageError::timeout(message)
 }
 
@@ -578,7 +583,7 @@ pub type MetadataReadCallback =
 pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageError>>;
 
 /// Preserve the typed request's deadline and reservation around a versioned read.
-pub(crate) fn dispatch_metadata_read_request(
+pub fn dispatch_metadata_read_request(
     request: StorageRequest,
     callback: MetadataReadCallback,
     submit: impl FnOnce(&str, std::time::Duration, MetadataReadCallback),
@@ -611,7 +616,7 @@ pub(crate) fn dispatch_metadata_read_request(
 }
 
 /// Preserve deadline, precondition rejection and reservation for either HEAD verb.
-pub(crate) fn dispatch_head_request(
+pub fn dispatch_head_request(
     request: StorageRequest,
     callback: StorageCallback,
     submit: impl FnOnce(&str, std::time::Duration, StorageCallback),
@@ -655,7 +660,7 @@ pub(crate) const CONSERVATIVE_WRITE_PAYLOAD_COPIES: usize = 4;
 /// Upload payload copies for a native provider whose request owns the
 /// submitted body as shared `Bytes`, which its retries clone by handle: that
 /// body plus one allowance for preparation and ownership transfer.
-pub(crate) const SHARED_BODY_WRITE_PAYLOAD_COPIES: usize = 2;
+pub const SHARED_BODY_WRITE_PAYLOAD_COPIES: usize = 2;
 
 /// Version-aware object I/O required by engine persistence paths.
 ///

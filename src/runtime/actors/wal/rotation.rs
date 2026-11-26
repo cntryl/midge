@@ -24,12 +24,12 @@
 // open). A failed ledger write may still have become durable, so it counts
 // as sealing segment N.
 use super::{WalActor, WalRotationReceipt, WalTransitionOperation};
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
-use cntryl_midge_core::io::Fs;
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_history::PreparedRotation;
 use crate::runtime::wal_transition::WalSealTicket;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::Fs;
 use cntryl_midge_durability::wal::ledger::SegmentId;
 use cntryl_midge_durability::wal::FsWalFactoryIo;
 use std::sync::Arc;
@@ -516,11 +516,12 @@ impl WalActor {
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
     fn before_segment_create_boundary() -> MidgeResult<()> {
-        cntryl_midge_core::failpoints::fail_point!("midge::wal::inject_fail_before_segment_create", |_| Err(
-            MidgeError::Internal(
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::inject_fail_before_segment_create",
+            |_| Err(MidgeError::Internal(
                 "failpoint: WAL rotation failed before creating the next segment".to_string(),
-            )
-        ));
+            ))
+        );
         Ok(())
     }
 

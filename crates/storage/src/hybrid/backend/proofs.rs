@@ -14,17 +14,17 @@ use cntryl_midge_core::OperationDeadline;
 /// that the bytes it returned still match the provider identity observed by
 /// the metadata-bearing GET. Subsequent HEAD checks reject observed changes.
 #[derive(Clone, Debug)]
-pub(crate) struct RemoteObjectProof {
+pub struct RemoteObjectProof {
     pub(super) bytes: Vec<u8>,
     pub(super) metadata: StorageObjectMetadata,
 }
 
 impl RemoteObjectProof {
-    pub(crate) fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    pub(crate) fn metadata(&self) -> &StorageObjectMetadata {
+    pub fn metadata(&self) -> &StorageObjectMetadata {
         &self.metadata
     }
 }
@@ -32,14 +32,14 @@ impl RemoteObjectProof {
 /// A format-neutral object identity that must still hold immediately before a
 /// conditional delete is issued.
 #[derive(Clone)]
-pub(crate) struct GuardedObjectProof {
+pub struct GuardedObjectProof {
     pub(super) backend: Arc<dyn StorageBackend>,
     key: String,
     metadata: StorageObjectMetadata,
 }
 
 impl GuardedObjectProof {
-    pub(crate) fn range_identity(
+    pub fn range_identity(
         backend: Arc<dyn StorageBackend>,
         key: String,
         metadata: StorageObjectMetadata,
@@ -81,13 +81,13 @@ struct PendingDelete {
 
 /// Bounded cleanup ownership is reserved before the caller retires authority.
 /// Dropping an uncommitted admission releases its capacity without deleting.
-pub(crate) struct AdmittedObjectDeletes<'a> {
+pub struct AdmittedObjectDeletes<'a> {
     storage: &'a HybridStorage,
     targets: Option<Vec<PreparedConditionalDelete>>,
 }
 
 impl AdmittedObjectDeletes<'_> {
-    pub(crate) fn schedule(mut self) {
+    pub fn schedule(mut self) {
         let targets = self.targets.take().expect("admission is consumed once");
         {
             let mut workers = self.storage.prune_workers.lock();
@@ -125,20 +125,20 @@ impl PruneWorkerRegistry {
 }
 
 impl HybridStorage {
-    pub(crate) fn remote_sst_backend(&self) -> Arc<dyn StorageBackend> {
+    pub fn remote_sst_backend(&self) -> Arc<dyn StorageBackend> {
         Arc::clone(&self.stores.sst)
     }
 
-    pub(crate) fn storage_io_timeout(&self) -> Duration {
+    pub fn storage_io_timeout(&self) -> Duration {
         self.callback_timeout
     }
 
-    pub(crate) fn ephemeral_sst_cache_enabled(&self) -> bool {
+    pub fn ephemeral_sst_cache_enabled(&self) -> bool {
         self.ephemeral_sst_cache
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub(crate) fn remote_range_metadata_optional_within(
+    pub fn remote_range_metadata_optional_within(
         &self,
         key: &str,
         deadline: &OperationDeadline,
@@ -157,7 +157,7 @@ impl HybridStorage {
         }
     }
 
-    pub(crate) fn verify_remote_object_guards_within(
+    pub fn verify_remote_object_guards_within(
         &self,
         guards: &[GuardedObjectProof],
         deadline: &OperationDeadline,
@@ -171,7 +171,7 @@ impl HybridStorage {
     /// The joined failed compute task proves that this reserved immutable
     /// identity was never published. Preserve its original provider token;
     /// a fresh observation must never authorize deleting a replacement.
-    pub(crate) fn delete_unpublished_object_within(
+    pub fn delete_unpublished_object_within(
         &self,
         proof: &GuardedObjectProof,
         deadline: &OperationDeadline,
@@ -208,7 +208,7 @@ impl HybridStorage {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(super) fn stable_object_proof_from_backend(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
@@ -277,8 +277,8 @@ impl HybridStorage {
     /// Read one cloud object together with a stable provider identity. The
     /// runtime may validate the bytes as WAL, SST, or metadata without giving
     /// those formats to the storage layer.
-    #[cfg(test)]
-    pub(crate) fn remote_object_proof(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn remote_object_proof(
         &self,
         key: &str,
     ) -> cntryl_midge_core::MidgeResult<RemoteObjectProof> {
@@ -296,7 +296,7 @@ impl HybridStorage {
     /// runtime request can chain several proofs. Clamping each call to what the
     /// deadline still allows keeps the whole sequence inside the caller's
     /// budget instead of letting every call restart a fresh `callback_timeout`.
-    pub(crate) fn remote_object_proof_within(
+    pub fn remote_object_proof_within(
         &self,
         key: &str,
         deadline: &OperationDeadline,
@@ -346,15 +346,15 @@ impl HybridStorage {
 
     /// Return a stable proof when the remote key exists, or `None` for a
     /// provider-confirmed missing key.
-    #[cfg(test)]
-    pub(crate) fn remote_object_proof_optional(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn remote_object_proof_optional(
         &self,
         key: &str,
     ) -> cntryl_midge_core::MidgeResult<Option<RemoteObjectProof>> {
         self.remote_object_proof_optional_within(key, &OperationDeadline::unbounded())
     }
 
-    pub(crate) fn remote_object_proof_optional_within(
+    pub fn remote_object_proof_optional_within(
         &self,
         key: &str,
         deadline: &OperationDeadline,
@@ -401,8 +401,8 @@ impl HybridStorage {
     /// Conditional-write failure paired with whether the provider may still
     /// apply the mutation. Callers recover from a definite non-commit; an
     /// ambiguous one must be resolved against durable state instead.
-    #[cfg(test)]
-    pub(crate) fn compare_exchange_remote_object(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn compare_exchange_remote_object(
         &self,
         key: &str,
         expected: Option<&StorageObjectMetadata>,
@@ -420,7 +420,7 @@ impl HybridStorage {
     ///
     /// The CAS itself is one round trip, but the readback proof that follows is
     /// three more, so both participate in the deadline.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn compare_exchange_remote_object_within(
         &self,
         key: &str,
@@ -435,7 +435,7 @@ impl HybridStorage {
     /// Conditional remote write that reports whether a failure may still
     /// commit at the provider. Recovery paths need that distinction, and
     /// deriving it from message text is silently fragile.
-    pub(crate) fn compare_exchange_remote_object_phased(
+    pub fn compare_exchange_remote_object_phased(
         &self,
         key: &str,
         expected: Option<&StorageObjectMetadata>,
@@ -602,7 +602,7 @@ impl HybridStorage {
     /// Reserve bounded cleanup ownership before the caller retires authority.
     /// The original observed identity survives worker admission and transport
     /// failures; each later attempt rechecks it before conditional deletion.
-    pub(crate) fn admit_remote_deletes_by_identity(
+    pub fn admit_remote_deletes_by_identity(
         &self,
         targets: Vec<(u64, String, StorageObjectMetadata)>,
     ) -> Result<AdmittedObjectDeletes<'_>, crate::StorageError> {
@@ -649,8 +649,8 @@ impl HybridStorage {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn delete_remote_objects_by_identity(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn delete_remote_objects_by_identity(
         &self,
         targets: Vec<(u64, String, StorageObjectMetadata)>,
     ) -> Result<(), crate::StorageError> {
@@ -891,7 +891,7 @@ impl HybridStorage {
 
     /// Delete only the observed object version. The provider precondition
     /// closes the identity/delete race after the caller retires authority.
-    pub(crate) fn delete_remote_object_by_identity_blocking_within(
+    pub fn delete_remote_object_by_identity_blocking_within(
         &self,
         key: &str,
         metadata: &StorageObjectMetadata,
@@ -944,7 +944,7 @@ impl HybridStorage {
     ///
     /// Each worker may issue a conditional remote delete, so shutdown must
     /// wait for it while the current lease/fencing epoch remains valid.
-    pub(crate) fn shutdown_background_workers(&self) {
+    pub fn shutdown_background_workers(&self) {
         let handles = {
             let mut workers = self.prune_workers.lock();
             workers.shutting_down = true;

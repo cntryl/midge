@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 struct RetainedEvidence {
     local_files: BTreeSet<String>,
     has_intent: bool,
-    durable_intents: MidgeResult<Vec<crate::runtime::IntentLogEntry>>,
+    durable_intents: MidgeResult<Vec<cntryl_midge_durability::metadata::intent::IntentLogEntry>>,
     no_final_phase: bool,
     rows: MidgeResult<Vec<(Bytes, KeyState)>>,
     cas: Vec<CasEvidence>,
@@ -54,7 +54,10 @@ impl RecoveryInputs {
         )?;
         let root = cntryl_midge_core::io::real::test_root(&self.db_path);
         let history = crate::runtime::wal_history::WalHistory::open(
-            cntryl_midge_core::io::subdirectory(Arc::clone(&root), cntryl_midge_durability::wal::WAL_DIR),
+            cntryl_midge_core::io::subdirectory(
+                Arc::clone(&root),
+                cntryl_midge_durability::wal::WAL_DIR,
+            ),
             1,
             0,
         )?;
@@ -71,7 +74,10 @@ impl RecoveryInputs {
         let before_replay = recovered.intent_log.clone();
         let remote_fs: Arc<dyn cntryl_midge_core::io::Fs> =
             Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
-                Arc::new(cntryl_midge_core::io::RealFs::new(&self.db_path).map_err(FsError::into_midge)?),
+                Arc::new(
+                    cntryl_midge_core::io::RealFs::new(&self.db_path)
+                        .map_err(FsError::into_midge)?,
+                ),
                 Arc::clone(&self.remote),
                 PROVIDER_CAP,
             ));
@@ -91,7 +97,7 @@ impl RecoveryInputs {
         assert_matching_intent(&before_replay, &self.inputs, &self.outputs);
         assert!(recovered.intent_log.is_empty());
         assert!(
-            crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+            cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
                 &recovered.fs,
                 cntryl_midge_durability::RecoveryPolicy::Strict,
             )?
@@ -167,7 +173,7 @@ fn capture_retained_evidence(fixture: &BudgetFixture) -> RetainedEvidence {
             .el
             .state
             .has_compaction_publication_intent(&names, &fixture.outputs),
-        durable_intents: crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+        durable_intents: cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
             &fixture.el.state.fs,
             cntryl_midge_durability::RecoveryPolicy::Strict,
         ),
@@ -203,7 +209,7 @@ fn assert_retained_remote_bytes(
 }
 
 fn assert_matching_intent(
-    intents: &[crate::runtime::IntentLogEntry],
+    intents: &[cntryl_midge_durability::metadata::intent::IntentLogEntry],
     inputs: &[(String, Vec<u8>)],
     outputs: &[String],
 ) {
@@ -213,8 +219,8 @@ fn assert_matching_intent(
         .collect::<BTreeSet<_>>();
     assert!(intents.iter().any(|intent| matches!(
         intent,
-        crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: crate::runtime::PublicationPhase::ManifestPublished,
+        cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+            phase: cntryl_midge_durability::metadata::intent::PublicationPhase::ManifestPublished,
             cf_id: 0,
             removed,
             added,
@@ -225,8 +231,8 @@ fn assert_matching_intent(
 }
 
 fn descriptor_generation(bytes: &[u8]) -> cntryl_midge_durability::lease::CloudMetadataGeneration {
-    let pointer: serde_json::Value =
-        cntryl_midge_durability::metadata::codec::decode(4, bytes).expect("actual bounded binary metadata pointer");
+    let pointer: serde_json::Value = cntryl_midge_durability::metadata::codec::decode(4, bytes)
+        .expect("actual bounded binary metadata pointer");
     serde_json::from_value::<Option<cntryl_midge_durability::lease::CloudMetadataGeneration>>(
         pointer["committed"].clone(),
     )
@@ -256,8 +262,10 @@ fn assert_committed_cas(
         write.lease_before, write.lease_after,
         "metadata publication leaves every exact lease byte unchanged"
     );
-    let before: serde_json::Value = cntryl_midge_durability::metadata::codec::decode(4, &write.before)?;
-    let after: serde_json::Value = cntryl_midge_durability::metadata::codec::decode(4, &write.after)?;
+    let before: serde_json::Value =
+        cntryl_midge_durability::metadata::codec::decode(4, &write.before)?;
+    let after: serde_json::Value =
+        cntryl_midge_durability::metadata::codec::decode(4, &write.after)?;
     for field in ["writer_epoch", "holder_id", "owner_token"] {
         assert_eq!(before[field], after[field]);
     }
@@ -272,7 +280,8 @@ fn assert_committed_cas(
         actual,
         cntryl_midge_durability::lease::CloudMetadataHead::Committed(after.clone())
     );
-    let scope = cntryl_midge_core::common::DeadlineScope::new(OperationDeadline::from_budget(FIXTURE_WAIT));
+    let scope =
+        cntryl_midge_core::common::DeadlineScope::new(OperationDeadline::from_budget(FIXTURE_WAIT));
     for generation in [&before, &after] {
         crate::runtime::cloud_startup::CloudStartupRecovery::read_committed_cloud_metadata_within(
             &recovery.cloud,

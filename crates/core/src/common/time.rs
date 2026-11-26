@@ -10,7 +10,7 @@ pub trait Clock: Send + Sync {
 }
 
 #[derive(Clone)]
-pub(crate) struct ClockHandle(pub Arc<ObservedClock>);
+pub struct ClockHandle(pub Arc<ObservedClock>);
 
 impl std::fmt::Debug for ClockHandle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

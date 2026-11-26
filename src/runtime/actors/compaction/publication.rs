@@ -71,7 +71,10 @@ pub(crate) struct CompactionPublishCompletion {
 }
 
 enum CompactionPublishWorkerTask {
-    Publish(Box<CompactionPublishTask>, cntryl_midge_core::failpoints::WorkerGate),
+    Publish(
+        Box<CompactionPublishTask>,
+        cntryl_midge_core::failpoints::WorkerGate,
+    ),
     Shutdown,
 }
 
@@ -320,7 +323,9 @@ fn verify_or_stage_outputs(
     let Some(hybrid) = &task.hybrid_storage else {
         return Ok(());
     };
-    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(task.publication_memory_limit);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+        task.publication_memory_limit,
+    );
     let mut proofs = Vec::new();
     for output in &task.outputs {
         if let Some(proof) = output.proof.clone() {

@@ -187,7 +187,12 @@ impl InventoryCloudBackend {
             mode,
             expected_sizes: files
                 .iter()
-                .map(|file| (cntryl_midge_core::cloud_layout::object_key(&file.name), file.size_bytes))
+                .map(|file| {
+                    (
+                        cntryl_midge_core::cloud_layout::object_key(&file.name),
+                        file.size_bytes,
+                    )
+                })
                 .collect(),
             completed_keys: Mutex::new(std::collections::HashSet::new()),
             observations,
@@ -218,25 +223,26 @@ impl InventoryCloudBackend {
             ),
             sender,
         );
-        let result: CloudOutcome<cntryl_midge_storage::cloud::ObjectMetadata> =
-            match receiver.recv_timeout(PROVIDER_TIMEOUT) {
-                Ok(cntryl_midge_storage::StorageEvent::HeadComplete {
-                    key: actual,
-                    result,
-                }) if actual == key => match result {
-                    cntryl_midge_storage::StorageOutcome::Ok(metadata) => Ok(metadata),
-                    cntryl_midge_storage::StorageOutcome::Err(error) => Err(Self::head_error(&error)),
-                },
-                Err(mpsc::RecvTimeoutError::Timeout) => Err(CloudError::Timeout(
-                    "fixture HEAD callback timed out".into(),
-                )),
-                Err(mpsc::RecvTimeoutError::Disconnected) => Err(CloudError::Transport(
-                    "fixture HEAD callback disconnected".into(),
-                )),
-                other => Err(CloudError::Protocol(format!(
-                    "fixture HEAD callback: {other:?}"
-                ))),
-            };
+        let result: CloudOutcome<cntryl_midge_storage::cloud::ObjectMetadata> = match receiver
+            .recv_timeout(PROVIDER_TIMEOUT)
+        {
+            Ok(cntryl_midge_storage::StorageEvent::HeadComplete {
+                key: actual,
+                result,
+            }) if actual == key => match result {
+                cntryl_midge_storage::StorageOutcome::Ok(metadata) => Ok(metadata),
+                cntryl_midge_storage::StorageOutcome::Err(error) => Err(Self::head_error(&error)),
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(CloudError::Timeout(
+                "fixture HEAD callback timed out".into(),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(CloudError::Transport(
+                "fixture HEAD callback disconnected".into(),
+            )),
+            other => Err(CloudError::Protocol(format!(
+                "fixture HEAD callback: {other:?}"
+            ))),
+        };
         let expected_size = result.as_ref().ok().map(|metadata| {
             self.expected_sizes
                 .get(key)
@@ -286,7 +292,11 @@ impl cntryl_midge_storage::cloud::CloudReadCapability for InventoryCloudBackend 
         });
     }
 
-    fn submit_get_with_metadata(&self, key: &str, callback: cntryl_midge_storage::cloud::CloudCallback) {
+    fn submit_get_with_metadata(
+        &self,
+        key: &str,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
+    ) {
         let _ = callback.send(cntryl_midge_storage::cloud::CloudEvent::GetWithMetadata {
             key: key.to_string(),
             result: Err(cntryl_midge_storage::cloud::CloudError::Protocol(
@@ -295,7 +305,6 @@ impl cntryl_midge_storage::cloud::CloudReadCapability for InventoryCloudBackend 
         });
     }
 
-    #[cfg(test)]
     fn submit_get_range(
         &self,
         key: &str,

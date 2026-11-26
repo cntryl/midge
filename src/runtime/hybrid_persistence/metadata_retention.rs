@@ -182,7 +182,8 @@ pub(super) fn collect_after_commit(
         for key in page.keys {
             let key = context.cloud.strip_namespace(&key);
             if protected.contains(key)
-                || cntryl_midge_durability::metadata::cloud_manifest::validate_key(key, ordinal).is_err()
+                || cntryl_midge_durability::metadata::cloud_manifest::validate_key(key, ordinal)
+                    .is_err()
             {
                 continue;
             }
@@ -294,7 +295,9 @@ fn reclaim_candidate(
     let Ok(metadata) = range_identity(context, key) else {
         return Ok(false);
     };
-    if metadata.size == 0 || metadata.size > cntryl_midge_durability::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+    if metadata.size == 0
+        || metadata.size > cntryl_midge_durability::metadata::cloud_manifest::MAX_CHAIN_BYTES
+    {
         return Ok(false);
     }
     let Ok(bytes) = read_identity(context, key, &metadata) else {

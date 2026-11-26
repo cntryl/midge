@@ -65,10 +65,12 @@ impl EventLoop {
         // A flush frontier at or past a partly applied unit's commit would
         // make restart skip the unit; only replay can apply it whole.
         if let Some(commit_seq) = cf.partially_applied_commit() {
-            return Err(cntryl_midge_core::common::MidgeError::RecoveryFailed(format!(
-                "column family {cf_id} holds a partly applied transaction committed at \
+            return Err(cntryl_midge_core::common::MidgeError::RecoveryFailed(
+                format!(
+                    "column family {cf_id} holds a partly applied transaction committed at \
                  sequence {commit_seq}; restart before flushing it"
-            )));
+                ),
+            ));
         }
         if self.state.is_immutable_memtable_queue_full(cf_id) {
             self.state.diagnostics.record(|m| {
@@ -214,10 +216,11 @@ impl EventLoop {
             return;
         }
 
-        let staging_path = std::path::Path::new(cntryl_midge_table::sst::fs::FLUSH_STAGING_DIR).join(format!(
-            "{}-{}.sst",
-            identity.writer_epoch, identity.flush_id
-        ));
+        let staging_path = std::path::Path::new(cntryl_midge_table::sst::fs::FLUSH_STAGING_DIR)
+            .join(format!(
+                "{}-{}.sst",
+                identity.writer_epoch, identity.flush_id
+            ));
         if let Err(error) = self.actors.flush_actor.submit_build(
             identity,
             Arc::clone(&flush.memtable),

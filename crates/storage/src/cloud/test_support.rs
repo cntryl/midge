@@ -1,16 +1,16 @@
 //! Shared forwarding for test backends that override selected cloud operations.
 //! Fault-injecting methods stay explicit in each wrapper.
 
-#[cfg(all(test, feature = "cloud-all"))]
-pub(crate) mod native_http;
+#[cfg(all(any(test, feature = "internal-testing"), feature = "cloud-all"))]
+pub mod native_http;
 
 /// Explicit delegate for test doubles that intentionally do not model a core
 /// provider operation. Production backends cannot opt into these fallbacks:
 /// every core operation remains required by [`CloudBackend`].
-pub(crate) struct UnsupportedCloudBackend;
+pub struct UnsupportedCloudBackend;
 
 impl UnsupportedCloudBackend {
-    pub(crate) fn submit_get(key: &str, callback: &crate::cloud::CloudCallback) {
+    pub fn submit_get(key: &str, callback: &crate::cloud::CloudCallback) {
         let _ = callback.send(crate::cloud::CloudEvent::Get {
             key: key.to_string(),
             result: Err(crate::cloud::CloudError::Protocol(
@@ -19,7 +19,7 @@ impl UnsupportedCloudBackend {
         });
     }
 
-    pub(crate) fn submit_get_with_metadata(key: &str, callback: &crate::cloud::CloudCallback) {
+    pub fn submit_get_with_metadata(key: &str, callback: &crate::cloud::CloudCallback) {
         let _ = callback.send(crate::cloud::CloudEvent::GetWithMetadata {
             key: key.to_string(),
             result: Err(crate::cloud::CloudError::Protocol(
@@ -28,7 +28,7 @@ impl UnsupportedCloudBackend {
         });
     }
 
-    pub(crate) fn submit_delete(key: &str, callback: &crate::cloud::CloudCallback) {
+    pub fn submit_delete(key: &str, callback: &crate::cloud::CloudCallback) {
         let _ = callback.send(crate::cloud::CloudEvent::Delete {
             key: key.to_string(),
             result: Err(crate::cloud::CloudError::Protocol(
@@ -37,7 +37,7 @@ impl UnsupportedCloudBackend {
         });
     }
 
-    pub(crate) fn submit_list(prefix: &str, callback: &crate::cloud::CloudCallback) {
+    pub fn submit_list(prefix: &str, callback: &crate::cloud::CloudCallback) {
         let _ = callback.send(crate::cloud::CloudEvent::List {
             prefix: prefix.to_string(),
             result: Err(crate::cloud::CloudError::Protocol(
@@ -46,7 +46,7 @@ impl UnsupportedCloudBackend {
         });
     }
 
-    pub(crate) fn submit_head(key: &str, callback: &crate::cloud::CloudCallback) {
+    pub fn submit_head(key: &str, callback: &crate::cloud::CloudCallback) {
         let _ = callback.send(crate::cloud::CloudEvent::Head {
             key: key.to_string(),
             result: Err(crate::cloud::CloudError::Protocol(
@@ -56,6 +56,7 @@ impl UnsupportedCloudBackend {
     }
 }
 
+#[macro_export]
 macro_rules! forward_cloud_backend {
     ($inner:ident; $($method:ident),+ $(,)?) => {
         $($crate::cloud::forward_cloud_backend!(@method $inner, $method);)+
@@ -104,8 +105,9 @@ macro_rules! forward_cloud_backend {
     };
 }
 
-pub(crate) use forward_cloud_backend;
+pub use crate::forward_cloud_backend;
 
+#[macro_export]
 macro_rules! unsupported_cloud_backend {
     ($($method:ident),+ $(,)?) => {
         $($crate::cloud::unsupported_cloud_backend!(@method $method);)+
@@ -137,4 +139,4 @@ macro_rules! unsupported_cloud_backend {
     };
 }
 
-pub(crate) use unsupported_cloud_backend;
+pub use crate::unsupported_cloud_backend;

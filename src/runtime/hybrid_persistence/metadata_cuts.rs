@@ -5,9 +5,11 @@ use super::metadata_snapshot::{
     capture_local_metadata, validate_manifest_successor, MetadataMirrorCache,
 };
 use super::{decode_generation_manifest, CloudMetadataMirrorContext};
-use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
-use cntryl_midge_durability::lease::{CloudMetadataGeneration, CloudMetadataHead, LeaseError, SharedGenerationId};
 use crate::runtime::CapturedMetadataCut;
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::{
+    CloudMetadataGeneration, CloudMetadataHead, LeaseError, SharedGenerationId,
+};
 use std::collections::BTreeMap;
 
 #[cfg(test)]
@@ -17,7 +19,8 @@ struct SelectedCut {
     generation: Option<CloudMetadataGeneration>,
     cache: Option<MetadataMirrorCache>,
     bodies: Option<BTreeMap<String, Vec<u8>>>,
-    _memory: Option<std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
+    _memory:
+        Option<std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
     _decode_memory: Option<cntryl_midge_core::common::resource_budget::ResourceReservation>,
 }
 
@@ -299,11 +302,9 @@ fn read_format10_cut_proof(
     bodies: &BTreeMap<String, Vec<u8>>,
     memory: &std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>,
 ) -> MidgeResult<Option<crate::runtime::MetadataCutProof>> {
-    let Some(object) = generation
-        .objects
-        .iter()
-        .find(|object| object.file_name == cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF)
-    else {
+    let Some(object) = generation.objects.iter().find(|object| {
+        object.file_name == cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF
+    }) else {
         return Ok(None);
     };
     if object.len > cntryl_midge_durability::metadata::files::MAX_CLOUD_CUT_PROOF_BYTES as u64 {
@@ -402,7 +403,9 @@ fn stage_cut(
             Some(cut),
         )?
     };
-    cntryl_midge_core::failpoints::fail_point!("midge::cloud::after_metadata_chain_upload_before_pointer_cas");
+    cntryl_midge_core::failpoints::fail_point!(
+        "midge::cloud::after_metadata_chain_upload_before_pointer_cas"
+    );
     Ok((
         CloudMetadataGeneration {
             id,

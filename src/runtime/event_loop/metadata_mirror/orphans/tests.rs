@@ -99,12 +99,12 @@ fn should_retain_every_captured_source_before_orphan_deletion() -> MidgeResult<(
     event_loop
         .state
         .register_snapshot(943, 0, vec![pinned.clone()]);
-    event_loop
-        .state
-        .append_intent(crate::runtime::IntentLogEntry::CompactionPlanned {
+    event_loop.state.append_intent(
+        cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPlanned {
             input_files: vec![intent.clone()],
             output_level: 2,
-        })?;
+        },
+    )?;
     let mut plan = crate::compaction::CompactionPlan::new(0, 1, 2).with_output_seq(13);
     plan.input_files = vec![input.clone()];
     event_loop
@@ -139,8 +139,11 @@ fn should_retain_every_captured_source_before_orphan_deletion() -> MidgeResult<(
     }
     assert!(!exists(&event_loop, &orphan));
     event_loop.state.unregister_snapshot(943);
-    crate::runtime::IntentPersistence::save_with_fs(&event_loop.state.fs, &[])
-        .map_err(MidgeError::Internal)?;
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_with_fs(
+        &event_loop.state.fs,
+        &[],
+    )
+    .map_err(MidgeError::Internal)?;
     event_loop.state.intent_log.clear();
     event_loop
         .actors
@@ -195,23 +198,25 @@ fn should_retain_sst_candidates_without_valid_deletion_proof() -> MidgeResult<()
     for name in [&retired, &foreign_family, "unknown.sst"] {
         put(&event_loop, name);
     }
-    let add = cntryl_midge_durability::metadata::ManifestEdit::AddSst(cntryl_midge_durability::metadata::FileMeta {
-        name: retired.clone(),
-        level: 1,
-        cf_id: 0,
-        sst_seq: 20,
-        size_bytes: 11,
-        content_crc32c: None,
-        ..Default::default()
-    });
+    let add = cntryl_midge_durability::metadata::ManifestEdit::AddSst(
+        cntryl_midge_durability::metadata::FileMeta {
+            name: retired.clone(),
+            level: 1,
+            cf_id: 0,
+            sst_seq: 20,
+            size_bytes: 11,
+            content_crc32c: None,
+            ..Default::default()
+        },
+    );
     let remove = cntryl_midge_durability::metadata::ManifestEdit::RemoveSst {
         name: retired.clone(),
     };
     for edit in [&add, &remove] {
-        let id = event_loop
-            .state
-            .manifest_store
-            .append_for(cntryl_midge_durability::metadata::accounting::Origin::Administration, edit)?;
+        let id = event_loop.state.manifest_store.append_for(
+            cntryl_midge_durability::metadata::accounting::Origin::Administration,
+            edit,
+        )?;
         event_loop.state.manifest.apply_edit(edit)?;
         event_loop.state.manifest.note_applied_journal_edit(id);
     }

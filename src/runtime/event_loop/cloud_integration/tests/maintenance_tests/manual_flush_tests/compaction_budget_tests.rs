@@ -10,11 +10,11 @@
 //! The SST inputs are genuine seeded rows, not public transaction acks.
 //!
 use super::*;
-use cntryl_midge_core::common::OperationDeadline;
-use cntryl_midge_durability::lease::{LeaseGuard, PrimaryLease as _};
 use crate::runtime::actors::compaction::publication::{
     CompactionPublishActor, CompactionPublishPhase,
 };
+use cntryl_midge_core::common::OperationDeadline;
+use cntryl_midge_durability::lease::{LeaseGuard, PrimaryLease as _};
 use cntryl_midge_storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
@@ -147,7 +147,9 @@ impl PhasedMetadataBackend {
                 after_etag: after_metadata.etag,
                 lease_before,
                 lease_after: self
-                    .descriptor(cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+                    .descriptor(
+                        cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY,
+                    )
                     .0,
             });
         }
@@ -321,8 +323,11 @@ impl BudgetFixture {
         }
         el.state.set_compaction_enabled(false);
         el.routing.runtime_response_timeout = CALLER_BUDGET;
-        cntryl_midge_durability::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-            .map_err(MidgeError::Internal)?;
+        cntryl_midge_durability::metadata::ManifestPersistence::save(
+            &el.state.db_path,
+            &el.state.manifest,
+        )
+        .map_err(MidgeError::Internal)?;
         let inputs = el
             .state
             .manifest
@@ -341,14 +346,16 @@ impl BudgetFixture {
             String::new(),
             PROVIDER_CAP,
         ));
-        let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-            cntryl_midge_durability::lease::CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: "compaction-budget".into(),
-            },
-            el.state.db_path.clone(),
-            Arc::clone(&cloud),
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "test".into(),
+                    prefix: "compaction-budget".into(),
+                },
+                el.state.db_path.clone(),
+                Arc::clone(&cloud),
+            ),
+        );
         let token = Arc::clone(&lease)
             .try_acquire()
             .map_err(|error| error.into_validation_error("fixture lease acquisition"))?;
@@ -501,7 +508,8 @@ impl BudgetFixture {
             directory.path(),
             cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
-        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).map_err(MidgeError::Internal)
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path())
+            .map_err(MidgeError::Internal)
     }
 
     fn exact_output_rows(&self) -> MidgeResult<Vec<(Bytes, KeyState)>> {
@@ -574,7 +582,8 @@ impl BudgetFixture {
         // remain unchanged; do not run metadata publication/fairness here.
         let deadline = OperationDeadline::from_budget(FIXTURE_WAIT);
         loop {
-            cntryl_midge_core::common::DeadlineScope::new(deadline).check("post-clear fixture retirement")?;
+            cntryl_midge_core::common::DeadlineScope::new(deadline)
+                .check("post-clear fixture retirement")?;
             self.el
                 .actors
                 .gc_actor

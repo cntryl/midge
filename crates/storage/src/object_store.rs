@@ -783,7 +783,7 @@ impl crate::cloud::CloudReadCapability for SimulatedObjectStore {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         self.submit(
             Operation::RangeRead,

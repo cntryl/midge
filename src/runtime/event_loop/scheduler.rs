@@ -334,7 +334,9 @@ impl EventLoop {
     /// Make a deferred floor exact before a barrier that reads the ledger.
     /// With no deferred floor, including whenever the option is off, nothing
     /// happens.
-    pub(super) fn record_deferred_sync_floor(&mut self) -> cntryl_midge_core::common::MidgeResult<()> {
+    pub(super) fn record_deferred_sync_floor(
+        &mut self,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if !self.actors.wal_actor.has_unrecorded_floor() {
             return Ok(());
         }
@@ -367,8 +369,9 @@ impl EventLoop {
             return;
         }
 
-        let deadline =
-            cntryl_midge_core::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout);
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            self.routing.runtime_response_timeout,
+        );
         let _ = self.retry_gc_within(&deadline);
     }
 

@@ -19,7 +19,9 @@
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_core::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
 use cntryl_midge_durability::lease::LeaderStore;
-use cntryl_midge_durability::wal::format::{holds_no_records, ChainLink, SealedFacts, SegmentHeader, SegmentScan};
+use cntryl_midge_durability::wal::format::{
+    holds_no_records, ChainLink, SealedFacts, SegmentHeader, SegmentScan,
+};
 use cntryl_midge_durability::wal::ledger::{HolderId, LedgerEdit, OpenFacts, SegmentId, WalLedger};
 use cntryl_midge_durability::wal::ledger_store::{LedgerStore, LEDGER_FILE};
 use std::sync::Arc;
@@ -161,7 +163,9 @@ impl std::fmt::Debug for WalHistory {
 }
 
 impl WalHistory {
-    pub(crate) fn ledger_sync_counts(&self) -> cntryl_midge_durability::wal::ledger_store::LedgerSyncSnapshot {
+    pub(crate) fn ledger_sync_counts(
+        &self,
+    ) -> cntryl_midge_durability::wal::ledger_store::LedgerSyncSnapshot {
         self.journal.sync_counts()
     }
     /// The ledger as stored in `wal`, without changing anything: for epoch
@@ -833,7 +837,9 @@ fn keep_aside(wal: &dyn Fs, cut: Option<SegmentId>, dropped: &[SegmentId]) -> Mi
         if wal.exists(&name).map_err(FsError::into_midge)? {
             wal.rename_atomic(&name, &join(&aside, &name.0))
                 .map_err(FsError::into_midge)?;
-            cntryl_midge_core::failpoints::fail_point!("midge::recovery::after_salvage_member_moved");
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::recovery::after_salvage_member_moved"
+            );
         }
     }
     wal.sync_dir(&aside, Durability::Durable)
@@ -855,7 +861,8 @@ fn cut_and_seal(wal: &dyn Fs, cut: SalvageCut) -> MidgeResult<SealedFacts> {
             Some(cut.valid_bytes),
         )?
     };
-    cntryl_midge_core::io::truncate_durably(wal, &path, cut.valid_bytes).map_err(FsError::into_midge)?;
+    cntryl_midge_core::io::truncate_durably(wal, &path, cut.valid_bytes)
+        .map_err(FsError::into_midge)?;
     write_footer(wal, &path, &scan)
 }
 
@@ -1060,5 +1067,7 @@ fn join(dir: &FsPath, leaf: &str) -> FsPath {
 
 #[cfg(test)]
 pub(crate) mod fixture;
+#[cfg(test)]
+mod ledger_chain_tests;
 #[cfg(test)]
 mod tests;

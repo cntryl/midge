@@ -1,7 +1,7 @@
 //! Loop-owned compaction input and publication-range reservations.
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::compaction::strategy::CompactionPurpose;
 use crate::compaction::CompactionPlan;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_durability::metadata::FileMeta;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};

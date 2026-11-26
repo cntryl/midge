@@ -10,7 +10,7 @@ pub(crate) const MAX_SHARED_PREFIX_LEN: usize = 65_535;
 const EXPIRATION_PRESENT: u8 = 0x80;
 const ENTRY_TYPE_MASK: u8 = 0x03;
 
-pub(crate) fn validate_entry_size(key_len: usize, value_len: usize) -> MidgeResult<()> {
+pub fn validate_entry_size(key_len: usize, value_len: usize) -> MidgeResult<()> {
     let (key, value) = checked_lengths(key_len, value_len)?;
     // A complete single-entry block includes worst-case TTL and its restart
     // word/count. Admission cannot depend on a helpful compression prefix.

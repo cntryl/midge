@@ -166,9 +166,13 @@ impl EventLoop {
             .name("midge-metadata-mirror".into())
             .spawn(move || {
                 failpoint_gate.run(|| {
-                    cntryl_midge_core::failpoints::fail_point!("midge::metadata_mirror::before_provider");
+                    cntryl_midge_core::failpoints::fail_point!(
+                        "midge::metadata_mirror::before_provider"
+                    );
                     let outcome = work.run();
-                    cntryl_midge_core::failpoints::fail_point!("midge::metadata_mirror::before_completion");
+                    cntryl_midge_core::failpoints::fail_point!(
+                        "midge::metadata_mirror::before_completion"
+                    );
                     let _ = result_tx.send(outcome);
                     if let Some(storage) = storage {
                         storage.queue_cloud_metadata_mirror_complete(id, epoch);

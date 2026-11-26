@@ -1,6 +1,6 @@
 use super::*;
-use cntryl_midge_durability::lease::{fs_leader_store::FsLeaderStore, LeaderStore};
 use crate::runtime::wal_history::{WalHistory, WalHistoryFence};
+use cntryl_midge_durability::lease::{fs_leader_store::FsLeaderStore, LeaderStore};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FenceCountingFs {
@@ -26,7 +26,10 @@ impl ReadFs for FenceCountingFs {
 }
 
 impl Fs for FenceCountingFs {
-    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
+    fn try_lock_exclusive(
+        &self,
+        path: &FsPath,
+    ) -> FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         let lock = self.inner.try_lock_exclusive(path)?;
         self.locks.fetch_add(1, Ordering::SeqCst);
         Ok(lock)
@@ -154,8 +157,11 @@ fn should_reuse_one_native_fence_when_strict_group_appends_syncs_and_records_his
     );
     let reopened = WalHistory::open_with_fence(wal.clone(), 1, successor.epoch, &successor_fence)?;
     assert_eq!(reopened.ledger().open_member().durable_bytes, Some(durable));
-    let bytes = cntryl_midge_core::io::read_all(wal.as_ref(), &FsPath::new(cntryl_midge_durability::wal::segment_file_name(1)))
-        .map_err(FsError::into_midge)?;
+    let bytes = cntryl_midge_core::io::read_all(
+        wal.as_ref(),
+        &FsPath::new(cntryl_midge_durability::wal::segment_file_name(1)),
+    )
+    .map_err(FsError::into_midge)?;
     let records = cntryl_midge_durability::wal::format::segment::records(&bytes)?;
     assert_eq!(records.len(), 1);
     let batch = cntryl_midge_durability::wal::encoding::decode_txn_batch_payload(
@@ -188,7 +194,8 @@ fn should_fence_strict_actor_when_successor_precedes_native_group_admission() ->
     )?;
     store.acquire_leadership("successor").unwrap();
     let path = FsPath::new(cntryl_midge_durability::wal::segment_file_name(1));
-    let before = cntryl_midge_core::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?;
+    let before =
+        cntryl_midge_core::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?;
 
     // Act
     let rejected = actor.append_prepared_transactions(&mut state, vec![prepared]);
@@ -244,7 +251,8 @@ fn should_remain_retryable_when_native_strict_group_admission_times_out() -> Mid
     });
     ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let path = FsPath::new(cntryl_midge_durability::wal::segment_file_name(1));
-    let before = cntryl_midge_core::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?;
+    let before =
+        cntryl_midge_core::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?;
 
     // Act
     let timed_out = actor.append_prepared_transactions(&mut state, vec![prepared]);

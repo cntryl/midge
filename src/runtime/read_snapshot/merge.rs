@@ -16,8 +16,10 @@ impl ReadSnapshot {
             && candidate_seq == existing_seq
         {
             cntryl_midge_core::types::resolve_same_sequence(
-                cntryl_midge_core::types::VersionContent::from_state(existing).expect("present state"),
-                cntryl_midge_core::types::VersionContent::from_state(candidate).expect("present state"),
+                cntryl_midge_core::types::VersionContent::from_state(existing)
+                    .expect("present state"),
+                cntryl_midge_core::types::VersionContent::from_state(candidate)
+                    .expect("present state"),
             )
             .map_err(|()| {
                 MidgeError::Corruption(format!(

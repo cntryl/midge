@@ -27,7 +27,7 @@ impl HybridStorage {
 }
 
 impl HybridStorage {
-    pub(crate) fn set_flush_headroom(&self, bytes: u64) -> cntryl_midge_core::MidgeResult<()> {
+    pub fn set_flush_headroom(&self, bytes: u64) -> cntryl_midge_core::MidgeResult<()> {
         self.observe_admission(StorageAdmissionKind::FlushHeadroom, bytes, |actor| {
             actor.set_flush_headroom(bytes)
         })
@@ -38,7 +38,7 @@ impl HybridStorage {
             )
         })
     }
-    pub(crate) fn reconcile_startup_scratch_residue(
+    pub fn reconcile_startup_scratch_residue(
         &self,
         bytes: u64,
     ) -> cntryl_midge_core::MidgeResult<()> {
@@ -52,10 +52,7 @@ impl HybridStorage {
         })
     }
 
-    pub(crate) fn admit_local_scratch_bytes(
-        &self,
-        bytes: u64,
-    ) -> cntryl_midge_core::MidgeResult<()> {
+    pub fn admit_local_scratch_bytes(&self, bytes: u64) -> cntryl_midge_core::MidgeResult<()> {
         self.observe_admission(StorageAdmissionKind::TransactionSpill, bytes, |actor| {
             actor.admit_local_scratch_bytes(bytes)
         })
@@ -66,12 +63,12 @@ impl HybridStorage {
         })
     }
 
-    pub(crate) fn release_local_scratch_bytes(&self, bytes: u64) {
+    pub fn release_local_scratch_bytes(&self, bytes: u64) {
         self.budget_actor.lock().release_local_scratch_bytes(bytes);
         self.emit_reservation_result(actor::ReservationResult::Ok);
     }
 
-    pub(crate) fn admit_local_wal_bytes(&self, bytes: u64) -> cntryl_midge_core::MidgeResult<()> {
+    pub fn admit_local_wal_bytes(&self, bytes: u64) -> cntryl_midge_core::MidgeResult<()> {
         let result = self.observe_admission(StorageAdmissionKind::Wal, bytes, |actor| {
             actor.admit_local_wal_bytes(bytes)
         });
@@ -85,14 +82,14 @@ impl HybridStorage {
     }
 
     /// Called only after removing an acknowledged local WAL file.
-    pub(crate) fn release_local_wal_bytes(&self, bytes: u64) {
+    pub fn release_local_wal_bytes(&self, bytes: u64) {
         self.budget_actor.lock().release_local_wal_bytes(bytes);
         self.emit_reservation_result(actor::ReservationResult::Ok);
     }
 
     /// Settle a successful append to its measured physical growth. This is
     /// ordinary accounting and does not emit a backpressure event per write.
-    pub(crate) fn settle_local_wal_admission(&self, admitted: u64, actual: u64) {
+    pub fn settle_local_wal_admission(&self, admitted: u64, actual: u64) {
         self.budget_actor
             .lock()
             .release_local_wal_bytes(admitted.saturating_sub(actual));
@@ -100,7 +97,7 @@ impl HybridStorage {
 
     /// Configure an engine whose reads can fetch missing SST blocks from
     /// cloud storage. Call before starting runtime workers.
-    pub(crate) fn enable_ephemeral_sst_cache(&self, max_local_bytes: u64) {
+    pub fn enable_ephemeral_sst_cache(&self, max_local_bytes: u64) {
         self.budget_actor
             .lock()
             .enable_ephemeral_sst_cache(max_local_bytes);
@@ -110,14 +107,14 @@ impl HybridStorage {
 
     /// Reconcile physical files at startup or after a failed cleanup. Existing
     /// operation reservations remain charged in addition to these bytes.
-    pub(crate) fn reconcile_local_disk_usage(&self, sst_bytes: u64, wal_bytes: u64) {
+    pub fn reconcile_local_disk_usage(&self, sst_bytes: u64, wal_bytes: u64) {
         self.budget_actor
             .lock()
             .reconcile_local_disk_usage(sst_bytes, wal_bytes);
     }
 
     /// Release resident SST bytes only after the runtime confirms deletion.
-    pub(crate) fn release_local_sst_bytes(&self, bytes: u64) {
+    pub fn release_local_sst_bytes(&self, bytes: u64) {
         self.budget_actor.lock().release_local_sst_bytes(bytes);
         self.emit_reservation_result(actor::ReservationResult::Ok);
     }
@@ -177,7 +174,7 @@ impl HybridStorage {
         actor.plan_compaction_with_token(input_sizes)
     }
 
-    pub(crate) fn reserve_compaction_staging_with_token(
+    pub fn reserve_compaction_staging_with_token(
         &self,
         bytes: u64,
     ) -> Result<actor::StorageReservationToken, actor::ReservationResult> {
@@ -234,8 +231,8 @@ impl HybridStorage {
         self.upload_queue.lock().entries.len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn pending_upload_bytes(&self) -> u64 {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn pending_upload_bytes(&self) -> u64 {
         self.upload_queue.lock().pending_bytes
     }
 }

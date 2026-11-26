@@ -58,7 +58,7 @@ pub struct BlockCache {
     /// Number of shards
     num_shards: usize,
     /// Eviction policy used for all shards.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     policy_type: CachePolicyType,
 }
 
@@ -88,7 +88,7 @@ impl BlockCache {
         Self {
             shards,
             num_shards,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "internal-testing"))]
             policy_type,
         }
     }
@@ -209,8 +209,8 @@ impl BlockCache {
         self.num_shards
     }
 
-    #[cfg(test)]
-    pub(crate) fn policy_type(&self) -> CachePolicyType {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn policy_type(&self) -> CachePolicyType {
         self.policy_type
     }
 }

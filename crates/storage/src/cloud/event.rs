@@ -64,7 +64,7 @@ pub type CloudCallback = std::sync::mpsc::Sender<CloudEvent>;
 /// answer needs no conversion on its way up.
 pub use crate::StorageObjectMetadata as ObjectMetadata;
 
-pub(crate) fn object_match_precondition_headers(
+pub fn object_match_precondition_headers(
     etag: &str,
     generation: Option<&str>,
 ) -> Option<Vec<(String, String)>> {

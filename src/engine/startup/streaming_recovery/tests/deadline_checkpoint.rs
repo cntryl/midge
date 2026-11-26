@@ -4,8 +4,8 @@ use super::*;
 use crate::engine::startup::test_control::{
     self, CheckpointTestBoundaries, OneShotBarrier, OpenTestControl, OwnerExit,
 };
-use cntryl_midge_durability::lease::PrimaryLease;
 use crate::runtime::{StartupEvent, StartupObserver};
+use cntryl_midge_durability::lease::PrimaryLease;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -212,7 +212,9 @@ fn bounded_options(path: &Path, trace: Arc<OwnershipTrace>) -> OpenOptions {
         .unwrap()
 }
 
-fn authoritative_catalog(path: &Path) -> cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog {
+fn authoritative_catalog(
+    path: &Path,
+) -> cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog {
     cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(path.join("cloud_store/wal/publication-catalog.v1.json")).unwrap(),
     )
@@ -264,7 +266,8 @@ impl Seed {
         }
         drop(tx);
         if let Some((name, frontier)) = reservation {
-            let after = cntryl_midge_durability::metadata::ManifestPersistence::load(&self.path).unwrap();
+            let after =
+                cntryl_midge_durability::metadata::ManifestPersistence::load(&self.path).unwrap();
             assert!(after.next_sst_seqs.get(&0).copied().unwrap() >= frontier);
             assert!(!after
                 .files
@@ -275,7 +278,9 @@ impl Seed {
     }
 }
 
-fn timeout_error(result: cntryl_midge_core::common::MidgeResult<Engine>) -> cntryl_midge_core::common::MidgeError {
+fn timeout_error(
+    result: cntryl_midge_core::common::MidgeResult<Engine>,
+) -> cntryl_midge_core::common::MidgeError {
     match result {
         Err(error) => {
             assert!(
@@ -379,7 +384,8 @@ fn held_evidence(
         "one actual completed SST upload required"
     );
     assert!(std::fs::metadata(&uploaded[0]).unwrap().len() > 0);
-    let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load(&seed.path).unwrap();
+    let manifest =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(&seed.path).unwrap();
     assert!(manifest.files.is_empty());
     seed.assert_history();
     // Check after ALL contender/filesystem observations, not only before them.

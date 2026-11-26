@@ -381,8 +381,9 @@ impl EventLoop {
         started: Instant,
         waiters: Vec<CloudSealWaiter>,
     ) {
-        if cntryl_midge_core::failpoints::is_active("midge::cloud::inject_fail_after_wal_rotate_before_enqueue")
-        {
+        if cntryl_midge_core::failpoints::is_active(
+            "midge::cloud::inject_fail_after_wal_rotate_before_enqueue",
+        ) {
             self.state.mark_persistence_anomaly();
             for waiter in waiters {
                 self.respond(
@@ -642,8 +643,9 @@ impl EventLoop {
         self.pipeline.wal_transition.note_sealed(ticket, receipt)?;
         WalTransitionBoundary::BeforeCoordinatorCommit.check()?;
         #[cfg(feature = "failpoints")]
-        if cntryl_midge_core::failpoints::is_active("midge::cloud::inject_coordinator_drift_after_wal_rotation")
-        {
+        if cntryl_midge_core::failpoints::is_active(
+            "midge::cloud::inject_coordinator_drift_after_wal_rotation",
+        ) {
             let Some(drifted_generation) = receipt.next_segment().checked_add(100) else {
                 return Err(cntryl_midge_core::common::MidgeError::ResourceLimit(
                     "injected WAL coordinator generation overflow".to_string(),
@@ -830,8 +832,9 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog(&mut self) {
-        let deadline =
-            cntryl_midge_core::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout);
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            self.routing.runtime_response_timeout,
+        );
         self.drain_cloud_wal_upload_backlog_within(&deadline);
     }
 

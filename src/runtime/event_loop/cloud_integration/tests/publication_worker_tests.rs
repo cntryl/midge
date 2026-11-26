@@ -55,7 +55,10 @@ fn should_reconcile_catalog_effect_once_when_publication_drain_caller_times_out(
         &cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_millis(20)),
     );
     assert!(
-        matches!(timed_out, Err(cntryl_midge_core::common::MidgeError::Timeout(_))),
+        matches!(
+            timed_out,
+            Err(cntryl_midge_core::common::MidgeError::Timeout(_))
+        ),
         "the drain caller must time out while the committed result remains held: {timed_out:?}"
     );
 
@@ -74,10 +77,12 @@ fn should_reconcile_catalog_effect_once_when_publication_drain_caller_times_out(
     ))?;
     assert_eq!(el.state.wal.frontiers.cloud_durable(), max_sequence);
     let committed_frontier = el.state.wal.frontiers.cloud_durable();
-    el.handle_storage_event(cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete {
-        operation_id: 2,
-        writer_epoch: el.state.writer_epoch,
-    });
+    el.handle_storage_event(
+        cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete {
+            operation_id: 2,
+            writer_epoch: el.state.writer_epoch,
+        },
+    );
 
     assert_eq!(el.state.wal.frontiers.cloud_durable(), committed_frontier);
     assert_eq!(published_wal_segments_for_test(&el)?, vec![segment_id]);
@@ -131,10 +136,12 @@ fn should_ignore_stale_epoch_completion_for_active_publication_operation(
     };
     assert_eq!(verify_id, 1);
     assert_eq!(verify_epoch, el.state.writer_epoch);
-    el.handle_storage_event(cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete {
-        operation_id: verify_id,
-        writer_epoch: verify_epoch,
-    });
+    el.handle_storage_event(
+        cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete {
+            operation_id: verify_id,
+            writer_epoch: verify_epoch,
+        },
+    );
 
     let publish = storage_event_rx
         .recv_timeout(Duration::from_secs(5))
@@ -153,17 +160,21 @@ fn should_ignore_stale_epoch_completion_for_active_publication_operation(
 
     // The exact operation id is still active, but the old epoch must not own
     // or consume its ready result.
-    el.handle_storage_event(cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete {
-        operation_id: publish_id,
-        writer_epoch: publish_epoch.wrapping_sub(1),
-    });
+    el.handle_storage_event(
+        cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete {
+            operation_id: publish_id,
+            writer_epoch: publish_epoch.wrapping_sub(1),
+        },
+    );
 
     // Assert: the valid completion remains consumable and applies once.
     assert!(el.state.wal.frontiers.cloud_durable() < max_sequence);
-    el.handle_storage_event(cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete {
-        operation_id: publish_id,
-        writer_epoch: publish_epoch,
-    });
+    el.handle_storage_event(
+        cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete {
+            operation_id: publish_id,
+            writer_epoch: publish_epoch,
+        },
+    );
     assert_eq!(el.state.wal.frontiers.cloud_durable(), max_sequence);
     assert_eq!(published_wal_segments_for_test(&el)?, vec![segment_id]);
     Ok(())

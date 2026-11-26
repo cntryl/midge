@@ -1,6 +1,6 @@
 use super::*;
-use cntryl_midge_table::sst::traits::{RawSstVersion, SstFactory};
 use cntryl_midge_core::types::{EntryType, RangeTombstone};
+use cntryl_midge_table::sst::traits::{RawSstVersion, SstFactory};
 use std::sync::Arc;
 
 fn fragment_fixture() -> (
@@ -157,22 +157,25 @@ fn should_cleanup_unpublished_fragments_when_staging_fails() -> MidgeResult<()> 
     writer.add_with_meta(b"a", Some(b"left"), 1, EntryType::Put, None)?;
     writer.add_with_meta(b"z", Some(b"right"), 2, EntryType::Put, None)?;
     writer.finish_to_path(Path::new("source.sst"))?;
-    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+        plan.compaction_memory_limit,
+    );
     for fail_on in [1, 2] {
         let calls = std::cell::Cell::new(0);
-        let sink = |_name: &str,
-                    _path: &Path,
-                    _budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
-                    _summary: Option<&cntryl_midge_table::sst::traits::FinalizedSst>| {
-            calls.set(calls.get() + 1);
-            if calls.get() == fail_on {
-                Err(MidgeError::Aborted(
-                    "injected fragment staging failure".into(),
-                ))
-            } else {
-                Ok(())
-            }
-        };
+        let sink =
+            |_name: &str,
+             _path: &Path,
+             _budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
+             _summary: Option<&cntryl_midge_table::sst::traits::FinalizedSst>| {
+                calls.set(calls.get() + 1);
+                if calls.get() == fail_on {
+                    Err(MidgeError::Aborted(
+                        "injected fragment staging failure".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            };
 
         // Act
         let result = execute_compaction_at_target(
@@ -459,7 +462,9 @@ fn should_cleanup_fragments_when_a_raw_key_group_exceeds_the_staging_limit() -> 
     writer.add_with_meta(b"a", Some(b"left"), 1, EntryType::Put, None)?;
     writer.add_with_meta(b"z", Some(&vec![7; 128 * 1024]), 2, EntryType::Put, None)?;
     writer.finish_to_path(Path::new("source.sst"))?;
-    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+        plan.compaction_memory_limit,
+    );
 
     // Act
     let result = execute_compaction_at_target(

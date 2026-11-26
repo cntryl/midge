@@ -153,8 +153,8 @@ mod tests {
     use super::super::tests::create_test_event_loop;
     use super::super::EventLoop;
     use crate::runtime::{state::RuntimeState, ResponseRouter};
-    use cntryl_midge_table::sst::traits::SstFactory;
     use cntryl_midge_core::types::EntryType;
+    use cntryl_midge_table::sst::traits::SstFactory;
     use std::sync::Arc;
 
     struct FakeReader;
@@ -170,7 +170,10 @@ mod tests {
             0
         }
 
-        fn get_state(&self, key: &[u8]) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_core::types::KeyState> {
+        fn get_state(
+            &self,
+            key: &[u8],
+        ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_core::types::KeyState> {
             Ok(if key == b"a" {
                 cntryl_midge_core::types::KeyState::Value(
                     bytes::Bytes::copy_from_slice(b"va"),
@@ -188,7 +191,9 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> cntryl_midge_core::common::MidgeResult<Vec<(bytes::Bytes, cntryl_midge_core::types::KeyState)>> {
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Vec<(bytes::Bytes, cntryl_midge_core::types::KeyState)>,
+        > {
             let s = start.unwrap_or(&[]);
             let e = end.unwrap_or(&[255u8]);
             if s <= &b"a"[..] && &b"a"[..] < e {
@@ -211,7 +216,9 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> cntryl_midge_core::common::MidgeResult<Vec<(bytes::Bytes, cntryl_midge_core::types::KeyState)>> {
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Vec<(bytes::Bytes, cntryl_midge_core::types::KeyState)>,
+        > {
             self.scan_range_state(start, end)
         }
     }
@@ -230,7 +237,9 @@ mod tests {
         fn create_for_compaction(
             &self,
             _budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
-        ) -> cntryl_midge_core::common::MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>,
+        > {
             Err(cntryl_midge_core::common::MidgeError::NotSupported(
                 "create not supported in test".into(),
             ))
@@ -240,12 +249,18 @@ mod tests {
             &self,
             path: &std::path::Path,
             _budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
-        ) -> cntryl_midge_core::common::MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>,
+        > {
             self.open(path)
         }
 
         #[cfg(test)]
-        fn create(&self) -> cntryl_midge_core::common::MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
+        fn create(
+            &self,
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>,
+        > {
             Err(cntryl_midge_core::common::MidgeError::NotSupported(
                 "create not supported in test".into(),
             ))
@@ -254,13 +269,16 @@ mod tests {
         fn open(
             &self,
             _path: &std::path::Path,
-        ) -> cntryl_midge_core::common::MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>,
+        > {
             Ok(Box::new(FakeReader))
         }
     }
 
     fn create_event_loop_with_test_sst(
-    ) -> cntryl_midge_core::common::MidgeResult<(tempfile::TempDir, EventLoop, std::path::PathBuf)> {
+    ) -> cntryl_midge_core::common::MidgeResult<(tempfile::TempDir, EventLoop, std::path::PathBuf)>
+    {
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
         std::fs::create_dir_all(state.host_sst_dir())?;
@@ -280,7 +298,8 @@ mod tests {
             cntryl_midge_core::io::RealFs::new(el.state.host_sst_dir())
                 .map_err(cntryl_midge_core::io::FsError::into_midge)?,
         );
-        let factory = std::sync::Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(fs, 64 * 1024));
+        let factory =
+            std::sync::Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, EntryType::Put, None)?;
         writer.add_range_tombstone(b"b", b"z", 9)?;

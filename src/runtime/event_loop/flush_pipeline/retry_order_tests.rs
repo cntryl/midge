@@ -218,7 +218,10 @@ fn should_keep_younger_family_flush_behind_retained_retry_while_other_family_pub
     names.sort();
     assert_eq!(
         names,
-        [original_name, cntryl_midge_core::cloud_layout::file_name(0, 0, 2)]
+        [
+            original_name,
+            cntryl_midge_core::cloud_layout::file_name(0, 0, 2)
+        ]
     );
     scenario.teardown();
     fixture.verify_recovery()

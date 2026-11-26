@@ -1,5 +1,8 @@
 use super::super::read_committed_metadata_bodies_within;
 use super::*;
+use crate::runtime::{
+    IntentLogEntry, IntentPersistence, MetadataPublicationLock, PublicationPhase,
+};
 use cntryl_midge_core::io::{Fs, FsPath};
 use cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore;
 use cntryl_midge_durability::lease::{
@@ -7,9 +10,6 @@ use cntryl_midge_durability::lease::{
 };
 use cntryl_midge_durability::metadata::store::ManifestStore;
 use cntryl_midge_durability::metadata::{files, Manifest, ManifestEdit, ManifestPersistence};
-use crate::runtime::{
-    IntentLogEntry, IntentPersistence, MetadataPublicationLock, PublicationPhase,
-};
 use cntryl_midge_storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudReadCapability, CloudStorage,
     CloudWriteCapability, MockCloudBackend,
@@ -169,7 +169,8 @@ impl CloudWriteCapability for HeartbeatMetadataBackend {
         callback: CloudCallback,
     ) {
         let is_pointer = key.ends_with("metadata/committed-pointer.v1");
-        let is_renewal = key.ends_with(cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+        let is_renewal = key
+            .ends_with(cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
             && headers
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("if-match"));
@@ -379,15 +380,21 @@ struct Fixture {
 struct LostCasStore {
     inner: Arc<dyn LeaderStore>,
     memory: cntryl_midge_core::common::resource_budget::ResourceBudget,
-    occupied: parking_lot::Mutex<Option<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
+    occupied:
+        parking_lot::Mutex<Option<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
     mutations: std::sync::atomic::AtomicUsize,
 }
 
 impl LeaderStore for LostCasStore {
-    fn acquire_leadership(&self, holder: &str) -> Result<cntryl_midge_durability::lease::LeaderRecord, LeaseError> {
+    fn acquire_leadership(
+        &self,
+        holder: &str,
+    ) -> Result<cntryl_midge_durability::lease::LeaderRecord, LeaseError> {
         self.inner.acquire_leadership(holder)
     }
-    fn read_current(&self) -> Result<Option<cntryl_midge_durability::lease::LeaderRecord>, LeaseError> {
+    fn read_current(
+        &self,
+    ) -> Result<Option<cntryl_midge_durability::lease::LeaderRecord>, LeaseError> {
         self.inner.read_current()
     }
     fn read_committed_metadata(&self, timeout: Duration) -> Result<CloudMetadataHead, LeaseError> {
@@ -483,8 +490,10 @@ fn should_resolve_successful_unknown_pointer_cas_in_small_pool_without_second_bo
 fn should_select_format10_cut_proof_with_its_exact_closure() -> MidgeResult<()> {
     // Arrange
     let fixture = Fixture::new(CloudStorage::with_mock());
-    let manifest =
-        cntryl_midge_durability::metadata::codec::encode(cntryl_midge_durability::metadata::codec::MANIFEST, &Manifest::default())?;
+    let manifest = cntryl_midge_durability::metadata::codec::encode(
+        cntryl_midge_durability::metadata::codec::MANIFEST,
+        &Manifest::default(),
+    )?;
     cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::initialize(
         Arc::clone(&fixture.fs),
         "cut-proof-generation",
@@ -530,7 +539,9 @@ fn should_select_format10_cut_proof_with_its_exact_closure() -> MidgeResult<()> 
     let object = generation
         .objects
         .iter()
-        .find(|object| object.file_name == cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF)
+        .find(|object| {
+            object.file_name == cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF
+        })
         .expect("selected FORMAT 10 pointer includes its cut proof");
     let proof_bytes = cntryl_midge_storage::cloud::BlockingCloud::new(
         &fixture.cloud,
@@ -551,7 +562,8 @@ impl Fixture {
     fn new(cloud: CloudStorage) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let fs = cntryl_midge_core::io::real::test_root(directory.path());
-        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())
+            .unwrap();
         ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
         let store: Arc<dyn LeaderStore> = Arc::new(FsLeaderStore::new(
             Arc::clone(&fs),
@@ -570,7 +582,8 @@ impl Fixture {
     fn with_store(cloud: Arc<CloudStorage>, store: Arc<dyn LeaderStore>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let fs = cntryl_midge_core::io::real::test_root(directory.path());
-        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())
+            .unwrap();
         ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
         Self {
             _directory: directory,
@@ -853,16 +866,22 @@ fn install_terminal_flush_fixture(fixture: &Fixture, count: u64) -> Vec<IntentLo
         ));
         intents.push(intent);
     }
-    edits.push(cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
-        cf_id: 0,
-        next_seq: count * 10 + 1,
-    });
-    edits.push(cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
-        cf_id: 0,
-        freeze_sequence: count * 10,
-    });
+    edits.push(
+        cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: count * 10 + 1,
+        },
+    );
+    edits.push(
+        cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
+            cf_id: 0,
+            freeze_sequence: count * 10,
+        },
+    );
     cntryl_midge_durability::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs))
-        .append(&cntryl_midge_durability::metadata::ManifestEdit::Batch(edits))
+        .append(&cntryl_midge_durability::metadata::ManifestEdit::Batch(
+            edits,
+        ))
         .unwrap();
     IntentPersistence::save_with_fs(&fixture.fs, &intents).unwrap();
     intents
@@ -995,7 +1014,7 @@ fn flush_intent() -> IntentLogEntry {
         phase: PublicationPhase::OutputDurable,
         cf_id: 0,
         sequence: 10,
-        file_meta: crate::runtime::FileMeta {
+        file_meta: cntryl_midge_durability::metadata::intent::FileMeta {
             name: cntryl_midge_core::cloud_layout::file_name(0, 0, 10),
             level: 0,
             size_bytes: 3,
@@ -1046,15 +1065,20 @@ fn should_retain_unsettled_intent_when_new_capture_attempts_to_drop_it() {
         unreachable!()
     };
     *phase = PublicationPhase::ManifestPublished;
-    let store = cntryl_midge_durability::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs));
+    let store =
+        cntryl_midge_durability::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs));
     store
-        .append(&cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
-            cntryl_midge_durability::metadata::ManifestEdit::AddSst(cntryl_midge_durability::metadata::FileMeta::from(&*file_meta)),
-            cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
-                cf_id: 0,
-                freeze_sequence: 10,
-            },
-        ]))
+        .append(&cntryl_midge_durability::metadata::ManifestEdit::Batch(
+            vec![
+                cntryl_midge_durability::metadata::ManifestEdit::AddSst(
+                    cntryl_midge_durability::metadata::FileMeta::from(&*file_meta),
+                ),
+                cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
+                    cf_id: 0,
+                    freeze_sequence: 10,
+                },
+            ],
+        ))
         .unwrap();
     IntentPersistence::save_with_fs(&fixture.fs, &[published]).unwrap();
     let manifest_cut = fixture.cut();
@@ -1084,15 +1108,20 @@ fn should_transfer_selected_terminal_witness_when_its_source_finishes_before_lat
         unreachable!()
     };
     *phase = PublicationPhase::ManifestPublished;
-    let store = cntryl_midge_durability::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs));
+    let store =
+        cntryl_midge_durability::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs));
     store
-        .append(&cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
-            cntryl_midge_durability::metadata::ManifestEdit::AddSst(cntryl_midge_durability::metadata::FileMeta::from(&*file_meta)),
-            cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
-                cf_id: 0,
-                freeze_sequence: 10,
-            },
-        ]))
+        .append(&cntryl_midge_durability::metadata::ManifestEdit::Batch(
+            vec![
+                cntryl_midge_durability::metadata::ManifestEdit::AddSst(
+                    cntryl_midge_durability::metadata::FileMeta::from(&*file_meta),
+                ),
+                cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
+                    cf_id: 0,
+                    freeze_sequence: 10,
+                },
+            ],
+        ))
         .unwrap();
     IntentPersistence::save_with_fs(&fixture.fs, &[intent]).unwrap();
     let selected = fixture.cut();
@@ -1100,10 +1129,12 @@ fn should_transfer_selected_terminal_witness_when_its_source_finishes_before_lat
     drop(selected);
     // A later durable edit means whole-body equality is insufficient proof.
     store
-        .append(&cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
-            cf_id: 0,
-            next_seq: 100,
-        })
+        .append(
+            &cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 100,
+            },
+        )
         .unwrap();
     let later = fixture.cut();
 
@@ -1208,7 +1239,8 @@ fn should_rebase_newer_capture_when_earlier_cut_wins_its_predecessor_cas() {
     assert_eq!(fixture.lock.pending_captures(), 0);
     assert_eq!(
         bodies[files::INTENT_LOG],
-        cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG)).unwrap()
+        cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG))
+            .unwrap()
     );
 }
 
@@ -1299,9 +1331,9 @@ fn should_capture_exact_checkpoint_cut_when_snapshot_installation_is_between_ren
     // Arrange: the production checkpoint owns the writer lock after its new
     // snapshot is durable but before its covered journal prefix is removed.
     let fixture = Arc::new(Fixture::new(CloudStorage::with_mock()));
-    let store = Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new(Arc::clone(
-        &fixture.fs,
-    )));
+    let store = Arc::new(
+        cntryl_midge_durability::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs)),
+    );
     let edit = cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
         cf_id: 0,
         next_seq: 10,
@@ -1344,10 +1376,12 @@ fn should_capture_exact_checkpoint_cut_when_snapshot_installation_is_between_ren
     fail::remove("midge::manifest::after_snapshot_rename_before_journal_truncate");
     let cut = fixture.cut();
     store
-        .append(&cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
-            cf_id: 0,
-            next_seq: 20,
-        })
+        .append(
+            &cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 20,
+            },
+        )
         .unwrap();
     fixture.mirror(&cut).unwrap();
     let (generation, bodies) = fixture.selected_bodies();

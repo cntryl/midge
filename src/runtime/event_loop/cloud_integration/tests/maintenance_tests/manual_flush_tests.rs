@@ -128,11 +128,9 @@ fn flush_while_compute_is_held(el: &mut EventLoop) -> Result<(), String> {
 }
 
 fn journal_len(el: &EventLoop) -> MidgeResult<u64> {
-    match el
-        .state
-        .fs
-        .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
-    {
+    match el.state.fs.metadata(&cntryl_midge_core::io::FsPath::new(
+        cntryl_midge_durability::metadata::files::JOURNAL,
+    )) {
         Ok(metadata) => Ok(metadata.len),
         Err(FsError::NotFound(_)) => Ok(0),
         Err(error) => Err(error.into_midge()),

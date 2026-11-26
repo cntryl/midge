@@ -29,21 +29,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use crate::config::Storage;
 use cntryl_midge_core::codec::{CompressionAlgo, CompressionPolicy};
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::lease::{LeaseConfig, LeaseLossHook, LeaseStorageKind};
+pub use cntryl_midge_durability::RecoveryPolicy;
+pub use cntryl_midge_storage::cloud::CloudWritePolicy;
+use cntryl_midge_storage::cloud::CloudWritePolicyConfig;
 #[cfg(test)]
 use cntryl_midge_storage::config::{
     AzureCredentialSource, CloudProviderConfig, GcsApiStyle, GcsCredentialSource,
     S3CredentialSource,
 };
-pub use crate::config::Storage;
-pub use cntryl_midge_durability::RecoveryPolicy;
-use cntryl_midge_durability::lease::{LeaseConfig, LeaseLossHook, LeaseStorageKind};
 use cntryl_midge_table::memtable::{MemtableConfig, MemtableConfigInput};
 pub use cntryl_midge_table::sst::cache::BlockCachePolicy;
 use cntryl_midge_table::sst::cache::{CachePolicyConfig, CachePolicyType};
-pub use cntryl_midge_storage::cloud::CloudWritePolicy;
-use cntryl_midge_storage::cloud::CloudWritePolicyConfig;
 
 /// Performance optimization goal.
 ///
@@ -333,7 +333,9 @@ impl OpenOptions {
 
     /// Return the configured WAL, SST, and control stores for cloud mode.
     #[must_use]
-    pub fn cloud_storage_topology(&self) -> Option<&cntryl_midge_storage::config::CloudStorageTopology> {
+    pub fn cloud_storage_topology(
+        &self,
+    ) -> Option<&cntryl_midge_storage::config::CloudStorageTopology> {
         match &self.storage {
             Storage::Cloud { topology, .. } => Some(topology),
             _ => None,
@@ -513,7 +515,9 @@ impl OpenOptions {
         self.cloud.shutdown_drain_timeout
     }
 
-    pub(crate) fn wal_batch_config(&self) -> Option<cntryl_midge_durability::wal::policy::BatchConfig> {
+    pub(crate) fn wal_batch_config(
+        &self,
+    ) -> Option<cntryl_midge_durability::wal::policy::BatchConfig> {
         self.wal.batch
     }
 
@@ -821,7 +825,10 @@ impl OpenOptionsBuilder {
     #[cfg(feature = "internal-testing")]
     #[doc(hidden)]
     #[must_use]
-    pub fn filesystem_for_testing(mut self, filesystem: Arc<dyn cntryl_midge_core::io::Fs>) -> Self {
+    pub fn filesystem_for_testing(
+        mut self,
+        filesystem: Arc<dyn cntryl_midge_core::io::Fs>,
+    ) -> Self {
         self.filesystem = Some(InjectedFilesystem(filesystem));
         self
     }
@@ -855,7 +862,9 @@ impl OpenOptionsBuilder {
                 let summaries = report
                     .findings
                     .iter()
-                    .filter(|finding| finding.outcome == cntryl_midge_storage::config::CloudCheckOutcome::Failed)
+                    .filter(|finding| {
+                        finding.outcome == cntryl_midge_storage::config::CloudCheckOutcome::Failed
+                    })
                     .map(|finding| format!("{:?}: {}", finding.roles, finding.message))
                     .collect::<Vec<_>>();
                 return Err(MidgeError::InvalidArgument(format!(
@@ -1044,7 +1053,11 @@ impl OpenOptionsBuilder {
                 "cloud shutdown drain timeout must be greater than zero".to_string(),
             ));
         }
-        self.lease.validate(LeaseStorageKind::from(&self.storage))?;
+        let lease_kind = match self.storage {
+            Storage::Cloud { .. } | Storage::CloudSimulated { .. } => LeaseStorageKind::Cloud,
+            Storage::Local { .. } | Storage::InMemory => LeaseStorageKind::Local,
+        };
+        self.lease.validate(lease_kind)?;
         self.cloud.policy.validate()?;
 
         let total_memory = self.resolve_total_memory()?;
@@ -1116,7 +1129,10 @@ impl OpenOptionsBuilder {
             filesystem: self.filesystem,
             #[cfg(feature = "internal-testing")]
             object_store: self.object_store,
-            wal: cntryl_midge_durability::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
+            wal: cntryl_midge_durability::wal::WalBatchingConfig::new(
+                wal_buffer_size,
+                self.wal.batch,
+            ),
             lease: self.lease,
             ttl_clock: self.ttl_clock,
             drop_transaction_wait_timeout: self.drop_transaction_wait_timeout,

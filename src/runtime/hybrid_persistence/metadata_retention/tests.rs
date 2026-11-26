@@ -1,14 +1,14 @@
 use super::*;
+use crate::runtime::hybrid_persistence::{
+    mirror_control_metadata_within, read_committed_metadata_bodies_within,
+    CloudMetadataMirrorAuthority, SharedMetadataSnapshot,
+};
 use cntryl_midge_core::common::resource_budget::ResourceBudget;
 use cntryl_midge_core::common::OperationDeadline;
 use cntryl_midge_core::io::{Fs, FsPath};
 use cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore;
 use cntryl_midge_durability::lease::LeaderStore;
 use cntryl_midge_durability::metadata::{files, Manifest, ManifestPersistence};
-use crate::runtime::hybrid_persistence::{
-    mirror_control_metadata_within, read_committed_metadata_bodies_within,
-    CloudMetadataMirrorAuthority, SharedMetadataSnapshot,
-};
 use cntryl_midge_storage::cloud::{CloudStorage, MockCloudBackend};
 use std::sync::Arc;
 
@@ -25,7 +25,8 @@ impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let fs = cntryl_midge_core::io::real::test_root(directory.path());
-        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())
+            .unwrap();
         ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
         let store = Arc::new(FsLeaderStore::new(
             Arc::clone(&fs),
@@ -80,17 +81,21 @@ impl Fixture {
         writer_epoch: u64,
     ) -> CloudMetadataGeneration {
         let intent = if snapshot {
-            crate::runtime::IntentLogEntry::CloudUploadComplete {
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::CloudUploadComplete {
                 resource: format!("{sequence}:{}", "x".repeat(32 * 1024)),
                 seqno: sequence,
             }
         } else {
-            crate::runtime::IntentLogEntry::SeqnoAllocated {
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::SeqnoAllocated {
                 seqno: sequence,
                 cf_id: 0,
             }
         };
-        crate::runtime::IntentPersistence::save_with_fs(&self.fs, &[intent]).unwrap();
+        cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_with_fs(
+            &self.fs,
+            &[intent],
+        )
+        .unwrap();
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
         mirror_control_metadata_within(
             self.context_at_epoch(&deadline, holder_id, writer_epoch),
@@ -122,10 +127,15 @@ fn format_10_generation(fixture: &Fixture, finish: bool) -> CloudMetadataGenerat
 
     let directory = tempfile::tempdir_in(fixture.directory.path()).unwrap();
     let fs: Arc<dyn Fs> = Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).unwrap());
-    let manifest =
-        cntryl_midge_durability::metadata::codec::encode(cntryl_midge_durability::metadata::codec::MANIFEST, &Manifest::default())
-            .unwrap();
-    let intents = serde_json::to_vec(&Vec::<crate::runtime::IntentLogEntry>::new()).unwrap();
+    let manifest = cntryl_midge_durability::metadata::codec::encode(
+        cntryl_midge_durability::metadata::codec::MANIFEST,
+        &Manifest::default(),
+    )
+    .unwrap();
+    let intents = serde_json::to_vec(&Vec::<
+        cntryl_midge_durability::metadata::intent::IntentLogEntry,
+    >::new())
+    .unwrap();
     cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::initialize(
         Arc::clone(&fs),
         "retention-generation",
@@ -272,7 +282,8 @@ fn should_reclaim_obsolete_snapshot_versions_when_restart_rediscovers_history() 
         read_committed_metadata_bodies_within(&fixture.cloud, &generation, &deadline).unwrap();
     assert_eq!(
         bodies[files::INTENT_LOG],
-        cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG)).unwrap()
+        cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG))
+            .unwrap()
     );
 }
 

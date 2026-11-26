@@ -324,14 +324,19 @@ impl DurabilityCoordinator {
     pub fn contiguous_acked_cloud_segments(
         &self,
         acks: &cntryl_midge_durability::wal::publish::AckSet,
-    ) -> Result<Vec<cntryl_midge_durability::wal::publish::OwedSegment>, cntryl_midge_durability::wal::publish::Refusal> {
+    ) -> Result<
+        Vec<cntryl_midge_durability::wal::publish::OwedSegment>,
+        cntryl_midge_durability::wal::publish::Refusal,
+    > {
         let mut owed: Vec<cntryl_midge_durability::wal::publish::OwedSegment> = self
             .inflight
             .iter()
-            .map(|(segment_id, info)| cntryl_midge_durability::wal::publish::OwedSegment {
-                segment_id: *segment_id,
-                max_sequence: info.max_sequence,
-            })
+            .map(
+                |(segment_id, info)| cntryl_midge_durability::wal::publish::OwedSegment {
+                    segment_id: *segment_id,
+                    max_sequence: info.max_sequence,
+                },
+            )
             .collect();
         owed.sort_unstable_by_key(|segment| segment.segment_id);
         cntryl_midge_durability::wal::publish::uploaded_run(&owed, acks)
@@ -351,7 +356,10 @@ impl DurabilityCoordinator {
     pub fn take_contiguous_acked_cloud_segments(
         &mut self,
         acks: &cntryl_midge_durability::wal::publish::AckSet,
-    ) -> Result<Vec<cntryl_midge_durability::wal::publish::OwedSegment>, cntryl_midge_durability::wal::publish::Refusal> {
+    ) -> Result<
+        Vec<cntryl_midge_durability::wal::publish::OwedSegment>,
+        cntryl_midge_durability::wal::publish::Refusal,
+    > {
         let ready = self.contiguous_acked_cloud_segments(acks)?;
         for segment in &ready {
             self.inflight.remove(&segment.segment_id);
@@ -530,11 +538,13 @@ mod tests {
         // Assert
         assert_eq!(
             result,
-            Err(cntryl_midge_durability::wal::publish::Refusal::SequenceMismatch {
-                segment_id: 7,
-                sealed: 70,
-                uploaded: 71,
-            })
+            Err(
+                cntryl_midge_durability::wal::publish::Refusal::SequenceMismatch {
+                    segment_id: 7,
+                    sealed: 70,
+                    uploaded: 71,
+                }
+            )
         );
         assert_eq!(coordinator.cloud_segment_max_sequence(7), Some(70));
     }

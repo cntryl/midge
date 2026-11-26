@@ -116,7 +116,9 @@ impl EventLoop {
     }
 
     pub(super) fn handle_get_runtime_metrics(&self, request_id: u64) {
-        cntryl_midge_core::failpoints::fail_point!("midge::runtime::before_get_runtime_metrics_response");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::runtime::before_get_runtime_metrics_response"
+        );
         let mut snapshot = self.state.runtime_metrics_snapshot();
         let read_path = self.state.diagnostics.snapshot();
         snapshot.durability_waiters_fanned_out_total =
@@ -282,7 +284,10 @@ mod tests {
     use super::RuntimeConfigUpdate;
     use crate::runtime::RuntimeResponse;
 
-    fn policy_update(request_id: u64, policy: cntryl_midge_durability::wal::DurabilityPolicy) -> RuntimeConfigUpdate {
+    fn policy_update(
+        request_id: u64,
+        policy: cntryl_midge_durability::wal::DurabilityPolicy,
+    ) -> RuntimeConfigUpdate {
         RuntimeConfigUpdate {
             request_id,
             memtable_size_limit: None,
@@ -307,10 +312,18 @@ mod tests {
         let same_mode_response = local.routing.router.register(3, "SetRuntimeConfig");
 
         // Act
-        local
-            .handle_set_runtime_config(&policy_update(1, cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync));
-        cloud.handle_set_runtime_config(&policy_update(2, cntryl_midge_durability::wal::DurabilityPolicy::Batched));
-        local.handle_set_runtime_config(&policy_update(3, cntryl_midge_durability::wal::DurabilityPolicy::Strict));
+        local.handle_set_runtime_config(&policy_update(
+            1,
+            cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync,
+        ));
+        cloud.handle_set_runtime_config(&policy_update(
+            2,
+            cntryl_midge_durability::wal::DurabilityPolicy::Batched,
+        ));
+        local.handle_set_runtime_config(&policy_update(
+            3,
+            cntryl_midge_durability::wal::DurabilityPolicy::Strict,
+        ));
 
         // Assert
         assert!(matches!(

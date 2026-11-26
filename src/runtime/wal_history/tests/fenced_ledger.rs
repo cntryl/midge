@@ -3,8 +3,10 @@
 use super::{wal, WalHistory, WalHistoryFence, POWER_LOSS_SEEDS};
 use cntryl_midge_core::common::MidgeError;
 use cntryl_midge_core::io::Fs;
+use cntryl_midge_core::simulation::crash_fs::{
+    CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp,
+};
 use cntryl_midge_durability::lease::{fs_leader_store::FsLeaderStore, LeaderStore};
-use cntryl_midge_core::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp};
 use cntryl_midge_durability::wal::ledger_store::{COMPACT_AFTER_EDITS, LEDGER_FILE};
 use std::sync::Arc;
 use std::time::Duration;

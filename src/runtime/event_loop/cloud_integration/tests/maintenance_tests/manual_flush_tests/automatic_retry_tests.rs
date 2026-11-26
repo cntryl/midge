@@ -1,6 +1,6 @@
 use super::*;
-use cntryl_midge_durability::lease::PrimaryLease as _;
 use crate::runtime::actors::flush::{FlushActor, FlushWorkerResult};
+use cntryl_midge_durability::lease::PrimaryLease as _;
 use cntryl_midge_storage::cloud::{CloudStorage, MockCloudBackend};
 use std::path::Path;
 

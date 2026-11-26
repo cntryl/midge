@@ -38,7 +38,7 @@ impl CloudSstRecoveryProof {
         }
     }
 
-    pub(crate) fn from_runtime(file: &crate::runtime::FileMeta) -> Self {
+    pub(crate) fn from_runtime(file: &cntryl_midge_durability::metadata::intent::FileMeta) -> Self {
         Self {
             name: file.name.clone(),
             expected_size_bytes: Some(file.size_bytes),
@@ -116,7 +116,9 @@ pub(crate) fn commit_recovery_plan_within(
             &deadline,
         )?;
     }
-    cntryl_midge_core::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
+    cntryl_midge_core::failpoints::fail_point!(
+        "midge::recovery::after_salvage_floor_before_quarantine"
+    );
     validate()?;
     if let Some(cut) = plan.open_cut {
         let CacheHistory::Existing(history) = &mut history else {
@@ -125,7 +127,9 @@ pub(crate) fn commit_recovery_plan_within(
             ));
         };
         let wal = history.segment_files().ok_or_else(|| {
-            cntryl_midge_core::common::MidgeError::Internal("open WAL cut without segment files".into())
+            cntryl_midge_core::common::MidgeError::Internal(
+                "open WAL cut without segment files".into(),
+            )
         })?;
         let wal = cntryl_midge_core::io::scope_fs(wal, scope.clone());
         history.prepare_open_cut(cut, plan.max_unreplayed_sequence)?;

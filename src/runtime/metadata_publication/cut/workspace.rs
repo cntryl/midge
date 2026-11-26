@@ -4,7 +4,7 @@ use super::{MetadataPublicationLock, SelectedTerminalWitnesses};
 use cntryl_midge_core::common::resource_budget::ResourceReservation;
 use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use cntryl_midge_durability::metadata::files;
-use crate::runtime::IntentPersistence;
+use cntryl_midge_durability::metadata::intent_persistence::IntentPersistence;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -44,9 +44,10 @@ impl MetadataPublicationLock {
             MidgeError::Corruption("selected metadata lacks manifest snapshot".into())
         })?;
         let journal = bodies.get(files::JOURNAL).map_or(&[][..], Vec::as_slice);
-        let manifest = cntryl_midge_durability::metadata::codec::manifest_workspace::decoded_workspace_bound(
-            snapshot, journal, deadline,
-        )?;
+        let manifest =
+            cntryl_midge_durability::metadata::codec::manifest_workspace::decoded_workspace_bound(
+                snapshot, journal, deadline,
+            )?;
         let required = encoded
             .checked_mul(4)
             .and_then(|bytes| bytes.checked_add(manifest.bytes))
@@ -115,9 +116,10 @@ impl MetadataPublicationLock {
             .ok_or_else(|| MidgeError::Corruption("metadata cut lacks manifest snapshot".into()))?;
         let journal = bodies.get(files::JOURNAL).map_or(&[][..], Vec::as_slice);
         let intents = bodies.get(files::INTENT_LOG).map_or(&[][..], Vec::as_slice);
-        let manifest = cntryl_midge_durability::metadata::codec::manifest_workspace::decoded_workspace_bound(
-            snapshot, journal, deadline,
-        )?;
+        let manifest =
+            cntryl_midge_durability::metadata::codec::manifest_workspace::decoded_workspace_bound(
+                snapshot, journal, deadline,
+            )?;
         let intents = IntentPersistence::decoded_workspace_bound(intents, deadline)?;
         let encoded = bodies.values().try_fold(0_usize, |sum, body| {
             sum.checked_add(body.len()).ok_or_else(overflow)
@@ -171,7 +173,7 @@ fn grow_reservation(
 fn required_private_workspace(
     encoded: usize,
     manifest: &cntryl_midge_durability::metadata::codec::manifest_workspace::ManifestDecodeWorkspace,
-    intents: &crate::runtime::intent_persistence::IntentDecodeWorkspace,
+    intents: &cntryl_midge_durability::metadata::intent_persistence::IntentDecodeWorkspace,
 ) -> MidgeResult<usize> {
     // Raw control copies and journal payload reads coexist with manifest
     // replay. Their typed enum/collection expansion is measured separately.

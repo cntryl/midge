@@ -1,7 +1,7 @@
 //! Iterator API - lazy, fallible range scans.
 
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 
 /// Iteration direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

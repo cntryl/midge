@@ -44,12 +44,12 @@
 //!   paired transition.
 
 use super::super::state::RuntimeState;
+use crate::runtime::wal_transition::WalSealTicket;
+use apply_op::TransactionApplyOp;
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_core::io::Fs;
-use crate::runtime::wal_transition::WalSealTicket;
 use cntryl_midge_durability::wal::policy::BatchConfig;
 use cntryl_midge_durability::wal::{DurabilityPolicy, FsWalFactoryIo, WalRecord, WalWriter};
-use apply_op::TransactionApplyOp;
 #[cfg(all(test, feature = "failpoints"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -175,7 +175,9 @@ pub(crate) struct PendingStrictAppend {
 }
 
 impl PendingStrictAppend {
-    pub(crate) fn poll(&self) -> Option<cntryl_midge_durability::wal::append_completion::AppendResult> {
+    pub(crate) fn poll(
+        &self,
+    ) -> Option<cntryl_midge_durability::wal::append_completion::AppendResult> {
         self.physical.try_complete()
     }
 
@@ -185,7 +187,9 @@ impl PendingStrictAppend {
 }
 
 impl PendingStrictSync {
-    pub(crate) fn poll(&self) -> Option<MidgeResult<cntryl_midge_durability::wal::traits::WalSyncCompletion>> {
+    pub(crate) fn poll(
+        &self,
+    ) -> Option<MidgeResult<cntryl_midge_durability::wal::traits::WalSyncCompletion>> {
         self.physical.try_complete()
     }
 
@@ -451,7 +455,8 @@ impl WalActor {
             WalIoState::Open { writer, .. }
                 if writer.tail().first_seq.is_none()
                     && writer.tail().last_seq.is_none()
-                    && writer.current_pos() == cntryl_midge_durability::wal::format::HEADER_LEN as u64 =>
+                    && writer.current_pos()
+                        == cntryl_midge_durability::wal::format::HEADER_LEN as u64 =>
             {
                 FsWalFactoryIo::new(Arc::clone(&fs))
                     .with_io_timeout(self.storage_io_timeout)
@@ -932,7 +937,9 @@ impl WalActor {
             total
                 .checked_add(u64::try_from(frame).unwrap_or(u64::MAX))
                 .ok_or_else(|| {
-                    cntryl_midge_core::common::MidgeError::ResourceLimit("WAL batch size overflow".into())
+                    cntryl_midge_core::common::MidgeError::ResourceLimit(
+                        "WAL batch size overflow".into(),
+                    )
                 })
         })?;
         storage.admit_local_wal_bytes(bytes)?;
@@ -948,7 +955,10 @@ impl WalActor {
         };
         let actual = self
             .writer()
-            .map_or(previous_position, cntryl_midge_durability::wal::WalWriter::current_pos)
+            .map_or(
+                previous_position,
+                cntryl_midge_durability::wal::WalWriter::current_pos,
+            )
             .saturating_sub(previous_position);
         storage.settle_local_wal_admission(admitted, actual);
     }
@@ -963,7 +973,10 @@ impl WalActor {
                 storage.settle_local_wal_admission(admitted, 0);
             }
         }
-        if matches!(failure.error, cntryl_midge_core::common::MidgeError::NoSpace(_)) {
+        if matches!(
+            failure.error,
+            cntryl_midge_core::common::MidgeError::NoSpace(_)
+        ) {
             Self::record_no_space_event(&self.counters);
         }
         cntryl_midge_core::common::error::classify_commit_error(failure.error, failure.unchanged)

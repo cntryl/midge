@@ -1,8 +1,8 @@
 //! Cloud actor admission using the retained stage-02 S3 overlap shape.
 
 use super::{tests::create_test_cloud_event_loop, EventLoop};
-use cntryl_midge_core::common::MidgeResult;
 use crate::compaction::strategy::CompactionPurpose;
+use cntryl_midge_core::common::MidgeResult;
 use cntryl_midge_durability::metadata::FileMeta;
 use cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy;
 use std::sync::Arc;
@@ -262,7 +262,9 @@ fn selected_plan(el: &mut EventLoop) -> MidgeResult<crate::compaction::Compactio
     el.actors
         .compaction_actor
         .check_compaction(&el.state)?
-        .ok_or_else(|| cntryl_midge_core::common::MidgeError::Internal("fixture has no cloud debt".into()))
+        .ok_or_else(|| {
+            cntryl_midge_core::common::MidgeError::Internal("fixture has no cloud debt".into())
+        })
 }
 
 #[test]

@@ -1,0 +1,1965 @@
+//! Manifest persistence - serialization and file I/O
+//!
+//! Persists manifest state in shared checksummed binary frames to enable
+//! recovery of LSM structure across restarts.
+
+use crate::metadata::Manifest;
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult};
+use cntryl_midge_core::io::traits::FsPath;
+use cntryl_midge_core::io::FsError;
+#[cfg(any(test, feature = "internal-testing"))]
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+use std::time::Instant;
+
+/// Manifest persistence operations
+pub struct ManifestPersistence;
+
+fn recovery_io_error(error: FsError, context: &str) -> MidgeError {
+    match error {
+        FsError::Timeout(message) => MidgeError::Timeout(message),
+        error => MidgeError::RecoveryFailed(format!("{context}: {error:?}")),
+    }
+}
+
+fn check_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeResult<()> {
+    scope.map_or(Ok(()), |scope| scope.check(context))
+}
+
+/// Where the manifest journal stands, as `ManifestStore` tracks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct JournalPosition {
+    /// The edit id the durable snapshot covers.
+    pub(crate) checkpoint_edit_id: u64,
+    /// The highest edit id durable anywhere: the snapshot or the journal.
+    pub(crate) highest_edit_id: u64,
+}
+
+/// What a manifest snapshot save wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrittenCheckpoint {
+    /// The journal edit id the snapshot covers.
+    pub edit_checkpoint_id: u64,
+    /// Whether the caller's manifest already held every edit the snapshot
+    /// covers. Only then may the caller advance its horizon to
+    /// `edit_checkpoint_id`; otherwise another writer journaled an edit the
+    /// caller never applied, and claiming it would let a later snapshot from
+    /// the caller drop it.
+    pub caller_was_current: bool,
+}
+
+impl WrittenCheckpoint {
+    /// Advances `manifest`'s horizon to this checkpoint when that is safe.
+    pub fn adopt_into(self, manifest: &mut Manifest) {
+        if self.caller_was_current {
+            manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(self.edit_checkpoint_id);
+        }
+    }
+}
+
+impl ManifestPersistence {
+    /// Decode a committed immutable metadata generation without hydrating cache.
+    pub fn decode_bodies(
+        snapshot: &[u8],
+        journal: Option<&[u8]>,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Manifest> {
+        scope.check("shared manifest decode")?;
+        let mut manifest: Manifest = super::codec::decode(super::codec::MANIFEST, snapshot)?;
+        manifest.validate_persisted()?;
+        if let Some(journal) = journal {
+            for (id, edit) in crate::metadata::journal::replay_identified_edits_from_bytes(
+                journal,
+                manifest.edit_checkpoint_id,
+                scope,
+            )? {
+                scope.check("shared manifest application")?;
+                manifest.apply_edit(&edit)?;
+                manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(id);
+            }
+        }
+        manifest.validate_persisted()?;
+        scope.check("shared manifest validation")?;
+        Ok(manifest)
+    }
+
+    /// Manifest file name
+    const MANIFEST_FILE: &'static str = super::files::MANIFEST;
+    #[cfg(any(test, feature = "internal-testing"))]
+    const MANIFEST_FILE_TEMP: &'static str = "manifest.json.tmp";
+
+    /// Snapshot file name
+    const MANIFEST_SNAPSHOT: &'static str = super::files::MANIFEST_SNAPSHOT;
+    const MANIFEST_SNAPSHOT_TEMP: &'static str = "manifest.snapshot.json.tmp";
+
+    /// Get the manifest file path
+    #[cfg(test)]
+    pub(crate) fn manifest_path(db_path: &Path) -> PathBuf {
+        db_path.join(ManifestPersistence::MANIFEST_SNAPSHOT)
+    }
+
+    /// Get the manifest snapshot path
+    #[cfg(test)]
+    pub(crate) fn manifest_snapshot_path(db_path: &Path) -> PathBuf {
+        db_path.join(ManifestPersistence::MANIFEST_SNAPSHOT)
+    }
+
+    fn load_binary_manifest_file(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        path: &cntryl_midge_core::io::traits::FsPath,
+        context: &str,
+    ) -> Result<Manifest, String> {
+        Self::load_binary_manifest_file_typed(fs, path, context).map_err(|error| error.to_string())
+    }
+
+    fn load_binary_manifest_file_typed(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        path: &cntryl_midge_core::io::traits::FsPath,
+        context: &str,
+    ) -> MidgeResult<Manifest> {
+        let start = Instant::now();
+        let file = fs
+            .open(
+                path,
+                cntryl_midge_core::io::traits::OpenOptions {
+                    mode: cntryl_midge_core::io::traits::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(|error| recovery_io_error(error, &format!("failed to open {context}")))?;
+        let len = file
+            .len()
+            .map_err(|error| recovery_io_error(error, &format!("failed to stat {context}")))?;
+        let data = file
+            .read_at(0, len)
+            .map_err(|error| recovery_io_error(error, &format!("failed to read {context}")))?;
+        let manifest = Self::decode_manifest(&data)?;
+        let elapsed = start.elapsed();
+        tracing::info!(
+            path = ?path,
+            files = manifest.files.len(),
+            cf = manifest.column_families.len(),
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            "binary manifest loaded"
+        );
+        Ok(manifest)
+    }
+
+    fn decode_manifest(bytes: &[u8]) -> MidgeResult<Manifest> {
+        let manifest: Manifest = super::codec::decode(super::codec::MANIFEST, bytes)?;
+        manifest.validate_persisted()?;
+        Ok(manifest)
+    }
+
+    /// Validate and apply the exact captured FORMAT 9 snapshot and journal.
+    pub fn decode_for_upgrade(
+        snapshot: Option<&[u8]>,
+        journal: &[u8],
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Manifest> {
+        scope.check("FORMAT 9 manifest validation")?;
+        let mut manifest = snapshot
+            .map(Self::decode_manifest)
+            .transpose()?
+            .unwrap_or_default();
+        let edits = super::journal::replay_clean_edits_for_upgrade(
+            journal,
+            manifest.edit_checkpoint_id,
+            scope,
+        )?;
+        for (edit_id, edit) in edits {
+            scope.check("FORMAT 9 manifest application")?;
+            manifest.apply_edit(&edit)?;
+            manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(edit_id);
+        }
+        Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
+        scope.check("FORMAT 9 manifest validation")?;
+        Ok(manifest)
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn remove_file_if_exists(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        path: &cntryl_midge_core::io::traits::FsPath,
+    ) -> Result<(), String> {
+        match fs.exists(path) {
+            Ok(false) => Ok(()),
+            Ok(true) => fs
+                .remove_file(path)
+                .map_err(|e| format!("failed to remove file {path:?}: {e:?}")),
+            Err(e) => Err(format!("fs exists error for {path:?}: {e:?}")),
+        }
+    }
+
+    /// Load manifest using the requested recovery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if storage cannot be read or durable metadata is invalid.
+    pub fn load_with_fs_and_policy(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        recovery_policy: crate::RecoveryPolicy,
+    ) -> Result<Manifest, String> {
+        Self::load_with_fs_and_policy_typed(fs, recovery_policy).map_err(|error| error.to_string())
+    }
+
+    pub fn load_with_fs_and_policy_typed(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        recovery_policy: crate::RecoveryPolicy,
+    ) -> MidgeResult<Manifest> {
+        crate::metadata::journal::with_manifest_writer_lock(fs, || {
+            Self::load_with_fs_and_policy_unlocked(fs, recovery_policy, None)
+        })
+    }
+
+    pub fn load_with_fs_and_policy_within(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        recovery_policy: crate::RecoveryPolicy,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Manifest> {
+        crate::metadata::journal::with_manifest_writer_lock_within(fs, scope, || {
+            Self::load_with_fs_and_policy_unlocked(fs, recovery_policy, Some(scope))
+        })
+    }
+
+    fn load_with_fs_and_policy_unlocked(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        recovery_policy: crate::RecoveryPolicy,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Manifest> {
+        if crate::metadata::format::is_format_10(fs.as_ref())? {
+            return Self::load_format_10(fs, scope);
+        }
+        let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
+        let manifest_path = FsPath::new(Self::MANIFEST_FILE);
+        let mut manifest = if fs
+            .exists(&snap_path)
+            .map_err(|error| recovery_io_error(error, "failed to check for manifest snapshot"))?
+        {
+            Self::load_binary_manifest_file_typed(fs, &snap_path, "manifest snapshot")?
+        } else if fs
+            .exists(&manifest_path)
+            .map_err(|error| recovery_io_error(error, "failed to check for manifest file"))?
+        {
+            Self::load_binary_manifest_file_typed(fs, &manifest_path, "manifest file")?
+        } else {
+            tracing::debug!(
+                current_manifest = ?manifest_path,
+                "manifest file not found, using default"
+            );
+            Manifest::default()
+        };
+
+        let journal_path = FsPath::new("manifest.journal");
+        let journal_exists = fs
+            .exists(&journal_path)
+            .map_err(|error| recovery_io_error(error, "failed to check for manifest journal"))?;
+        if !journal_exists {
+            tracing::debug!(path = ?journal_path, "manifest journal not found, skipping replay");
+            Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
+            check_scope(scope, "manifest validation")?;
+            return Ok(manifest);
+        }
+
+        // Replay only edits newer than the snapshot checkpoint. If a crash
+        // happened after snapshot rename but before journal truncation, the
+        // already-applied prefix is therefore harmless.
+        match crate::metadata::journal::replay_identified_edits_after_with_fs_unlocked_within(
+            fs,
+            manifest.edit_checkpoint_id,
+            scope,
+        ) {
+            Ok(edits) => {
+                for (edit_id, edit) in &edits {
+                    check_scope(scope, "manifest journal application")?;
+                    manifest.apply_edit(edit)?;
+                    // The loaded manifest now holds every edit up to this one,
+                    // so the horizon may cover it (#493).
+                    manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(*edit_id);
+                }
+                tracing::info!(replayed = edits.len(), "manifest journal replayed");
+            }
+            Err(e) => {
+                if matches!(e, MidgeError::Timeout(_)) {
+                    return Err(e);
+                }
+                if recovery_policy == crate::RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to replay manifest journal: {e}"
+                    )));
+                }
+                Self::salvage_journal_prefix_unlocked(fs, &mut manifest, &e, scope)?;
+            }
+        }
+
+        Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
+        check_scope(scope, "manifest validation")?;
+        Ok(manifest)
+    }
+
+    pub(crate) fn load_format_10(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Manifest> {
+        let authority = crate::metadata::local_authority::LocalMetadataAuthority::open(
+            std::sync::Arc::clone(fs),
+        )?;
+        let (base, segments) =
+            authority.read_stream(crate::metadata::local_authority::Stream::Manifest)?;
+        Self::decode_format_10_stream(
+            &base,
+            authority.base_id(crate::metadata::local_authority::Stream::Manifest),
+            segments
+                .iter()
+                .map(|(first, last, body)| (*first, *last, body.as_slice())),
+            scope,
+        )
+    }
+
+    pub fn decode_format_10_stream<'a>(
+        base: &[u8],
+        checkpoint: u64,
+        segments: impl IntoIterator<Item = (u64, u64, &'a [u8])>,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Manifest> {
+        let mut manifest = Self::decode_manifest(base)?;
+        if manifest.edit_checkpoint_id != checkpoint {
+            return Err(MidgeError::Corruption(
+                "FORMAT 10 manifest base checkpoint identity disagrees with HEAD".into(),
+            ));
+        }
+        for (first_id, last_id, payload) in segments {
+            check_scope(scope, "FORMAT 10 manifest segment replay")?;
+            if first_id != last_id {
+                return Err(MidgeError::Corruption(
+                    "FORMAT 10 manifest segment must contain one edit identity".into(),
+                ));
+            }
+            let edit: crate::metadata::journal::ManifestEdit = serde_json::from_slice(payload)
+                .map_err(|error| {
+                    MidgeError::Corruption(format!("invalid FORMAT 10 manifest edit: {error}"))
+                })?;
+            edit.validate_for_append()?;
+            manifest.apply_edit(&edit)?;
+            manifest.edit_checkpoint_id = last_id;
+        }
+        Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
+        Ok(manifest)
+    }
+
+    /// Apply the durable journal prefix before the first corrupt record, then
+    /// rewrite the journal so later appends stop tripping on that record.
+    fn salvage_journal_prefix_unlocked(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        manifest: &mut Manifest,
+        replay_error: &cntryl_midge_core::common::MidgeError,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<()> {
+        check_scope(scope, "manifest journal salvage")?;
+        let salvaged = crate::metadata::journal::salvage_edits_after_with_fs_unlocked_within(
+            fs,
+            manifest.edit_checkpoint_id,
+            scope,
+        )?;
+        for edit in &salvaged.edits {
+            check_scope(scope, "salvaged manifest application")?;
+            manifest.apply_edit(edit)?;
+        }
+        tracing::warn!(
+            error = %replay_error,
+            corruption = ?salvaged.corruption,
+            kept_edits = salvaged.edits.len(),
+            "manifest journal replay failed; salvaged the durable prefix"
+        );
+        if salvaged.corruption.is_none() {
+            return Ok(());
+        }
+        manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(salvaged.max_edit_id);
+        // The heal must succeed: later loads are strict, so a journal that
+        // still holds the corrupt record would fail every publication.
+        check_scope(scope, "salvaged manifest checkpoint")?;
+        Self::checkpoint_salvaged_manifest_unlocked(fs, manifest)
+    }
+
+    /// Preserve the corrupt journal, then make the salvaged manifest the
+    /// durable checkpoint and start a fresh journal. The snapshot is written
+    /// before the journal is truncated, so a crash in between replays the
+    /// same salvage on the next open.
+    fn checkpoint_salvaged_manifest_unlocked(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> MidgeResult<()> {
+        use cntryl_midge_core::io::traits::FsPath;
+
+        let preserved = crate::metadata::journal::preserve_corrupt_journal_with_fs_unlocked(fs)?;
+        Self::validate_persisted_sst_names(manifest).map_err(MidgeError::RecoveryFailed)?;
+        let json = super::codec::encode(super::codec::MANIFEST, manifest)?;
+        cntryl_midge_core::io::staging::stage_bytes_typed(
+            fs,
+            &FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP),
+            &FsPath::new(Self::MANIFEST_SNAPSHOT),
+            &json,
+            || Ok(()),
+        )?;
+        crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)?;
+        tracing::warn!(
+            preserved = %preserved,
+            "checkpointed salvaged manifest and preserved the corrupt journal"
+        );
+        Ok(())
+    }
+
+    fn validate_persisted_sst_names(manifest: &Manifest) -> Result<(), String> {
+        manifest
+            .validate_persisted()
+            .map_err(|error| error.to_string())
+    }
+
+    fn checkpoint_base_with_fs(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        manifest: &Manifest,
+        replay_from_durable_base: bool,
+    ) -> Result<Manifest, String> {
+        use cntryl_midge_core::io::traits::FsPath;
+
+        let snapshot_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
+        let snapshot_exists = fs.exists(&snapshot_path).map_err(|error| {
+            format!("failed to check for manifest snapshot {snapshot_path:?}: {error:?}")
+        })?;
+        if !snapshot_exists {
+            return Ok(if replay_from_durable_base {
+                Manifest::default()
+            } else {
+                manifest.clone()
+            });
+        }
+
+        let persisted = Self::load_binary_manifest_file(fs, &snapshot_path, "manifest snapshot")?;
+        if !replay_from_durable_base && persisted.edit_checkpoint_id <= manifest.edit_checkpoint_id
+        {
+            return Ok(manifest.clone());
+        }
+
+        tracing::warn!(
+            caller_checkpoint = manifest.edit_checkpoint_id,
+            durable_checkpoint = persisted.edit_checkpoint_id,
+            "reconstructing durable manifest authority before checkpointing a stale caller"
+        );
+
+        Ok(persisted)
+    }
+
+    /// Save manifest to disk in JSON format
+    ///
+    /// # Arguments
+    /// * `db_path` - Path to the database directory
+    /// * `manifest` - Manifest to persist
+    ///
+    /// # Errors
+    /// Returns error if write fails
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn save_with_fs(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> Result<(), String> {
+        Self::write_snapshot(fs, manifest).map_err(|error| error.to_string())
+    }
+
+    /// Stage a manifest snapshot, keeping the I/O error's kind.
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn write_snapshot(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
+        use cntryl_midge_core::common::MidgeError;
+        use cntryl_midge_core::io::traits::FsPath;
+
+        Self::validate_persisted_sst_names(manifest).map_err(MidgeError::Corruption)?;
+        let json = super::codec::encode(super::codec::MANIFEST, manifest)?;
+
+        cntryl_midge_core::io::staging::stage_bytes_typed(
+            fs,
+            &FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP),
+            &FsPath::new(Self::MANIFEST_SNAPSHOT),
+            &json,
+            || {
+                cntryl_midge_core::failpoints::fail_point!(
+                    "midge::manifest::inject_no_space_on_checkpoint_save",
+                    |_| Err(MidgeError::NoSpace(
+                        "failpoint: no space while saving manifest checkpoint".to_string()
+                    ))
+                );
+                cntryl_midge_core::failpoints::fail_point!(
+                    "midge::manifest::after_temp_sync_before_rename"
+                );
+                Ok(())
+            },
+        )?;
+
+        tracing::debug!(
+            path = ?Self::MANIFEST_SNAPSHOT,
+            size_bytes = json.len(),
+            "manifest persisted successfully"
+        );
+        Ok(())
+    }
+
+    /// Save a full manifest snapshot and truncate journal (atomic as possible).
+    /// Writes to `manifest.snapshot.json.tmp` then renames into `manifest.snapshot.json`.
+    ///
+    /// Returns what the snapshot covers, so the caller can advance its
+    /// in-memory checkpoint horizon when that is safe. Runtime writers go
+    /// through `ManifestStore`; this reads the journal position from disk.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub(crate) fn save_snapshot_and_truncate_journal_with_fs(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> Result<WrittenCheckpoint, String> {
+        crate::metadata::journal::with_manifest_writer_lock(fs, || {
+            Self::save_snapshot_unlocked(fs, manifest, None)
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    /// Writes a snapshot of `manifest` plus every journaled edit it lacks,
+    /// then truncates the journal. The caller holds the manifest writer lock.
+    ///
+    /// `known` is the journal position when the caller already knows it
+    /// (`ManifestStore`); then a current caller costs no metadata reads at all.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub(crate) fn save_snapshot_unlocked(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        manifest: &Manifest,
+        known: Option<JournalPosition>,
+    ) -> cntryl_midge_core::common::MidgeResult<WrittenCheckpoint> {
+        Self::save_snapshot_unlocked_observed(fs, manifest, known, None)
+    }
+
+    fn reconstruct_checkpoint_with_fs(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        manifest: &Manifest,
+        known: Option<JournalPosition>,
+    ) -> cntryl_midge_core::common::MidgeResult<(Manifest, bool)> {
+        use cntryl_midge_core::common::MidgeError;
+        let highest_edit_id = match known {
+            Some(position) => position.highest_edit_id,
+            None => crate::metadata::journal::highest_edit_id_with_fs_unlocked(fs)?,
+        };
+        let replay_from_durable_base = highest_edit_id > manifest.edit_checkpoint_id;
+
+        let mut checkpoint = match known {
+            // A current caller holds the complete contiguous journal prefix.
+            // A caller with a gap may already contain later edits; replaying
+            // older frontiers into it would regress otherwise valid authority.
+            Some(position)
+                if !replay_from_durable_base
+                    && position.checkpoint_edit_id <= manifest.edit_checkpoint_id =>
+            {
+                manifest.clone()
+            }
+            _ => Self::checkpoint_base_with_fs(fs, manifest, replay_from_durable_base)
+                .map_err(MidgeError::Internal)?,
+        };
+        let journal_edits = match known {
+            // Nothing was journaled past what the base already holds.
+            Some(position) if position.highest_edit_id <= checkpoint.edit_checkpoint_id => {
+                Vec::new()
+            }
+            _ => crate::metadata::journal::replay_edits_after_with_fs_unlocked(
+                fs,
+                checkpoint.edit_checkpoint_id,
+            )?,
+        };
+        let replayed_nothing = journal_edits.is_empty();
+        for edit in &journal_edits {
+            checkpoint.apply_edit(edit)?;
+        }
+        // Allocation counters may retain a caller's reservations, but only
+        // durable replay establishes the families and their flush authority.
+        for (&cf_id, &next_seq) in &manifest.next_sst_seqs {
+            checkpoint.flush_frontiers().get(cf_id)?;
+            checkpoint
+                .next_sst_seqs
+                .entry(cf_id)
+                .and_modify(|current| *current = (*current).max(next_seq))
+                .or_insert(next_seq);
+        }
+        // The caller already held every journaled edit exactly when the
+        // snapshot is its own manifest unchanged by the replay above.
+        // Compare the persisted form: runtime-only fields are not state.
+        let caller_was_current = (replayed_nothing
+            && checkpoint.edit_checkpoint_id == manifest.edit_checkpoint_id)
+            || matches!(
+                (serde_json::to_value(&checkpoint), serde_json::to_value(manifest)),
+                (Ok(written), Ok(caller)) if written == caller
+            );
+        checkpoint.edit_checkpoint_id = checkpoint.edit_checkpoint_id.max(highest_edit_id);
+        Ok((checkpoint, caller_was_current))
+    }
+
+    pub(crate) fn save_snapshot_unlocked_observed(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        manifest: &Manifest,
+        known: Option<JournalPosition>,
+        observation: Option<&crate::metadata::accounting::Operation>,
+    ) -> cntryl_midge_core::common::MidgeResult<WrittenCheckpoint> {
+        use cntryl_midge_core::common::MidgeError;
+        use cntryl_midge_core::io::traits::FsPath;
+
+        let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
+        let temp = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
+        let (checkpoint, caller_was_current) =
+            Self::reconstruct_checkpoint_with_fs(fs, manifest, known)?;
+        Self::validate_persisted_sst_names(&checkpoint).map_err(MidgeError::Corruption)?;
+        let json = super::codec::encode(super::codec::MANIFEST, &checkpoint)?;
+
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::manifest::inject_snapshot_write_failure",
+            |_| Err(MidgeError::Internal(
+                "failpoint: manifest snapshot write failed".to_string()
+            ))
+        );
+
+        cntryl_midge_core::io::staging::stage_bytes_typed(fs, &temp, &snap_path, &json, || {
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::manifest::inject_no_space_on_checkpoint_save",
+                |_| Err(MidgeError::NoSpace(
+                    "failpoint: no space while saving manifest checkpoint".to_string()
+                ))
+            );
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::manifest::after_temp_sync_before_rename"
+            );
+            Ok(())
+        })?;
+
+        if let Some(observation) = observation {
+            observation.snapshot_durable(u64::try_from(json.len()).unwrap_or(u64::MAX));
+        }
+
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::manifest::after_snapshot_rename_before_journal_truncate",
+            |_| Err(MidgeError::Internal(
+                "failpoint: crash after manifest snapshot rename".to_string()
+            ))
+        );
+
+        crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)?;
+        if let Some(observation) = observation {
+            observation.checkpoint_complete();
+        }
+
+        tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
+
+        Ok(WrittenCheckpoint {
+            edit_checkpoint_id: checkpoint.edit_checkpoint_id,
+            caller_was_current,
+        })
+    }
+
+    /// Save the binary manifest through a `RealFs` rooted at `db_path`.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
+        use cntryl_midge_core::io::real::RealFs;
+        use std::sync::Arc;
+
+        let real =
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
+        let fs: Arc<dyn cntryl_midge_core::io::traits::Fs> = Arc::new(real);
+        Self::save_with_fs(&fs, manifest)
+    }
+
+    /// Load the manifest strictly through a `RealFs` rooted at `db_path`.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn load(db_path: &Path) -> Result<Manifest, String> {
+        use cntryl_midge_core::io::real::RealFs;
+        use std::sync::Arc;
+
+        let real = RealFs::open_existing(db_path)
+            .map_err(|e| format!("failed to open existing real fs: {e:?}"))?;
+        let fs: Arc<dyn cntryl_midge_core::io::traits::Fs> = Arc::new(real);
+        Self::load_with_fs_and_policy(&fs, crate::RecoveryPolicy::Strict)
+    }
+
+    /// Save a full manifest snapshot and truncate journal (atomic as possible).
+    /// This wrapper constructs a `RealFs` and delegates to the fs-backed implementation.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn save_snapshot_and_truncate_journal(
+        db_path: &Path,
+        manifest: &Manifest,
+    ) -> Result<WrittenCheckpoint, String> {
+        use cntryl_midge_core::io::real::RealFs;
+        use std::sync::Arc;
+
+        let real =
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
+        let fs: Arc<dyn cntryl_midge_core::io::traits::Fs> = Arc::new(real);
+        Self::save_snapshot_and_truncate_journal_with_fs(&fs, manifest)
+    }
+
+    /// Delete persisted manifest state from disk.
+    ///
+    /// # Arguments
+    /// * `db_path` - Path to the database directory
+    ///
+    /// # Errors
+    /// Returns error if delete fails (other than file not existing)
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn delete_with_fs(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+    ) -> Result<(), String> {
+        use cntryl_midge_core::io::traits::FsPath;
+
+        let manifest_path = FsPath::new(Self::MANIFEST_FILE);
+        let snapshot_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
+        let manifest_temp_path = FsPath::new(Self::MANIFEST_FILE_TEMP);
+        let snapshot_temp_path = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
+        let journal_path = FsPath::new("manifest.journal");
+        Self::remove_file_if_exists(fs, &manifest_path)?;
+        Self::remove_file_if_exists(fs, &snapshot_path)?;
+        Self::remove_file_if_exists(fs, &manifest_temp_path)?;
+        Self::remove_file_if_exists(fs, &snapshot_temp_path)?;
+        Self::remove_file_if_exists(fs, &journal_path)?;
+
+        tracing::debug!(
+            manifest_path = ?manifest_path,
+            snapshot_path = ?snapshot_path,
+            manifest_temp_path = ?manifest_temp_path,
+            snapshot_temp_path = ?snapshot_temp_path,
+            journal_path = ?journal_path,
+            "manifest persistence state deleted"
+        );
+
+        Ok(())
+    }
+
+    /// Delete persisted manifest state from disk.
+    ///
+    /// # Arguments
+    /// * `db_path` - Path to the database directory
+    ///
+    /// # Errors
+    /// Returns error if delete fails (other than file not existing)
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn delete(db_path: &Path) -> Result<(), String> {
+        use cntryl_midge_core::io::real::RealFs;
+        use std::sync::Arc;
+
+        let real =
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
+        let fs: Arc<dyn cntryl_midge_core::io::traits::Fs> = Arc::new(real);
+        Self::delete_with_fs(&fs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cntryl_midge_core::io::traits::{
+        DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions, ReadFs,
+    };
+    use std::process;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct UnavailableExistsFs;
+
+    impl ReadFs for UnavailableExistsFs {
+        fn open_read(
+            &self,
+            path: &FsPath,
+        ) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
+        }
+
+        fn exists(&self, _path: &FsPath) -> FsResult<bool> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn metadata(&self, _path: &FsPath) -> FsResult<Metadata> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+    }
+
+    impl Fs for UnavailableExistsFs {
+        fn open(&self, _path: &FsPath, _options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn remove_file(&self, _path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn remove_dir_all(&self, _path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn sync_dir(&self, _path: &FsPath, _durability: Durability) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn rename_atomic(&self, _from: &FsPath, _to: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+    }
+
+    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn flush(cf_id: u32, name: &str, freeze_sequence: u64) -> crate::metadata::ManifestEdit {
+        crate::metadata::ManifestEdit::Batch(vec![
+            crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: name.into(),
+                cf_id,
+                largest_seq: Some(freeze_sequence.saturating_sub(1)),
+                ..Default::default()
+            }),
+            crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cf_id,
+                freeze_sequence,
+            },
+        ])
+    }
+
+    #[test]
+    fn should_refuse_missing_family_authority_under_both_recovery_policies() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> =
+            std::sync::Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).unwrap());
+        let mut manifest = Manifest::default();
+        manifest
+            .apply_edit(&crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 1,
+                name: "missing".into(),
+                created_at: 1,
+            })
+            .unwrap();
+        let mut encoded = serde_json::to_value(&manifest).unwrap();
+        encoded["flushed_through"].as_array_mut().unwrap().pop();
+        let bytes =
+            crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &encoded).unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(ManifestPersistence::MANIFEST_SNAPSHOT),
+            &bytes,
+        )
+        .unwrap();
+
+        // Act
+        for policy in [
+            crate::RecoveryPolicy::Strict,
+            crate::RecoveryPolicy::Salvage,
+        ] {
+            let result = ManifestPersistence::load_with_fs_and_policy_typed(&fs, policy);
+            // Assert
+            assert!(matches!(result, Err(MidgeError::Corruption(_))));
+            assert_eq!(
+                std::fs::read(
+                    directory
+                        .path()
+                        .join(ManifestPersistence::MANIFEST_SNAPSHOT)
+                )
+                .unwrap(),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    fn should_leave_journal_untouched_when_a_durable_transition_is_invalid() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> =
+            std::sync::Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).unwrap());
+        ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
+        crate::metadata::journal::append_edit_with_fs(
+            &fs,
+            &crate::metadata::ManifestEdit::BumpNextSstSeq {
+                cf_id: 99,
+                next_seq: 7,
+            },
+        )
+        .unwrap();
+        let journal = std::fs::read(directory.path().join("manifest.journal")).unwrap();
+        let snapshot = std::fs::read(
+            directory
+                .path()
+                .join(ManifestPersistence::MANIFEST_SNAPSHOT),
+        )
+        .unwrap();
+
+        // Act
+        for policy in [
+            crate::RecoveryPolicy::Strict,
+            crate::RecoveryPolicy::Salvage,
+        ] {
+            let result = ManifestPersistence::load_with_fs_and_policy_typed(&fs, policy);
+            // Assert
+            assert!(result.is_err());
+            assert_eq!(
+                std::fs::read(directory.path().join("manifest.journal")).unwrap(),
+                journal
+            );
+            assert_eq!(
+                std::fs::read(
+                    directory
+                        .path()
+                        .join(ManifestPersistence::MANIFEST_SNAPSHOT)
+                )
+                .unwrap(),
+                snapshot
+            );
+        }
+    }
+
+    #[test]
+    fn should_refuse_salvage_when_a_durable_frontier_has_no_paired_output() {
+        // Arrange: bypass append preflight to model corrupt durable authority.
+        let directory = tempfile::tempdir().unwrap();
+        let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> =
+            std::sync::Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).unwrap());
+        ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
+        crate::metadata::journal::append_validated_edit_with_id(
+            &fs,
+            &crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cf_id: 0,
+                freeze_sequence: 7,
+            },
+            1,
+        )
+        .unwrap();
+        let before = std::fs::read(directory.path().join("manifest.journal")).unwrap();
+
+        // Act
+        for policy in [
+            crate::RecoveryPolicy::Strict,
+            crate::RecoveryPolicy::Salvage,
+        ] {
+            let result = ManifestPersistence::load_with_fs_and_policy_typed(&fs, policy);
+            // Assert
+            assert!(result.is_err());
+            assert_eq!(
+                std::fs::read(directory.path().join("manifest.journal")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn should_preserve_durable_frontier_when_a_stale_caller_has_unpublished_progress() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> =
+            std::sync::Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).unwrap());
+        let mut durable = Manifest::default();
+        durable.apply_edit(&flush(0, "durable.sst", 4)).unwrap();
+        durable.edit_checkpoint_id = 1;
+        ManifestPersistence::save_with_fs(&fs, &durable).unwrap();
+        let mut stale = Manifest::default();
+        stale.apply_edit(&flush(0, "unpublished.sst", 8)).unwrap();
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal_with_fs(&fs, &stale).unwrap();
+        let recovered =
+            ManifestPersistence::load_with_fs_and_policy_typed(&fs, crate::RecoveryPolicy::Strict)
+                .unwrap();
+
+        // Assert
+        assert_eq!(
+            recovered.flush_frontiers().get(0).unwrap(),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 4
+            }
+        );
+        assert_eq!(recovered.files[0].name, "durable.sst");
+    }
+
+    #[test]
+    fn should_decode_immutable_bodies_with_the_same_durable_batch_boundary() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot =
+            super::super::codec::encode(super::super::codec::MANIFEST, &Manifest::default())
+                .unwrap();
+        let edit = flush(0, "shared.sst", 4);
+        crate::metadata::journal::append_edit(directory.path(), &edit).unwrap();
+        let journal = std::fs::read(directory.path().join("manifest.journal")).unwrap();
+        let scope = DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded());
+
+        // Act
+        let recovered =
+            ManifestPersistence::decode_bodies(&snapshot, Some(&journal), &scope).unwrap();
+        let incomplete = ManifestPersistence::decode_bodies(
+            &snapshot,
+            Some(&journal[..journal.len() - 1]),
+            &scope,
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(
+            recovered.flush_frontiers().get(0).unwrap(),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 4
+            }
+        );
+        assert_eq!(recovered.files.len(), 1);
+        assert_eq!(recovered.edit_checkpoint_id, 1);
+        assert!(incomplete.files.is_empty());
+        assert_eq!(
+            incomplete.flush_frontiers().get(0).unwrap(),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 0
+            }
+        );
+        assert_eq!(incomplete.edit_checkpoint_id, 0);
+    }
+
+    /// Create a unique temp directory for tests
+    fn create_test_dir() -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let pid = process::id();
+        let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let test_dir =
+            std::env::temp_dir().join(format!("midge_manifest_test_{pid}_{nanos}_{unique_id}"));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).expect("failed to create test dir");
+        test_dir
+    }
+
+    #[test]
+    fn should_roundtrip_manifest_when_persisting() {
+        // Arrange: build manifest in one expression to avoid field_reassign_with_default
+        let test_dir = create_test_dir();
+        let mut manifest = Manifest::default();
+        manifest
+            .apply_edit(&crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 1,
+                name: "secondary".into(),
+                created_at: 0,
+            })
+            .expect("create secondary family");
+        manifest
+            .apply_edit(&crate::metadata::ManifestEdit::Batch(vec![
+                crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                    name: "roundtrip.sst".into(),
+                    cf_id: 1,
+                    largest_seq: Some(98),
+                    ..Default::default()
+                }),
+                crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                    cf_id: 1,
+                    freeze_sequence: 100,
+                },
+            ]))
+            .expect("publish secondary flush");
+
+        // Act
+        ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");
+        let manifest_path = ManifestPersistence::manifest_path(&test_dir);
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert!(
+            manifest_path.ends_with("manifest.snapshot.json"),
+            "manifest should persist to manifest.snapshot.json"
+        );
+        assert!(
+            manifest_path.exists(),
+            "manifest file should exist after save"
+        );
+        assert_eq!(
+            loaded.flush_frontiers().get(1).unwrap(),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 100
+            }
+        );
+        assert_eq!(loaded.column_families.len(), 1);
+        assert_eq!(loaded.column_families[0].name, "secondary");
+    }
+
+    #[test]
+    fn should_recover_when_manifest_json_is_absent_after_checkpoint() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let manifest = {
+            let mut fixture = Manifest::default();
+            fixture.next_sst_seqs = std::collections::HashMap::from([(0, 42)]);
+            fixture
+        };
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
+            .expect("save checkpoint");
+        let recovered = ManifestPersistence::load(&test_dir).expect("recover checkpoint");
+
+        // Assert
+        assert!(!test_dir.join("manifest.json").exists());
+        assert_eq!(recovered.next_sst_seqs.get(&0).copied().unwrap_or(0), 42);
+    }
+
+    #[test]
+    fn should_reject_unsafe_sst_name_before_manifest_is_persisted() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let manifest = {
+            let mut fixture = Manifest::default();
+            fixture.files = vec![crate::metadata::FileMeta {
+                name: "../outside.sst".to_string(),
+                ..Default::default()
+            }];
+            fixture
+        };
+
+        // Act
+        let error = ManifestPersistence::save(&test_dir, &manifest)
+            .expect_err("unsafe manifest name must be rejected");
+
+        // Assert
+        assert!(error.contains("SST name"), "unexpected error: {error}");
+        assert!(
+            !ManifestPersistence::manifest_path(&test_dir).exists(),
+            "invalid manifest must not reach durable storage"
+        );
+    }
+
+    #[test]
+    fn should_return_default_when_manifest_file_missing() {
+        // Arrange
+        let test_dir = create_test_dir();
+
+        // Act
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert_eq!(loaded.next_sst_seqs.get(&0).copied().unwrap_or(0), 0);
+        assert_eq!(loaded.column_families.len(), 0);
+    }
+
+    #[test]
+    fn should_fail_strict_load_when_manifest_existence_check_is_unavailable() {
+        // Arrange
+        let fs: std::sync::Arc<dyn Fs> = std::sync::Arc::new(UnavailableExistsFs);
+
+        // Act
+        let error =
+            ManifestPersistence::load_with_fs_and_policy(&fs, crate::RecoveryPolicy::Strict)
+                .expect_err("strict load must not treat unavailable storage as an empty manifest");
+
+        // Assert
+        assert!(error.contains("test filesystem unavailable"));
+    }
+
+    #[test]
+    fn should_fail_default_load_when_manifest_journal_is_corrupt() {
+        // Arrange
+        let test_dir = create_test_dir();
+        std::fs::write(
+            test_dir.join("manifest.journal"),
+            b"not-a-valid-manifest-journal",
+        )
+        .expect("write corrupt manifest journal");
+
+        // Act
+        let error =
+            ManifestPersistence::load(&test_dir).expect_err("default manifest load must be strict");
+
+        // Assert
+        assert!(
+            error.contains("manifest journal"),
+            "expected strict manifest journal error, got: {error}"
+        );
+    }
+
+    fn append_record_with_stale_crc(test_dir: &Path, edit: &crate::metadata::ManifestEdit) {
+        use std::io::Write as _;
+        let payload = serde_json::to_vec(edit).expect("serialize edit");
+        let mut record = vec![edit.record_type()];
+        record.extend_from_slice(
+            &u32::try_from(payload.len())
+                .expect("payload fits u32")
+                .to_le_bytes(),
+        );
+        record.extend_from_slice(&payload);
+        record.extend_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+        let mut journal = std::fs::OpenOptions::new()
+            .append(true)
+            .open(test_dir.join("manifest.journal"))
+            .expect("open journal");
+        journal.write_all(&record).expect("append corrupt record");
+        journal.sync_all().expect("sync journal");
+    }
+
+    fn add_sst(name: &str) -> crate::metadata::ManifestEdit {
+        crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: name.to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn salvage_load(test_dir: &Path) -> Manifest {
+        let fs: std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs> = std::sync::Arc::new(
+            cntryl_midge_core::io::real::RealFs::new(test_dir).expect("real fs"),
+        );
+        ManifestPersistence::load_with_fs_and_policy(&fs, crate::RecoveryPolicy::Salvage)
+            .expect("salvage load")
+    }
+
+    #[test]
+    fn should_keep_verified_journal_prefix_when_salvaging_a_corrupt_journal_record() {
+        // Arrange
+        let test_dir = create_test_dir();
+        crate::metadata::journal::append_edit(&test_dir, &add_sst("a.sst")).expect("append a");
+        crate::metadata::journal::append_edit(&test_dir, &add_sst("b.sst")).expect("append b");
+        append_record_with_stale_crc(&test_dir, &add_sst("corrupt.sst"));
+        ManifestPersistence::load(&test_dir).expect_err("strict load must reject the corruption");
+
+        // Act
+        let manifest = salvage_load(&test_dir);
+
+        // Assert
+        let names: Vec<_> = manifest
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect();
+        assert!(names.contains(&"a.sst"), "{names:?}");
+        assert!(names.contains(&"b.sst"), "{names:?}");
+        assert!(!names.contains(&"corrupt.sst"), "{names:?}");
+    }
+
+    #[test]
+    fn should_accept_appends_after_salvaging_a_corrupt_journal_prefix() {
+        // Arrange
+        let test_dir = create_test_dir();
+        crate::metadata::journal::append_edit(&test_dir, &add_sst("a.sst")).expect("append a");
+        append_record_with_stale_crc(&test_dir, &add_sst("corrupt.sst"));
+        salvage_load(&test_dir);
+
+        // Act
+        crate::metadata::journal::append_edit(&test_dir, &add_sst("after.sst"))
+            .expect("append after salvage");
+        let reloaded = ManifestPersistence::load(&test_dir).expect("strict load after salvage");
+
+        // Assert
+        let names: Vec<_> = reloaded
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect();
+        assert!(names.contains(&"a.sst"), "{names:?}");
+        assert!(names.contains(&"after.sst"), "{names:?}");
+        let preserved = std::fs::read_dir(&test_dir)
+            .expect("read db dir")
+            .filter_map(Result::ok)
+            .any(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with("manifest.journal.corrupt.")
+                    && !std::path::Path::new(&name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+            });
+        assert!(
+            preserved,
+            "the corrupt journal must be preserved for inspection"
+        );
+    }
+
+    #[test]
+    fn should_ignore_temp_manifest_files_when_loading_default_state() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let manifest = {
+            let mut fixture = Manifest::default();
+            fixture.next_sst_seqs = std::collections::HashMap::from([(0, 99)]);
+            fixture
+        };
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest)
+                .expect("serialize temp manifest"),
+        )
+        .expect("write temp manifest");
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest)
+                .expect("serialize temp snapshot"),
+        )
+        .expect("write temp snapshot");
+
+        // Act
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert_eq!(
+            loaded.next_sst_seqs.get(&0).copied().unwrap_or(0),
+            0,
+            "temp manifest artifacts must not become authoritative on load"
+        );
+        assert!(
+            loaded.files.is_empty(),
+            "temp manifest artifacts must be ignored"
+        );
+    }
+
+    #[test]
+    fn should_prefer_snapshot_over_manifest_when_both_exist_and_differ() {
+        // Arrange
+        let test_dir = create_test_dir();
+
+        let mut manifest_only = Manifest::default();
+        manifest_only.files.push(crate::metadata::FileMeta {
+            name: "manifest-only.sst".to_string(),
+            level: 1,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest_only)
+                .expect("encode legacy manifest"),
+        )
+        .expect("write legacy manifest");
+
+        let mut snapshot_only = Manifest::default();
+        snapshot_only.files.push(crate::metadata::FileMeta {
+            name: "snapshot-only.sst".to_string(),
+            level: 2,
+            size_bytes: 20,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &snapshot_only)
+            .expect("save snapshot");
+
+        assert!(
+            !test_dir
+                .join(ManifestPersistence::MANIFEST_FILE_TEMP)
+                .exists(),
+            "manifest staging temp file should be cleaned up after save"
+        );
+        assert!(
+            !test_dir
+                .join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP)
+                .exists(),
+            "snapshot staging temp file should be cleaned up after save"
+        );
+
+        // Act
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == "snapshot-only.sst"),
+            "snapshot state should win when both manifest and snapshot exist"
+        );
+        assert!(
+            !loaded
+                .files
+                .iter()
+                .any(|file| file.name == "manifest-only.sst"),
+            "manifest.json should be ignored when a snapshot checkpoint exists"
+        );
+    }
+
+    #[test]
+    fn should_preserve_range_tombstone_sequence_bound_in_manifest_checkpoint() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let mut manifest = Manifest::default();
+        manifest.files.push(crate::metadata::FileMeta {
+            name: "range.sst".into(),
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            smallest_seq: Some(5),
+            largest_seq: Some(15),
+            key_bounds_complete: true,
+            earliest_expiration_millis: None,
+            ..Default::default()
+        });
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
+            .expect("save range tombstone sequence bound");
+        let recovered = ManifestPersistence::load(&test_dir).expect("load checkpoint");
+
+        // Assert
+        assert_eq!(recovered.files[0].largest_seq, Some(15));
+        assert!(recovered.files[0].key_bounds_complete);
+    }
+
+    #[test]
+    fn should_recover_manifest_journal_consistently_given_snapshot_save_crash_before_journal_truncation(
+    ) {
+        // Arrange
+        let test_dir = create_test_dir();
+
+        let mut manifest_only = Manifest::default();
+        manifest_only.files.push(crate::metadata::FileMeta {
+            name: "manifest-only.sst".to_string(),
+            level: 1,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest_only)
+                .expect("encode legacy manifest"),
+        )
+        .expect("write legacy manifest");
+
+        let mut snapshot_manifest = Manifest::default();
+        snapshot_manifest.files.push(crate::metadata::FileMeta {
+            name: "snapshot-base.sst".to_string(),
+            level: 0,
+            size_bytes: 30,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &snapshot_manifest)
+            .expect("save snapshot");
+
+        crate::metadata::append_edit(
+            &test_dir,
+            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: "journal-added.sst".to_string(),
+                level: 3,
+                size_bytes: 40,
+                ..Default::default()
+            }),
+        )
+        .expect("append manifest edit");
+
+        // Act
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == "snapshot-base.sst"),
+            "snapshot base should be loaded before journal replay"
+        );
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == "journal-added.sst"),
+            "journal edits should replay on top of the snapshot"
+        );
+        assert!(
+            !loaded
+                .files
+                .iter()
+                .any(|file| file.name == "manifest-only.sst"),
+            "conflicting manifest.json should not leak into recovery when snapshot exists"
+        );
+    }
+
+    #[test]
+    fn should_preserve_concurrent_journal_edit_when_checkpoint_uses_stale_manifest() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let stale_manifest = Manifest::default();
+        let writer_dir = test_dir.clone();
+        let journal_file_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
+        let writer_file_name = journal_file_name.clone();
+        let writer = std::thread::spawn(move || {
+            crate::metadata::append_edit(
+                &writer_dir,
+                &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                    name: writer_file_name,
+                    level: 0,
+                    size_bytes: 10,
+                    ..Default::default()
+                }),
+            )
+        });
+        writer
+            .join()
+            .expect("join manifest writer")
+            .expect("append concurrent manifest edit");
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &stale_manifest)
+            .expect("checkpoint stale manifest without losing durable journal edits");
+        let loaded = ManifestPersistence::load(&test_dir).expect("reopen checkpointed manifest");
+
+        // Assert
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == journal_file_name),
+            "checkpoint must merge a durable edit that arrived after its manifest clone"
+        );
+        assert_eq!(loaded.edit_checkpoint_id, 1);
+    }
+
+    #[test]
+    fn should_preserve_all_edits_given_competing_stale_manifest_checkpoints() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let first_edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        let second_edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 2),
+            level: 0,
+            size_bytes: 20,
+            ..Default::default()
+        });
+        let mut first_writer_manifest = Manifest::default();
+        let mut second_writer_manifest = Manifest::default();
+        crate::metadata::append_edit(&test_dir, &first_edit).expect("append first writer edit");
+        first_writer_manifest
+            .apply_edit(&first_edit)
+            .expect("valid manifest fixture edit");
+        crate::metadata::append_edit(&test_dir, &second_edit).expect("append second writer edit");
+        second_writer_manifest
+            .apply_edit(&second_edit)
+            .expect("valid manifest fixture edit");
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &first_writer_manifest)
+            .expect("publish first stale checkpoint");
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &second_writer_manifest)
+            .expect("publish competing stale checkpoint");
+        let loaded = ManifestPersistence::load(&test_dir).expect("reopen competing checkpoints");
+
+        // Assert
+        assert_eq!(loaded.edit_checkpoint_id, 2);
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == cntryl_midge_core::cloud_layout::file_name(0, 0, 1)),
+            "later stale checkpoint must retain the first writer's durable edit"
+        );
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == cntryl_midge_core::cloud_layout::file_name(0, 0, 2)),
+            "later stale checkpoint must retain the second writer's durable edit"
+        );
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_replay_only_post_checkpoint_edits_given_crash_after_snapshot_rename() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let pre_checkpoint = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        crate::metadata::append_edit(&test_dir, &pre_checkpoint)
+            .expect("append pre-checkpoint edit");
+        let mut checkpoint_manifest = Manifest::default();
+        checkpoint_manifest
+            .apply_edit(&pre_checkpoint)
+            .expect("valid manifest fixture edit");
+        let _test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
+        let crash = fail::FailGuard::new(
+            "midge::manifest::after_snapshot_rename_before_journal_truncate",
+            "return",
+        )
+        .expect("configure snapshot-rename crash failpoint");
+        let checkpoint_error = ManifestPersistence::save_snapshot_and_truncate_journal(
+            &test_dir,
+            &checkpoint_manifest,
+        )
+        .expect_err("checkpoint must stop after publishing the snapshot");
+        drop(crash);
+        assert!(checkpoint_error.contains("snapshot rename"));
+        assert!(
+            std::fs::metadata(test_dir.join("manifest.journal"))
+                .expect("inspect retained journal")
+                .len()
+                > 0,
+            "crash boundary must leave the pre-checkpoint journal record intact"
+        );
+        let post_checkpoint = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 2),
+            level: 0,
+            size_bytes: 20,
+            ..Default::default()
+        });
+        crate::metadata::append_edit(&test_dir, &post_checkpoint)
+            .expect("append post-checkpoint edit");
+
+        // Act
+        let loaded = ManifestPersistence::load(&test_dir).expect("reopen manifest after crash");
+        let fs: std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs> = std::sync::Arc::new(
+            cntryl_midge_core::io::real::RealFs::open_existing(&test_dir)
+                .expect("open test filesystem"),
+        );
+        let snapshot_checkpoint = ManifestPersistence::load_binary_manifest_file(
+            &fs,
+            &cntryl_midge_core::io::traits::FsPath::new(ManifestPersistence::MANIFEST_SNAPSHOT),
+            "manifest snapshot",
+        )
+        .expect("read snapshot")
+        .edit_checkpoint_id;
+        let replayed =
+            crate::metadata::journal::replay_edits_after_with_fs_unlocked(&fs, snapshot_checkpoint)
+                .expect("replay edits newer than checkpoint");
+
+        // Assert
+        assert_eq!(snapshot_checkpoint, 1);
+        assert_eq!(
+            loaded.edit_checkpoint_id, 2,
+            "the loaded manifest holds every replayed edit"
+        );
+        assert_eq!(loaded.files.len(), 2);
+        assert_eq!(replayed.len(), 1);
+        assert!(matches!(
+            &replayed[0],
+            crate::metadata::ManifestEdit::AddSst(file)
+                if file.name == cntryl_midge_core::cloud_layout::file_name(0, 0, 2)
+        ));
+        assert_eq!(
+            loaded
+                .files
+                .iter()
+                .filter(|file| file.name == cntryl_midge_core::cloud_layout::file_name(0, 0, 1))
+                .count(),
+            1,
+            "the pre-checkpoint edit must come only from the published snapshot"
+        );
+        assert_eq!(
+            loaded
+                .files
+                .iter()
+                .filter(|file| file.name == cntryl_midge_core::cloud_layout::file_name(0, 0, 2))
+                .count(),
+            1,
+            "the post-checkpoint edit must replay exactly once"
+        );
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_recover_manifest_from_journal_given_snapshot_write_failure_when_reopening() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 7),
+            level: 0,
+            size_bytes: 700,
+            ..Default::default()
+        });
+        crate::metadata::append_edit(&test_dir, &edit).expect("append authoritative edit");
+        let mut manifest = Manifest::default();
+        manifest
+            .apply_edit(&edit)
+            .expect("valid manifest fixture edit");
+        let _test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
+        let failure =
+            fail::FailGuard::new("midge::manifest::inject_snapshot_write_failure", "return")
+                .expect("configure snapshot-write failpoint");
+
+        // Act
+        let error = ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
+            .expect_err("snapshot write must fail before publication");
+        drop(failure);
+        let reopened = ManifestPersistence::load(&test_dir)
+            .expect("journal must recover after failed snapshot write");
+
+        // Assert
+        assert!(
+            error.contains("snapshot write failed"),
+            "unexpected error: {error}"
+        );
+        assert!(!ManifestPersistence::manifest_snapshot_path(&test_dir).exists());
+        assert!(!test_dir
+            .join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP)
+            .exists());
+        assert!(
+            std::fs::metadata(test_dir.join("manifest.journal"))
+                .expect("inspect retained journal")
+                .len()
+                > 0,
+            "failed snapshot publication must retain the authoritative journal"
+        );
+        assert_eq!(
+            reopened
+                .files
+                .iter()
+                .filter(|file| file.name == cntryl_midge_core::cloud_layout::file_name(0, 0, 7))
+                .count(),
+            1,
+            "journal recovery must restore the edit exactly once"
+        );
+    }
+
+    #[test]
+    fn should_preserve_file_metadata_when_persisting() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let mut manifest = Manifest::default();
+        let sst_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
+        manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: 4096,
+            content_crc32c: Some(0x1234_abcd),
+            cf_id: 0,
+            sst_seq: 1,
+            smallest_key: Some(vec![1, 2, 3]),
+            largest_key: Some(vec![7, 8, 9]),
+            smallest_seq: Some(10),
+            largest_seq: Some(20),
+            key_bounds_complete: true,
+            earliest_expiration_millis: None,
+            sublevel: 0,
+            read_count: std::sync::Arc::default(),
+        });
+
+        // Act
+        ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");
+        assert!(
+            !test_dir
+                .join(ManifestPersistence::MANIFEST_FILE_TEMP)
+                .exists(),
+            "manifest staging temp file should not remain after save"
+        );
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert_eq!(loaded.files.len(), 1);
+        assert_eq!(loaded.files[0].name, sst_name);
+        assert_eq!(loaded.files[0].level, 0);
+        assert_eq!(loaded.files[0].size_bytes, 4096);
+        assert_eq!(loaded.files[0].content_crc32c, Some(0x1234_abcd));
+        assert_eq!(loaded.files[0].smallest_key, Some(vec![1, 2, 3]));
+        assert_eq!(loaded.files[0].largest_key, Some(vec![7, 8, 9]));
+    }
+
+    #[test]
+    fn should_delete_manifest_file_when_requested() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let manifest = Manifest::default();
+        ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");
+        let manifest_path = ManifestPersistence::manifest_path(&test_dir);
+        assert!(
+            manifest_path.exists(),
+            "manifest file should exist before delete"
+        );
+
+        // Act
+        ManifestPersistence::delete(&test_dir).expect("delete should succeed");
+
+        // Assert
+        assert!(
+            !manifest_path.exists(),
+            "manifest file should not exist after delete"
+        );
+    }
+
+    #[test]
+    fn should_clear_snapshot_backed_manifest_state_when_requested() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let mut manifest = Manifest::default();
+        manifest.files.push(crate::metadata::FileMeta {
+            name: "base.sst".to_string(),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
+            .expect("save snapshot should succeed");
+        crate::metadata::append_edit(
+            &test_dir,
+            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: "journal-added.sst".to_string(),
+                level: 1,
+                size_bytes: 20,
+                ..Default::default()
+            }),
+        )
+        .expect("append manifest edit");
+
+        let snapshot_path = ManifestPersistence::manifest_snapshot_path(&test_dir);
+        let journal_path = test_dir.join("manifest.journal");
+        assert!(
+            snapshot_path.exists(),
+            "snapshot should exist before delete"
+        );
+        assert!(journal_path.exists(), "journal should exist before delete");
+
+        // Act
+        ManifestPersistence::delete(&test_dir).expect("delete should succeed");
+
+        // Assert
+        assert!(
+            !snapshot_path.exists(),
+            "snapshot should not exist after delete"
+        );
+        assert!(
+            !journal_path.exists(),
+            "journal should not exist after delete"
+        );
+    }
+
+    #[test]
+    fn should_clear_manifest_temp_files_when_requested() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let manifest = {
+            let mut fixture = Manifest::default();
+            fixture.next_sst_seqs = std::collections::HashMap::from([(0, 17)]);
+            fixture
+        };
+        let manifest_temp_path = test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP);
+        let snapshot_temp_path = test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP);
+        std::fs::write(
+            &manifest_temp_path,
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest)
+                .expect("serialize temp manifest"),
+        )
+        .expect("write temp manifest");
+        std::fs::write(
+            &snapshot_temp_path,
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest)
+                .expect("serialize temp snapshot"),
+        )
+        .expect("write temp snapshot");
+
+        // Act
+        ManifestPersistence::delete(&test_dir).expect("delete should succeed");
+
+        // Assert
+        assert!(
+            !manifest_temp_path.exists(),
+            "manifest temp file should not exist after delete"
+        );
+        assert!(
+            !snapshot_temp_path.exists(),
+            "snapshot temp file should not exist after delete"
+        );
+    }
+
+    #[test]
+    fn should_return_default_after_delete_clears_all_persisted_manifest_state() {
+        // Arrange
+        let test_dir = create_test_dir();
+
+        let mut manifest_only = Manifest::default();
+        manifest_only.files.push(crate::metadata::FileMeta {
+            name: "manifest-only.sst".to_string(),
+            level: 1,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest_only)
+                .expect("encode legacy manifest"),
+        )
+        .expect("write legacy manifest");
+
+        let mut snapshot_manifest = Manifest::default();
+        snapshot_manifest.files.push(crate::metadata::FileMeta {
+            name: "snapshot-base.sst".to_string(),
+            level: 0,
+            size_bytes: 30,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &snapshot_manifest)
+            .expect("save snapshot");
+
+        crate::metadata::append_edit(
+            &test_dir,
+            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: "journal-added.sst".to_string(),
+                level: 3,
+                size_bytes: 40,
+                ..Default::default()
+            }),
+        )
+        .expect("append manifest edit");
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest_only)
+                .expect("serialize temp manifest"),
+        )
+        .expect("write temp manifest");
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP),
+            super::super::codec::encode(super::super::codec::MANIFEST, &snapshot_manifest)
+                .expect("serialize temp snapshot"),
+        )
+        .expect("write temp snapshot");
+
+        // Act
+        ManifestPersistence::delete(&test_dir).expect("delete persisted manifest state");
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert!(
+            loaded.files.is_empty(),
+            "load after delete should not recover manifest files from snapshot or journal"
+        );
+        assert_eq!(
+            loaded.next_sst_seqs.get(&0).copied().unwrap_or(0),
+            0,
+            "load after delete should reset to default manifest state"
+        );
+    }
+
+    #[test]
+    fn should_handle_missing_file_when_deleting() {
+        // Arrange
+        let test_dir = create_test_dir();
+
+        // Act
+        let result = ManifestPersistence::delete(&test_dir);
+
+        // Assert
+        assert!(result.is_ok(), "delete should succeed even if file missing");
+    }
+}

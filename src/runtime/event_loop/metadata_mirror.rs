@@ -162,7 +162,9 @@ impl EventLoop {
     }
 
     #[cfg(test)]
-    pub(super) fn mirror_metadata_to_authoritative_cloud(&self) -> cntryl_midge_core::common::MidgeResult<()> {
+    pub(super) fn mirror_metadata_to_authoritative_cloud(
+        &self,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.mirror_metadata_to_authoritative_cloud_within(&self.event_loop_cloud_deadline())
     }
 
@@ -230,7 +232,8 @@ impl EventLoop {
         match result {
             Ok(()) => Ok(()),
             Err(error)
-                if self.state.recovery_policy() == cntryl_midge_durability::RecoveryPolicy::Salvage =>
+                if self.state.recovery_policy()
+                    == cntryl_midge_durability::RecoveryPolicy::Salvage =>
             {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(%error, context, "cloud metadata mirror failed during salvage-capable operation");

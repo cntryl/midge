@@ -52,12 +52,12 @@ pub(crate) mod multipart;
 pub(crate) mod range;
 #[cfg(any(test, feature = "internal-testing"))]
 pub mod test_support;
-#[cfg(all(test, feature = "cloud-all"))]
-pub(crate) use test_support::native_http;
+#[cfg(all(any(test, feature = "internal-testing"), feature = "cloud-all"))]
+pub use test_support::native_http;
 #[cfg(any(test, feature = "internal-testing"))]
-pub(crate) use test_support::{
-    forward_cloud_backend, unsupported_cloud_backend, UnsupportedCloudBackend,
-};
+pub use test_support::UnsupportedCloudBackend;
+#[cfg(any(test, feature = "internal-testing"))]
+pub use test_support::{forward_cloud_backend, unsupported_cloud_backend};
 #[cfg(any(
     feature = "cloud-aws",
     feature = "cloud-azure",
@@ -73,8 +73,8 @@ pub mod executor;
 ))]
 mod list_budget;
 
-pub(crate) use blocking::BlockingCloud;
-pub(crate) use config::CloudWritePolicyConfig;
+pub use blocking::BlockingCloud;
+pub use config::CloudWritePolicyConfig;
 pub use config::{CloudRetryPolicy, CloudWritePolicy};
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
@@ -82,7 +82,7 @@ use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata
 use cntryl_midge_core::MidgeError;
 use std::sync::Arc;
 
-pub(crate) const REQUEST_TIMEOUT_HEADER: &str = "x-midge-internal-request-timeout-ms";
+pub const REQUEST_TIMEOUT_HEADER: &str = "x-midge-internal-request-timeout-ms";
 
 #[cfg(any(
     feature = "cloud-aws",
@@ -90,7 +90,7 @@ pub(crate) const REQUEST_TIMEOUT_HEADER: &str = "x-midge-internal-request-timeou
     feature = "cloud-gcp",
     feature = "cloud-oci"
 ))]
-pub(crate) fn parse_request_timeout(value: &str) -> Result<std::time::Duration, String> {
+pub fn parse_request_timeout(value: &str) -> Result<std::time::Duration, String> {
     value
         .parse::<u64>()
         .map(std::time::Duration::from_millis)
@@ -101,7 +101,7 @@ pub(crate) fn parse_request_timeout(value: &str) -> Result<std::time::Duration, 
 /// on, replacing any timeout the caller already supplied. Without it the
 /// provider falls back to the executor default and a mutation can commit
 /// remotely after the caller has already reported a timeout.
-pub(crate) fn set_request_timeout_header(
+pub fn set_request_timeout_header(
     headers: &mut Vec<(String, String)>,
     timeout: std::time::Duration,
 ) {
@@ -166,11 +166,11 @@ pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 pub(crate) use list_budget::CloudListBudget;
 
 mod error;
-pub(crate) use error::contextualize_operation_error;
+pub use error::contextualize_operation_error;
 pub use error::{CloudError, CloudOutcome};
 
 mod event;
-pub(crate) use event::object_match_precondition_headers;
+pub use event::object_match_precondition_headers;
 pub use event::{CloudCallback, CloudEvent, ObjectMetadata};
 
 mod backend;
@@ -193,9 +193,8 @@ pub use dispatcher::CloudStorage;
 mod proof;
 #[cfg(test)]
 pub(crate) use proof::blocking_cloud_object_proof;
-pub(crate) use proof::{
-    blocking_cloud_object_proof_within, validate_object_proof, CloudObjectProof,
-};
+pub(crate) use proof::validate_object_proof;
+pub use proof::{blocking_cloud_object_proof_within, CloudObjectProof};
 
 pub(crate) fn is_not_found_error(error: &CloudError) -> bool {
     error.is_not_found()

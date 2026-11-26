@@ -19,14 +19,16 @@ impl MigrationFixture {
         let backend = Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new());
         let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
         let temp = tempfile::tempdir()?;
-        let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-            cntryl_midge_durability::lease::CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: String::new(),
-            },
-            temp.path().to_path_buf(),
-            Arc::clone(&cloud),
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "test".into(),
+                    prefix: String::new(),
+                },
+                temp.path().to_path_buf(),
+                Arc::clone(&cloud),
+            ),
+        );
         let guard = Arc::clone(&lease).try_acquire()?;
         let store = lease
             .get_leader_store()
@@ -151,7 +153,10 @@ fn stage_candidate(
 ) -> MidgeResult<CloudMetadataGeneration> {
     use cntryl_midge_durability::metadata::{files, local_authority::LocalMetadataAuthority};
     let local: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
-    cntryl_midge_durability::metadata::format::ensure_or_create_format_marker(&local, std::path::Path::new("."))?;
+    cntryl_midge_durability::metadata::format::ensure_or_create_format_marker(
+        &local,
+        std::path::Path::new("."),
+    )?;
     let selected = LocalMetadataAuthority::stage_upgrade_candidate(
         Arc::clone(&local),
         [7; 32],
@@ -165,8 +170,11 @@ fn stage_candidate(
     )?;
     let mut bodies = BTreeMap::from([(files::FORMAT.to_owned(), FORMAT_10_MARKER.to_vec())]);
     for name in selected.selected_relative_paths() {
-        let bytes = cntryl_midge_core::io::read_all(local.as_ref(), &cntryl_midge_core::io::FsPath::new(&name))
-            .map_err(cntryl_midge_core::io::FsError::into_midge)?;
+        let bytes = cntryl_midge_core::io::read_all(
+            local.as_ref(),
+            &cntryl_midge_core::io::FsPath::new(&name),
+        )
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?;
         bodies.insert(name, bytes.to_vec());
     }
     LocalMetadataAuthority::validate_cloud_bodies(&bodies)?;
@@ -179,16 +187,19 @@ fn generation(
     ordinal: u64,
     bodies: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> CloudMetadataGeneration {
-    let id = cntryl_midge_durability::lease::SharedGenerationId::new(ordinal).expect("positive generation ordinal");
+    let id = cntryl_midge_durability::lease::SharedGenerationId::new(ordinal)
+        .expect("positive generation ordinal");
     let uuid = format!("00000000-0000-4000-8000-{ordinal:012}");
     let objects = bodies
         .iter()
-        .map(|(file_name, body)| cntryl_midge_durability::lease::CloudMetadataObject {
-            file_name: file_name.clone(),
-            object_key: format!("metadata/generations/{uuid}/{file_name}"),
-            len: u64::try_from(body.len()).expect("test body length"),
-            crc32c: crc32c::crc32c(body),
-        })
+        .map(
+            |(file_name, body)| cntryl_midge_durability::lease::CloudMetadataObject {
+                file_name: file_name.clone(),
+                object_key: format!("metadata/generations/{uuid}/{file_name}"),
+                len: u64::try_from(body.len()).expect("test body length"),
+                crc32c: crc32c::crc32c(body),
+            },
+        )
         .collect();
     CloudMetadataGeneration {
         id,
@@ -427,7 +438,8 @@ fn force_unexpected_pointer_selection(
     let mut pointer: TestPointer = cntryl_midge_durability::metadata::codec::decode(4, &wire)
         .map_err(|error| MidgeError::Corruption(error.to_string()))?;
     let mut unexpected = candidate.clone();
-    unexpected.id = cntryl_midge_durability::lease::SharedGenerationId::new(3).expect("third generation");
+    unexpected.id =
+        cntryl_midge_durability::lease::SharedGenerationId::new(3).expect("third generation");
     pointer.committed = Some(unexpected);
     let wire = cntryl_midge_durability::metadata::codec::encode(4, &pointer)
         .map_err(|error| MidgeError::Internal(error.to_string()))?;

@@ -98,7 +98,7 @@ impl CacheState {
     }
 }
 
-pub(crate) struct RemoteBlockCache {
+pub struct RemoteBlockCache {
     fs: Arc<dyn Fs>,
     budget_bytes: u64,
     state: Mutex<CacheState>,
@@ -119,7 +119,7 @@ impl RemoteBlockCache {
     /// Open an empty cache under `fs`, discarding whatever an earlier process
     /// left behind: entries are keyed by object identity, but a disposable
     /// directory is simpler to reason about than reconciling one.
-    pub(crate) fn open(fs: Arc<dyn Fs>, budget_bytes: u64) -> FsResult<Self> {
+    pub fn open(fs: Arc<dyn Fs>, budget_bytes: u64) -> FsResult<Self> {
         let dir = FsPath::new(CACHE_DIR);
         if fs.exists(&dir)? {
             fs.remove_dir_all(&dir)?;

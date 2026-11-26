@@ -2,8 +2,8 @@
 
 use super::*;
 use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
-use cntryl_midge_durability::metadata::accounting::{Medium, Origin, Snapshot};
 use cntryl_midge_core::types::KeyState;
+use cntryl_midge_durability::metadata::accounting::{Medium, Origin, Snapshot};
 
 const KEY: &[u8] = b"accounted-immutable";
 const VALUE: &[u8] = b"actual-built-published-installed-row";

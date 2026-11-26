@@ -14,12 +14,12 @@
 //! Point operations (get, put, delete, scan) are methods on Transaction.
 //! Transaction finalization and range tombstones are also transaction-scoped.
 
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
-#[cfg(test)]
-use cntryl_midge_durability::lease::PrimaryLease;
 #[cfg(test)]
 use crate::runtime::RuntimeState;
 use crate::runtime::{next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+#[cfg(test)]
+use cntryl_midge_durability::lease::PrimaryLease;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -39,13 +39,13 @@ mod startup;
 pub use startup::{install_manual_caller_expiry, OwnerExit};
 mod verification;
 
-pub use cntryl_midge_core::types::ColumnFamilyId;
 pub use api::{
     BlockCachePolicy, CloudWritePolicy, ConflictPolicy, Direction, DurabilityPolicy, Goal,
     IteratorState, Key, MemoryBudget, OpenOptions, OpenOptionsBuilder, Query, RecoveryPolicy,
     ScanIterator, Storage, Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 pub use backup::{BackupManifest, BackupObject, BackupStorageKind};
+pub use cntryl_midge_core::types::ColumnFamilyId;
 use lease_state::LeaseState;
 pub use metrics::EngineMetrics;
 pub use verification::StorageVerifier;
@@ -136,7 +136,9 @@ type CloudSstRecoveryProof = crate::runtime::cloud_startup::CloudSstRecoveryProo
 
 impl Engine {
     #[cfg(feature = "internal-testing")]
-    pub(crate) fn checkpoint_metrics(&self) -> cntryl_midge_durability::metadata::accounting::MetricsHandle {
+    pub(crate) fn checkpoint_metrics(
+        &self,
+    ) -> cntryl_midge_durability::metadata::accounting::MetricsHandle {
         self.metadata_accounting.clone()
     }
 
@@ -583,7 +585,8 @@ impl Engine {
             Some(RuntimeResponse::Error { error, .. })
                 if matches!(
                     error.severity(),
-                    cntryl_midge_core::common::Severity::Backpressure | cntryl_midge_core::common::Severity::Transient
+                    cntryl_midge_core::common::Severity::Backpressure
+                        | cntryl_midge_core::common::Severity::Transient
                 ) =>
             {
                 Ok(false)

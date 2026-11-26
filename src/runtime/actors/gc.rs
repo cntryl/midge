@@ -6,9 +6,9 @@
 //! - Coordinating with snapshots to avoid deleting live data
 
 use super::super::state::RuntimeState;
-use cntryl_midge_core::common::MidgeResult;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::RuntimeMsg;
+use cntryl_midge_core::common::MidgeResult;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -55,7 +55,8 @@ pub struct GcActor {
     /// event loop imports it for a delayed retry, so a failed provider request
     /// cannot be lost when the worker exits.
     failed_cloud_deletes: Arc<parking_lot::Mutex<VecDeque<String>>>,
-    completed_sst_deletes: Arc<parking_lot::Mutex<VecDeque<cntryl_midge_durability::metadata::FileMeta>>>,
+    completed_sst_deletes:
+        Arc<parking_lot::Mutex<VecDeque<cntryl_midge_durability::metadata::FileMeta>>>,
     inflight_sst_deletes: Arc<parking_lot::Mutex<HashSet<String>>>,
     durable_reclamation_restored: bool,
     /// Earliest time at which the failed cloud-delete queue may be retried.
@@ -133,9 +134,9 @@ impl GcActor {
             .collect();
 
         // List actual files on disk
-        let listed = state
-            .fs
-            .list_dir(&cntryl_midge_core::io::FsPath::new(cntryl_midge_table::sst::fs::SST_DIR));
+        let listed = state.fs.list_dir(&cntryl_midge_core::io::FsPath::new(
+            cntryl_midge_table::sst::fs::SST_DIR,
+        ));
         let disk_ssts = match listed {
             Ok(entries) => entries
                 .into_iter()
@@ -463,7 +464,11 @@ impl GcActor {
         let edits = files
             .iter()
             .filter(|file| state.manifest.retired_ssts.contains_key(&file.name))
-            .map(|file| cntryl_midge_durability::metadata::ManifestEdit::CompleteSstDelete { file: file.clone() })
+            .map(
+                |file| cntryl_midge_durability::metadata::ManifestEdit::CompleteSstDelete {
+                    file: file.clone(),
+                },
+            )
             .collect::<Vec<_>>();
         if edits.is_empty() {
             return Ok(());
@@ -476,7 +481,10 @@ impl GcActor {
         } else {
             state
                 .manifest_store
-                .append_for(cntryl_midge_durability::metadata::accounting::Origin::Administration, &edit)
+                .append_for(
+                    cntryl_midge_durability::metadata::accounting::Origin::Administration,
+                    &edit,
+                )
                 .map(Some)
         };
         match appended {
@@ -535,7 +543,9 @@ impl GcActor {
                 retained.push_back((id, bytes));
                 continue;
             }
-            match wal.remove_file(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::wal::segment_file_name(id))) {
+            match wal.remove_file(&cntryl_midge_core::io::FsPath::new(
+                cntryl_midge_durability::wal::segment_file_name(id),
+            )) {
                 Ok(()) | Err(cntryl_midge_core::io::FsError::NotFound(_)) => {
                     if let Some(storage) = storage {
                         storage.release_local_wal_bytes(bytes);
@@ -794,7 +804,8 @@ impl GcActor {
         file: &cntryl_midge_durability::metadata::FileMeta,
         publication_lock: &crate::runtime::MetadataPublicationLock,
     ) -> MidgeResult<()> {
-        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(storage.storage_io_timeout());
+        let deadline =
+            cntryl_midge_core::common::OperationDeadline::from_budget(storage.storage_io_timeout());
         let _turn = publication_lock
             .lock_for(deadline.remaining())
             .ok_or_else(|| {
@@ -866,12 +877,16 @@ mod tests {
     fn should_unlink_wal_only_below_the_durable_ledger_log_start() {
         // Arrange
         let device = cntryl_midge_core::simulation::crash_fs::CrashDevice::new();
-        let wal = cntryl_midge_core::io::subdirectory(Arc::new(device.fs()), cntryl_midge_durability::wal::WAL_DIR);
+        let wal = cntryl_midge_core::io::subdirectory(
+            Arc::new(device.fs()),
+            cntryl_midge_durability::wal::WAL_DIR,
+        );
         let mut state = RuntimeState::new("/tmp/midge-gc-retirement".into(), true);
         state.wal.history =
             crate::runtime::wal_history::WalHistory::open(wal.clone(), 1, 0).unwrap();
         crate::runtime::wal_history::fixture::rotate(&mut state.wal.history).unwrap();
-        let name = cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::wal::segment_file_name(1));
+        let name =
+            cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::wal::segment_file_name(1));
         let mut actor = GcActor::new();
         actor.enqueue_retired_wal(&crate::runtime::wal_history::RetiredWal {
             pending: vec![(1, 0)],
@@ -894,10 +909,15 @@ mod tests {
 
     #[test]
     fn should_release_local_wal_bytes_once_after_a_failed_unlink_is_retried() {
-        use cntryl_midge_core::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
+        use cntryl_midge_core::simulation::crash_fs::{
+            CrashDevice, Fault, FaultEffect, FaultError, FaultOp,
+        };
         // Arrange
         let device = CrashDevice::new();
-        let wal = cntryl_midge_core::io::subdirectory(Arc::new(device.fs()), cntryl_midge_durability::wal::WAL_DIR);
+        let wal = cntryl_midge_core::io::subdirectory(
+            Arc::new(device.fs()),
+            cntryl_midge_durability::wal::WAL_DIR,
+        );
         let mut state = RuntimeState::new("/tmp/midge-gc-accounting".into(), true);
         state.wal.history =
             crate::runtime::wal_history::WalHistory::open(wal.clone(), 1, 0).unwrap();

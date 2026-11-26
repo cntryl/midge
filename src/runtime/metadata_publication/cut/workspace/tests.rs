@@ -1,8 +1,8 @@
 use super::*;
+use crate::runtime::{CapturedMetadataCut, IntentLogEntry};
 use cntryl_midge_core::common::resource_budget::ResourceBudget;
 use cntryl_midge_core::io::{Fs, FsPath};
 use cntryl_midge_durability::metadata::Manifest;
-use crate::runtime::{CapturedMetadataCut, IntentLogEntry};
 
 struct AdmissionFixture {
     _directory: tempfile::TempDir,
@@ -22,7 +22,8 @@ struct FirstEdit<'a> {
 fn fixture(snapshot: &[u8], intents: &[IntentLogEntry]) -> AdmissionFixture {
     let directory = tempfile::tempdir().unwrap();
     let fs = cntryl_midge_core::io::real::test_root(directory.path());
-    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())
+        .unwrap();
     std::fs::write(directory.path().join(files::MANIFEST_SNAPSHOT), snapshot).unwrap();
     if !intents.is_empty() {
         let bytes = cntryl_midge_durability::metadata::codec::encode(
@@ -91,10 +92,18 @@ fn should_refuse_dense_file_slots_before_allocating_an_unadmitted_manifest() {
     // semantic SST-name validation. Their real typed slots exceed 16x wire.
     let mut raw = serde_json::to_value(Manifest::default()).unwrap();
     raw["files"] = serde_json::json!(vec![serde_json::json!(["", 0, 0]); 8192]);
-    let encoded = cntryl_midge_durability::metadata::codec::encode(cntryl_midge_durability::metadata::codec::MANIFEST, &raw).unwrap();
-    let decoded: Manifest =
-        cntryl_midge_durability::metadata::codec::decode(cntryl_midge_durability::metadata::codec::MANIFEST, &encoded).unwrap();
-    let actual_slots = decoded.files.capacity() * std::mem::size_of::<cntryl_midge_durability::metadata::FileMeta>();
+    let encoded = cntryl_midge_durability::metadata::codec::encode(
+        cntryl_midge_durability::metadata::codec::MANIFEST,
+        &raw,
+    )
+    .unwrap();
+    let decoded: Manifest = cntryl_midge_durability::metadata::codec::decode(
+        cntryl_midge_durability::metadata::codec::MANIFEST,
+        &encoded,
+    )
+    .unwrap();
+    let actual_slots = decoded.files.capacity()
+        * std::mem::size_of::<cntryl_midge_durability::metadata::FileMeta>();
     assert!(decoded.validate_persisted().is_err());
     drop(decoded);
     let fixture = fixture(&encoded, &[]);
@@ -110,9 +119,11 @@ fn should_refuse_dense_file_slots_before_allocating_an_unadmitted_manifest() {
 #[test]
 fn should_refuse_dense_name_descriptors_before_allocating_unadmitted_intents() {
     // Arrange: empty names still own String descriptors in the typed Vec.
-    let snapshot =
-        cntryl_midge_durability::metadata::codec::encode(cntryl_midge_durability::metadata::codec::MANIFEST, &Manifest::default())
-            .unwrap();
+    let snapshot = cntryl_midge_durability::metadata::codec::encode(
+        cntryl_midge_durability::metadata::codec::MANIFEST,
+        &Manifest::default(),
+    )
+    .unwrap();
     let fixture = fixture(
         &snapshot,
         &[IntentLogEntry::CompactionPlanned {
@@ -122,7 +133,8 @@ fn should_refuse_dense_name_descriptors_before_allocating_unadmitted_intents() {
     );
     assert!(8192 * std::mem::size_of::<String>() > fixture.memory.limit());
     let original =
-        cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG)).unwrap();
+        cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG))
+            .unwrap();
 
     // Act
     let result = capture(&fixture);
@@ -135,9 +147,11 @@ fn should_refuse_dense_name_descriptors_before_allocating_unadmitted_intents() {
 fn should_admit_dense_scalar_intents_without_charging_publication_witnesses() {
     // Arrange: scalar records expand to the real enum size but create no
     // publication boundary, compact witness, or normalization buffer.
-    let snapshot =
-        cntryl_midge_durability::metadata::codec::encode(cntryl_midge_durability::metadata::codec::MANIFEST, &Manifest::default())
-            .unwrap();
+    let snapshot = cntryl_midge_durability::metadata::codec::encode(
+        cntryl_midge_durability::metadata::codec::MANIFEST,
+        &Manifest::default(),
+    )
+    .unwrap();
     let intents = (1..=3000)
         .map(|seqno| IntentLogEntry::SeqnoAllocated { seqno, cf_id: 0 })
         .collect::<Vec<_>>();

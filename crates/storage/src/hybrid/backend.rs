@@ -16,14 +16,14 @@
 /// one that may still apply it. Recovery uses this instead of matching phrases
 /// in the error message, where a reworded message silently changed the path.
 #[derive(Debug)]
-pub(crate) struct RemoteCasFailure {
-    pub(crate) may_have_committed: bool,
-    pub(crate) error: cntryl_midge_core::MidgeError,
+pub struct RemoteCasFailure {
+    pub may_have_committed: bool,
+    pub error: cntryl_midge_core::MidgeError,
 }
 
 impl RemoteCasFailure {
     /// The provider never admitted the mutation.
-    pub(crate) fn not_committed(error: cntryl_midge_core::MidgeError) -> Self {
+    pub fn not_committed(error: cntryl_midge_core::MidgeError) -> Self {
         Self {
             may_have_committed: false,
             error,
@@ -32,7 +32,7 @@ impl RemoteCasFailure {
 
     /// The mutation may still be applied, so the caller must resolve it
     /// against durable state.
-    pub(crate) fn may_have_committed(error: cntryl_midge_core::MidgeError) -> Self {
+    pub fn may_have_committed(error: cntryl_midge_core::MidgeError) -> Self {
         Self {
             may_have_committed: true,
             error,
@@ -54,10 +54,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 mod control_io;
-pub(crate) use control_io::{ControlObject, ControlWriteFailure};
+pub use control_io::{ControlObject, ControlWriteFailure};
 mod file_publication;
 mod inventory;
-pub(crate) use file_publication::ImmutableFileSource;
+pub use file_publication::ImmutableFileSource;
 use inventory::ObjectInventories;
 mod object_io;
 mod proofs;
@@ -67,17 +67,17 @@ mod reservations;
 mod uploads;
 
 use proofs::PruneWorkerRegistry;
-pub(crate) use proofs::{GuardedObjectProof, RemoteObjectProof};
-#[cfg(test)]
-pub(crate) use queues::WalUploadRetryPolicy;
+pub use proofs::{GuardedObjectProof, RemoteObjectProof};
+#[cfg(any(test, feature = "internal-testing"))]
+pub use queues::WalUploadRetryPolicy;
 use queues::{BoundedEventQueue, UploadQueue};
-pub(crate) use queues::{HeldUploads, HybridQueueLimits};
+pub use queues::{HeldUploads, HybridQueueLimits};
 
 const MAX_PENDING_WAL_UPLOADS: usize = 1_024;
 const MAX_PENDING_WAL_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const WAL_UPLOAD_WORKER_QUEUE_CAPACITY: usize = 32;
 const MAX_PENDING_STORAGE_EVENTS: usize = MAX_PENDING_WAL_UPLOADS * 2;
-pub(crate) const HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY: usize = MAX_PENDING_STORAGE_EVENTS;
+pub const HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY: usize = MAX_PENDING_STORAGE_EVENTS;
 const MAX_PENDING_STORAGE_EVENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONCURRENT_PRUNE_WORKERS: usize = 4;
 const MAX_PENDING_PRUNE_REQUESTS: usize = 64;
@@ -188,7 +188,7 @@ pub struct HybridStorage {
 
 impl HybridStorage {
     /// Where this storage records operational events.
-    pub(crate) fn counters(&self) -> &cntryl_midge_core::telemetry::CounterSink {
+    pub fn counters(&self) -> &cntryl_midge_core::telemetry::CounterSink {
         &self.counters
     }
 
@@ -209,8 +209,8 @@ impl HybridStorage {
     }
 
     /// Create hybrid storage with independently managed cloud object classes.
-    #[cfg(test)]
-    pub(crate) fn new_with_class_stores_and_event_sender(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn new_with_class_stores_and_event_sender(
         wal_cloud: Arc<dyn StorageBackend>,
         sst_cloud: Arc<dyn StorageBackend>,
         control_cloud: Arc<dyn StorageBackend>,
@@ -227,7 +227,7 @@ impl HybridStorage {
         )
     }
 
-    pub(crate) fn new_with_class_stores_upload_policy_and_event_sender(
+    pub fn new_with_class_stores_upload_policy_and_event_sender(
         wal_cloud: Arc<dyn StorageBackend>,
         sst_cloud: Arc<dyn StorageBackend>,
         control_cloud: Arc<dyn StorageBackend>,
@@ -251,7 +251,7 @@ impl HybridStorage {
     }
 
     /// Create a new hybrid storage with a custom storage budget policy
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn with_policy(
         cloud: Arc<dyn StorageBackend>,
         policy: policy::StorageBudgetPolicy,
@@ -259,8 +259,8 @@ impl HybridStorage {
         Self::with_policy_and_event_sender(cloud, policy, None)
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_test_upload_limits(
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn with_test_upload_limits(
         cloud: Arc<dyn StorageBackend>,
         policy: policy::StorageBudgetPolicy,
         upload_entries: usize,
@@ -291,7 +291,7 @@ impl HybridStorage {
         )
     }
 
-    pub(crate) fn with_policy_event_sender_and_limits(
+    pub fn with_policy_event_sender_and_limits(
         cloud: Arc<dyn StorageBackend>,
         policy: policy::StorageBudgetPolicy,
         external_event_tx: Option<cb::Sender<StorageEvent>>,
@@ -307,7 +307,7 @@ impl HybridStorage {
         )
     }
 
-    pub(crate) fn with_class_stores_policy_event_sender_and_limits(
+    pub fn with_class_stores_policy_event_sender_and_limits(
         wal_cloud: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
         control_cloud: Arc<dyn StorageBackend>,
@@ -386,42 +386,35 @@ impl HybridStorage {
         }
     }
 
-    pub(crate) fn configure_write_authority(
-        &self,
-        authority: StorageWriteAuthority,
-    ) -> MidgeResult<()> {
+    pub fn configure_write_authority(&self, authority: StorageWriteAuthority) -> MidgeResult<()> {
         self.write_authority.set(authority).map_err(|_| {
             MidgeError::Internal("storage write authority was already configured".into())
         })
     }
 
-    pub(crate) fn check_write_authority(&self) -> MidgeResult<()> {
+    pub fn check_write_authority(&self) -> MidgeResult<()> {
         self.write_authority
             .get()
             .map_or(Ok(()), |validate| validate())
     }
 
     /// The caller holds the WAL catalog mutation lock across take and commit.
-    pub(crate) fn take_wal_catalog_cache(&self) -> Option<(ControlObject, StorageObjectMetadata)> {
+    pub fn take_wal_catalog_cache(&self) -> Option<(ControlObject, StorageObjectMetadata)> {
         self.wal_catalog_cache.lock().take()
     }
 
-    pub(crate) fn cache_wal_catalog(&self, primary: ControlObject, mirror: ControlObject) {
+    pub fn cache_wal_catalog(&self, primary: ControlObject, mirror: ControlObject) {
         if primary.has_write_receipt() && mirror.has_write_receipt() {
             self.restore_wal_catalog_cache(primary, mirror.into_metadata());
         }
     }
 
     /// Return a taken cache entry the caller did not replace.
-    pub(crate) fn restore_wal_catalog_cache(
-        &self,
-        primary: ControlObject,
-        mirror: StorageObjectMetadata,
-    ) {
+    pub fn restore_wal_catalog_cache(&self, primary: ControlObject, mirror: StorageObjectMetadata) {
         *self.wal_catalog_cache.lock() = Some((primary, mirror));
     }
 
-    pub(crate) fn configure_maintenance_memory(
+    pub fn configure_maintenance_memory(
         &self,
         limit: usize,
     ) -> cntryl_midge_core::common::resource_budget::ResourceBudget {
@@ -430,7 +423,7 @@ impl HybridStorage {
             .clone()
     }
 
-    pub(crate) fn maintenance_memory(
+    pub fn maintenance_memory(
         &self,
     ) -> Option<cntryl_midge_core::common::resource_budget::ResourceBudget> {
         self.maintenance_memory.get().cloned()
@@ -442,7 +435,7 @@ impl HybridStorage {
     ///
     /// Returns [`cntryl_midge_core::MidgeError::Timeout`] when a finite deadline
     /// expires before the current catalog mutation releases the lock.
-    pub(crate) fn lock_wal_catalog_mutation_within(
+    pub fn lock_wal_catalog_mutation_within(
         &self,
         deadline: &cntryl_midge_core::OperationDeadline,
         operation: &str,
@@ -467,7 +460,7 @@ impl HybridStorage {
     }
     /// Close upload admission and wait for every accepted WAL upload attempt.
     /// The caller must retain the writer lease until this returns.
-    pub(crate) fn shutdown_wal_upload_worker(&self) {
+    pub fn shutdown_wal_upload_worker(&self) {
         let mut worker = self.wal_upload_worker.lock();
         worker.tx.take();
         for handle in worker.handles.drain(..) {
@@ -489,9 +482,9 @@ impl HybridStorage {
 ///
 /// These expose the format-neutral routing only; no caller outside tests needs
 /// a store handle, so the accessors stay behind `cfg(test)`.
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-testing"))]
 impl HybridStorage {
-    pub(crate) fn sst_store(&self) -> &Arc<dyn StorageBackend> {
+    pub fn sst_store(&self) -> &Arc<dyn StorageBackend> {
         &self.stores.sst
     }
 }

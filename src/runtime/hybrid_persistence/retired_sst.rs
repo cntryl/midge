@@ -16,9 +16,12 @@ impl CloudPersistence {
         file: &FileMeta,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
-        cntryl_midge_core::failpoints::fail_point!("midge::cloud::inject_fail_sst_delete", |_| Err(
-            MidgeError::Internal("failpoint: cloud SST delete failed".to_string())
-        ));
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::cloud::inject_fail_sst_delete",
+            |_| Err(MidgeError::Internal(
+                "failpoint: cloud SST delete failed".to_string()
+            ))
+        );
         let expected = file.content_crc32c.ok_or_else(|| {
             MidgeError::Corruption(format!(
                 "retired SST '{}' lacks its original checksum; retaining it",

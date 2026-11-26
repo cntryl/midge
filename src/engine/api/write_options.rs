@@ -138,7 +138,9 @@ impl WriteOptions {
         match self.policy {
             DurabilityPolicy::Sync => cntryl_midge_durability::wal::DurabilityPolicy::Strict,
             DurabilityPolicy::Buffered => cntryl_midge_durability::wal::DurabilityPolicy::Batched,
-            DurabilityPolicy::BestEffort => cntryl_midge_durability::wal::DurabilityPolicy::BestEffort,
+            DurabilityPolicy::BestEffort => {
+                cntryl_midge_durability::wal::DurabilityPolicy::BestEffort
+            }
             DurabilityPolicy::CloudAsync | DurabilityPolicy::CloudStrict => {
                 cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync
             }
@@ -182,7 +184,10 @@ mod tests {
     ) {
         // Arrange
         let options = [
-            (WriteOptions::sync(), cntryl_midge_durability::wal::DurabilityPolicy::Strict),
+            (
+                WriteOptions::sync(),
+                cntryl_midge_durability::wal::DurabilityPolicy::Strict,
+            ),
             (
                 WriteOptions::buffered(),
                 cntryl_midge_durability::wal::DurabilityPolicy::Batched,

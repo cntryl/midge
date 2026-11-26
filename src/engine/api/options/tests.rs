@@ -372,7 +372,8 @@ fn should_resolve_two_location_cloud_topology() {
     // Act
     let two_location_options = OpenOptions::cloud_multi(
         "/tmp/midge-two-location-options",
-        cntryl_midge_storage::config::CloudStorageTopology::new(shared.clone()).with_control(control.clone()),
+        cntryl_midge_storage::config::CloudStorageTopology::new(shared.clone())
+            .with_control(control.clone()),
     )
     .build()
     .expect("build two-location cloud options");
@@ -448,9 +449,10 @@ fn should_parse_azure_account_from_connection_string_config() {
 #[test]
 fn should_reject_connection_string_credential_override_without_account() {
     // Arrange
-    let provider: CloudProviderConfig = cntryl_midge_storage::config::AzureBlobConfig::new("", "container")
-        .with_credentials(AzureCredentialSource::connection_string("AccountKey=key"))
-        .into();
+    let provider: CloudProviderConfig =
+        cntryl_midge_storage::config::AzureBlobConfig::new("", "container")
+            .with_credentials(AzureCredentialSource::connection_string("AccountKey=key"))
+            .into();
 
     let result = provider.with_azure_credentials(AzureCredentialSource::shared_key("key"));
 
@@ -1038,10 +1040,9 @@ fn should_reject_explicit_skew_tolerance_when_it_exceeds_ttl() {
 #[test]
 fn should_accept_dotted_native_aws_bucket_when_building_cloud_options() {
     // Arrange
-    let provider = cntryl_midge_storage::config::CloudProviderConfig::from(cntryl_midge_storage::config::AwsS3Config::new(
-        "database.example",
-        "us-east-1",
-    ));
+    let provider = cntryl_midge_storage::config::CloudProviderConfig::from(
+        cntryl_midge_storage::config::AwsS3Config::new("database.example", "us-east-1"),
+    );
 
     // Act
     let options = OpenOptions::cloud(

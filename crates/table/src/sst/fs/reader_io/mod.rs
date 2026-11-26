@@ -79,7 +79,7 @@ pub struct SstVerificationStats {
 
 /// Physical work performed by one point lookup against one SST.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SstPointReadStats {
+pub struct SstPointReadStats {
     pub sst_touched: bool,
     pub blocks_read: u64,
     pub entries_decoded: u64,
@@ -334,7 +334,7 @@ impl BlockEntryDecoder {
 /// only as the caller advances the cursor. This keeps a small query limit from
 /// turning into a full-table read and lets corruption discovered in a later
 /// block surface from the corresponding iterator item.
-pub(crate) struct SstStateScan {
+pub struct SstStateScan {
     reader: Arc<SstFileIo>,
     start: Option<Vec<u8>>,
     end: Option<Vec<u8>>,
@@ -982,13 +982,13 @@ impl SstFileIo {
         Ok(reader)
     }
 
-    pub(crate) fn file_size(&self) -> u64 {
+    pub fn file_size(&self) -> u64 {
         self.block_region_end
             .saturating_add(crate::sst::types::SST_FOOTER_SIZE as u64)
     }
 
     /// Stream a summary through the caller's filesystem abstraction.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn summarize_with_fs(path: &str, fs: Arc<dyn Fs>) -> MidgeResult<SstFileSummary> {
         Self::open(path, fs)?.into_streaming_summary()
     }
@@ -1033,8 +1033,8 @@ impl SstFileIo {
     }
 
     /// The identity this reader's blocks are cached under.
-    #[cfg(test)]
-    pub(crate) fn block_cache_sst_id(&self) -> u64 {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn block_cache_sst_id(&self) -> u64 {
         self.sst_id
     }
 

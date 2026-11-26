@@ -5,8 +5,8 @@ use super::{
     WalPublicationCatalog,
 };
 use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
-use cntryl_midge_storage::StorageObjectMetadata;
 use cntryl_midge_durability::wal::cloud_catalog::{CatalogDecodeError, CatalogRefusal};
+use cntryl_midge_storage::StorageObjectMetadata;
 
 /// The expected rows kept through retirement CAS, including their cloned
 /// family-frontier vectors. Their original catalog can be released meanwhile.
@@ -252,7 +252,11 @@ pub(super) fn load_and_repair_catalog_with_authority(
     validate()?;
     let budget = catalog_budget(storage);
     let primary = storage
-        .read_control_object(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY, &budget, deadline)
+        .read_control_object(
+            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
+            &budget,
+            deadline,
+        )
         .map_err(|error| {
             contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
         })?;
@@ -467,7 +471,11 @@ fn current_fencing_epoch(
 ) -> MidgeResult<Option<u64>> {
     let budget = catalog_budget(storage);
     let primary = storage
-        .read_control_object(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY, &budget, deadline)
+        .read_control_object(
+            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
+            &budget,
+            deadline,
+        )
         .map_err(|error| {
             contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
         })?;

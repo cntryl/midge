@@ -7,12 +7,12 @@ use super::merge::{
 use super::{tombstone_is_obsolete, CompactionVersion};
 use cntryl_midge_core::common::MidgeResult;
 use cntryl_midge_core::io::FsError;
-#[cfg(test)]
-use cntryl_midge_table::sst::traits::RawSstVersionCursor;
-use cntryl_midge_table::sst::traits::SstFactory;
 use cntryl_midge_core::types::RangeTombstone;
 #[cfg(test)]
 use cntryl_midge_core::types::{EntryType, KeyState};
+#[cfg(test)]
+use cntryl_midge_table::sst::traits::RawSstVersionCursor;
+use cntryl_midge_table::sst::traits::SstFactory;
 use std::path::Path;
 
 struct OutputSetCleanup {
@@ -700,7 +700,10 @@ struct PartitionRoller<'a> {
     budget: &'a cntryl_midge_core::common::resource_budget::ResourceBudget,
     output_size_limit: Option<usize>,
     writer: Option<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>>,
-    partition_lower_bound: Option<(Vec<u8>, cntryl_midge_core::common::resource_budget::ResourceReservation)>,
+    partition_lower_bound: Option<(
+        Vec<u8>,
+        cntryl_midge_core::common::resource_budget::ResourceReservation,
+    )>,
     partition_point_count: usize,
 }
 

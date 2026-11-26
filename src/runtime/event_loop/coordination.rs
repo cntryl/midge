@@ -199,7 +199,10 @@ impl LocalRetirementQueue {
 
     /// One past the leading run of `ledger`'s sealed members that are
     /// queued: the log start that run retires to.
-    pub(crate) fn retire_point(&self, ledger: &cntryl_midge_durability::wal::ledger::WalLedger) -> u64 {
+    pub(crate) fn retire_point(
+        &self,
+        ledger: &cntryl_midge_durability::wal::ledger::WalLedger,
+    ) -> u64 {
         ledger
             .sealed()
             .find(|segment_id| !self.queued.contains_key(segment_id))
@@ -259,7 +262,9 @@ impl CloudWalUploadTracker {
         &self.acks
     }
 
-    pub(super) fn oldest_published_facts(&self) -> Option<&cntryl_midge_durability::wal::format::SealedFacts> {
+    pub(super) fn oldest_published_facts(
+        &self,
+    ) -> Option<&cntryl_midge_durability::wal::format::SealedFacts> {
         self.acks.oldest_published_facts()
     }
 
@@ -365,7 +370,10 @@ impl CloudWalUploadTracker {
 
     /// The log start the leading run of queued local retirements retires
     /// `ledger` to.
-    pub(super) fn local_retire_point(&self, ledger: &cntryl_midge_durability::wal::ledger::WalLedger) -> u64 {
+    pub(super) fn local_retire_point(
+        &self,
+        ledger: &cntryl_midge_durability::wal::ledger::WalLedger,
+    ) -> u64 {
         self.local_retirement.retire_point(ledger)
     }
 
@@ -564,7 +572,11 @@ pub(crate) struct WriteStallWaiters {
 }
 
 impl WriteStallWaiters {
-    pub(super) fn register(&mut self, request_id: u64, cf_id: cntryl_midge_core::types::ColumnFamilyId) {
+    pub(super) fn register(
+        &mut self,
+        request_id: u64,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) {
         if let Some(previous_cf) = self.by_request.insert(request_id, cf_id) {
             self.remove_from_queue(previous_cf, request_id);
         }
@@ -586,7 +598,10 @@ impl WriteStallWaiters {
         self.by_column_family.keys().copied().collect()
     }
 
-    pub(super) fn take_column_family(&mut self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> Vec<u64> {
+    pub(super) fn take_column_family(
+        &mut self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> Vec<u64> {
         self.by_column_family
             .remove(&cf_id)
             .into_iter()
@@ -603,7 +618,11 @@ impl WriteStallWaiters {
             .collect()
     }
 
-    fn remove_from_queue(&mut self, cf_id: cntryl_midge_core::types::ColumnFamilyId, request_id: u64) {
+    fn remove_from_queue(
+        &mut self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+        request_id: u64,
+    ) {
         let remove_queue = if let Some(queue) = self.by_column_family.get_mut(&cf_id) {
             queue.retain(|queued| *queued != request_id);
             queue.is_empty()
@@ -671,7 +690,9 @@ mod tests {
         )
         .record(&record)
         .seal();
-        let entry = cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+        let entry =
+            cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+                .unwrap();
         let recovered = BTreeMap::from([(3, entry)]);
 
         // Act

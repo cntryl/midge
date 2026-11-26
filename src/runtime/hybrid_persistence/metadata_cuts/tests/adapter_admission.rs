@@ -53,7 +53,8 @@ fn should_complete_exact_readback_when_a_prior_physical_adapter_releases_its_cha
         let (forwarded, abandoned) = mpsc::channel();
         drop(abandoned);
         let retained =
-            cntryl_midge_storage::retained_callback::retain(forwarded, cut.memory_reservation()).unwrap();
+            cntryl_midge_storage::retained_callback::retain(forwarded, cut.memory_reservation())
+                .unwrap();
         let (entered, holding) = mpsc::channel();
         let (release, released) = mpsc::channel();
         retained

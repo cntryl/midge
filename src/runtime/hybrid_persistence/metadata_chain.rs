@@ -1,13 +1,17 @@
 //! Versioned cloud metadata snapshots and bounded suffix-edit chains.
 
 use super::metadata_snapshot::CloudMetadataMirrorContext;
+use bytes::Bytes;
 use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
-use cntryl_midge_durability::lease::{CloudMetadataGeneration, CloudMetadataObject, SharedGenerationId};
-use cntryl_midge_durability::metadata::cloud_manifest::{CHAIN_FILE_NAME, MAX_CHAIN_BYTES, MAX_CHAIN_OBJECTS};
+use cntryl_midge_durability::lease::{
+    CloudMetadataGeneration, CloudMetadataObject, SharedGenerationId,
+};
+use cntryl_midge_durability::metadata::cloud_manifest::{
+    CHAIN_FILE_NAME, MAX_CHAIN_BYTES, MAX_CHAIN_OBJECTS,
+};
 use cntryl_midge_durability::metadata::{codec, files};
 use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
 use cntryl_midge_storage::{StorageBackend, StoragePrecondition, StorageRequest};
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -128,7 +132,9 @@ pub(super) fn read_with_cut_reserved(
     cloud: &CloudStorage,
     generation: &CloudMetadataGeneration,
     deadline: &OperationDeadline,
-    reservation: Option<std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
+    reservation: Option<
+        std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>,
+    >,
 ) -> MidgeResult<DecodedChain> {
     if generation.objects.is_empty() || generation.objects.len() > MAX_CHAIN_OBJECTS {
         return Err(MidgeError::Corruption(
@@ -389,7 +395,9 @@ fn publish_bytes(
     key: &str,
     bytes: &[u8],
     deadline: &OperationDeadline,
-    reservation: Option<&std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
+    reservation: Option<
+        &std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>,
+    >,
 ) -> MidgeResult<()> {
     let mut io = BlockingCloud::new(cloud, deadline);
     if let Some(reservation) = reservation {

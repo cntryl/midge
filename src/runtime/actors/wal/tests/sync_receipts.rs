@@ -7,7 +7,10 @@ struct AppendAfterSyncWriter {
 }
 
 impl WalWriter for AppendAfterSyncWriter {
-    fn set_write_authority(&self, authority: Option<cntryl_midge_durability::wal::traits::WriteAuthority>) {
+    fn set_write_authority(
+        &self,
+        authority: Option<cntryl_midge_durability::wal::traits::WriteAuthority>,
+    ) {
         self.inner.set_write_authority(authority);
     }
     fn append_record_accounted(
@@ -40,7 +43,10 @@ impl WalWriter for AppendAfterSyncWriter {
     fn tail(&self) -> cntryl_midge_durability::wal::format::SegmentTail {
         self.inner.tail()
     }
-    fn seal_facts(&self, timeout: Duration) -> MidgeResult<cntryl_midge_durability::wal::format::SealedFacts> {
+    fn seal_facts(
+        &self,
+        timeout: Duration,
+    ) -> MidgeResult<cntryl_midge_durability::wal::format::SealedFacts> {
         self.inner.seal_facts(timeout)
     }
     fn write_footer(

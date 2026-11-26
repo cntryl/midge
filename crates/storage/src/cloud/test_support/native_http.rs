@@ -8,22 +8,22 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-pub(crate) struct Request {
-    pub(crate) method: String,
-    pub(crate) path: String,
-    pub(crate) headers: Vec<(String, String)>,
-    pub(crate) body: Vec<u8>,
+pub struct Request {
+    pub method: String,
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
 }
 
-pub(crate) struct Response {
-    pub(crate) status: u16,
-    pub(crate) headers: Vec<(String, String)>,
-    pub(crate) body: Vec<u8>,
+pub struct Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
     delivery: Option<std::sync::mpsc::Sender<bool>>,
 }
 
 impl Response {
-    pub(crate) fn new(status: u16, body: impl Into<Vec<u8>>) -> Self {
+    pub fn new(status: u16, body: impl Into<Vec<u8>>) -> Self {
         Self {
             status,
             headers: Vec::new(),
@@ -32,25 +32,25 @@ impl Response {
         }
     }
 
-    pub(crate) fn with_etag(mut self, version: usize) -> Self {
+    pub fn with_etag(mut self, version: usize) -> Self {
         self.headers.push(("ETag".into(), format!("\"{version}\"")));
         self
     }
 
-    pub(crate) fn with_delivery_receipt(mut self, delivery: std::sync::mpsc::Sender<bool>) -> Self {
+    pub fn with_delivery_receipt(mut self, delivery: std::sync::mpsc::Sender<bool>) -> Self {
         self.delivery = Some(delivery);
         self
     }
 }
 
-pub(crate) struct NativeHttpServer {
-    pub(crate) endpoint: String,
+pub struct NativeHttpServer {
+    pub endpoint: String,
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl NativeHttpServer {
-    pub(crate) fn start(
+    pub fn start(
         mut handler: impl FnMut(&mut TcpStream, Request) -> Option<Response> + Send + 'static,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind native deadline server");
@@ -164,7 +164,7 @@ fn write_response(stream: &mut TcpStream, response: Response) {
 }
 
 /// Observe socket cancellation without sending the held response first.
-pub(crate) fn observe_cancellation(stream: &mut TcpStream) -> bool {
+pub fn observe_cancellation(stream: &mut TcpStream) -> bool {
     stream
         .set_read_timeout(Some(Duration::from_millis(600)))
         .unwrap();

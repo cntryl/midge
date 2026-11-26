@@ -29,7 +29,7 @@ pub struct FsSstFactoryIo {
 }
 
 impl FsSstFactoryIo {
-    pub(crate) fn create_for_flush(
+    pub fn create_for_flush(
         &self,
         budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Box<dyn DynSstWriter>> {
@@ -60,7 +60,7 @@ impl FsSstFactoryIo {
         }
     }
 
-    pub(crate) fn with_write_limiter(
+    pub fn with_write_limiter(
         mut self,
         limiter: Option<Arc<cntryl_midge_core::common::write_rate::BackgroundWriteLimiter>>,
     ) -> Self {
@@ -69,10 +69,7 @@ impl FsSstFactoryIo {
     }
 
     /// Keep build scratch in `directory`, a location in the output filesystem.
-    pub(crate) fn with_compaction_scratch_directory(
-        mut self,
-        directory: std::path::PathBuf,
-    ) -> Self {
+    pub fn with_compaction_scratch_directory(mut self, directory: std::path::PathBuf) -> Self {
         self.compaction_scratch_directory = Some(directory);
         self
     }
@@ -97,7 +94,7 @@ impl FsSstFactoryIo {
     /// # Errors
     ///
     /// Returns an error if the file cannot be opened or parsed as an SST reader.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         self.open_internal(path, None)
     }
@@ -369,7 +366,7 @@ impl DynSstWriter for FsSstWriter {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn add_with_meta(
         &mut self,
         key: &[u8],
@@ -616,10 +613,10 @@ impl FsSstWriter {
             &range_tombstones,
             &compression_policy,
         )?;
-        let mut reader = cntryl_midge_core::common::write_rate::RateLimitedReader {
-            inner: scratch.reader(),
-            limiter: write_limiter,
-        };
+        let mut reader = cntryl_midge_core::common::write_rate::RateLimitedReader::new(
+            scratch.reader(),
+            write_limiter,
+        );
         let result = crate::sst::fs::persist_sst_stream_with_identity(&fs, &mut reader, path);
         let cleanup = scratch.close();
         let (size, crc) = result?;
@@ -656,7 +653,7 @@ impl SstFactory for FsSstFactoryIo {
             == 0
     }
     /// Create a new SST writer
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>> {
         Ok(Box::new(FsSstWriter::new(
             Arc::clone(&self.fs),
@@ -687,7 +684,7 @@ impl SstFactory for FsSstFactoryIo {
     }
 
     /// Open an existing SST file
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         FsSstFactoryIo::open(self, path)
     }

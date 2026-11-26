@@ -36,7 +36,10 @@ struct AcquisitionFailureLease {
 impl cntryl_midge_durability::lease::PrimaryLease for AcquisitionFailureLease {
     fn try_acquire(
         self: std::sync::Arc<Self>,
-    ) -> Result<cntryl_midge_durability::lease::LeaseGuard, cntryl_midge_durability::lease::LeaseError> {
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaseGuard,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         Err((self.error)())
     }
 
@@ -64,7 +67,10 @@ impl cntryl_midge_durability::lease::PrimaryLease for AcquisitionFailureLease {
 impl cntryl_midge_durability::lease::PrimaryLease for StartupWatchdogLease {
     fn try_acquire(
         self: std::sync::Arc<Self>,
-    ) -> Result<cntryl_midge_durability::lease::LeaseGuard, cntryl_midge_durability::lease::LeaseError> {
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaseGuard,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         self.validity.activate(
             1,
             std::time::Instant::now() + std::time::Duration::from_secs(2),
@@ -150,7 +156,9 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
             "container",
             "DefaultEndpointsProtocol=https;AccountName=account;AccountKey=azure-secret-do-not-log",
         ),
-        cntryl_midge_storage::config::CloudProviderConfig::gcs_hmac("bucket", secrets[3], secrets[4]),
+        cntryl_midge_storage::config::CloudProviderConfig::gcs_hmac(
+            "bucket", secrets[3], secrets[4],
+        ),
         cntryl_midge_storage::config::CloudProviderConfig::gcs_bearer_token("bucket", secrets[5]),
     ];
     let captured = CapturedLogs(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
@@ -168,11 +176,17 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
                 cntryl_midge_storage::config::CloudStorageLocation::new(provider, "prefix"),
             )
             .with_sst(cntryl_midge_storage::config::CloudStorageLocation::new(
-                cntryl_midge_storage::config::CloudProviderConfig::aws_s3("redaction-sst-bucket", "us-east-1"),
+                cntryl_midge_storage::config::CloudProviderConfig::aws_s3(
+                    "redaction-sst-bucket",
+                    "us-east-1",
+                ),
                 "prefix",
             ))
             .with_control(cntryl_midge_storage::config::CloudStorageLocation::new(
-                cntryl_midge_storage::config::CloudProviderConfig::aws_s3("redaction-control-bucket", "us-east-1"),
+                cntryl_midge_storage::config::CloudProviderConfig::aws_s3(
+                    "redaction-control-bucket",
+                    "us-east-1",
+                ),
                 "prefix",
             ));
             let opts = OpenOptions::cloud_multi("/tmp/midge-redaction", topology)
@@ -252,7 +266,8 @@ fn should_run_heartbeat_before_cloud_recovery_can_block_startup() -> MidgeResult
         validity: std::sync::Arc::new(cntryl_midge_durability::lease::LeaseValidity::new()),
         renewals: std::sync::atomic::AtomicUsize::new(0),
     });
-    let lease_object: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> = lease.clone();
+    let lease_object: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> =
+        lease.clone();
 
     // Act
     let startup_lease =
@@ -276,7 +291,11 @@ fn should_return_lease_held_given_active_writer_when_acquiring_startup_lease() {
     // Arrange
     let lease: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> =
         std::sync::Arc::new(AcquisitionFailureLease {
-            error: || cntryl_midge_durability::lease::LeaseError::AcquisitionFailed("active writer".to_string()),
+            error: || {
+                cntryl_midge_durability::lease::LeaseError::AcquisitionFailed(
+                    "active writer".to_string(),
+                )
+            },
         });
 
     // Act
@@ -293,7 +312,11 @@ fn should_return_lease_unavailable_given_backend_failure_when_acquiring_startup_
     // Arrange
     let lease: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> =
         std::sync::Arc::new(AcquisitionFailureLease {
-            error: || cntryl_midge_durability::lease::LeaseError::IoError("backend unavailable".to_string()),
+            error: || {
+                cntryl_midge_durability::lease::LeaseError::IoError(
+                    "backend unavailable".to_string(),
+                )
+            },
         });
 
     // Act
@@ -312,7 +335,8 @@ fn should_return_fenced_given_lease_loss_after_startup_acquisition() -> MidgeRes
         validity: std::sync::Arc::new(cntryl_midge_durability::lease::LeaseValidity::new()),
         renewals: std::sync::atomic::AtomicUsize::new(0),
     });
-    let lease_object: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> = lease.clone();
+    let lease_object: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> =
+        lease.clone();
     let startup_lease =
         StartupLease::acquire_for_test(lease_object, Some(std::sync::Arc::clone(&lease.validity)))?;
 
@@ -357,7 +381,8 @@ fn should_grant_epoch_above_wal_writer_epoch_when_leader_record_is_deleted() -> 
     let wal_epoch = 7;
     {
         let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> = std::sync::Arc::new(
-            cntryl_midge_core::io::RealFs::new(dir.path().join("wal")).map_err(FsError::into_midge)?,
+            cntryl_midge_core::io::RealFs::new(dir.path().join("wal"))
+                .map_err(FsError::into_midge)?,
         );
         // A writer under lease epoch 7 opened the newest segment the ledger
         // names; segment headers carry the epoch (#843).
@@ -443,7 +468,9 @@ struct ProviderMetadataBootstrapFixture {
 }
 
 impl ProviderMetadataBootstrapFixture {
-    fn new(backend: std::sync::Arc<dyn cntryl_midge_storage::cloud::CloudBackend>) -> MidgeResult<Self> {
+    fn new(
+        backend: std::sync::Arc<dyn cntryl_midge_storage::cloud::CloudBackend>,
+    ) -> MidgeResult<Self> {
         Self::new_with_sst_backend(std::sync::Arc::clone(&backend), backend)
     }
 
@@ -462,21 +489,25 @@ impl ProviderMetadataBootstrapFixture {
             sst_backend,
             String::new(),
         ));
-        let lease = std::sync::Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-            cntryl_midge_durability::lease::CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: String::new(),
-            },
-            local_cache.path().to_path_buf(),
-            std::sync::Arc::clone(&cloud),
-        ));
+        let lease = std::sync::Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "test".into(),
+                    prefix: String::new(),
+                },
+                local_cache.path().to_path_buf(),
+                std::sync::Arc::clone(&cloud),
+            ),
+        );
         let lease_guard = std::sync::Arc::clone(&lease).try_acquire()?;
         let leader_store = lease
             .get_leader_store()
             .expect("provider-backed lease has a leader store");
         let wal_backend: std::sync::Arc<dyn cntryl_midge_storage::StorageBackend> = cloud.clone();
-        let sst_backend: std::sync::Arc<dyn cntryl_midge_storage::StorageBackend> = sst_cloud.clone();
-        let control_backend: std::sync::Arc<dyn cntryl_midge_storage::StorageBackend> = cloud.clone();
+        let sst_backend: std::sync::Arc<dyn cntryl_midge_storage::StorageBackend> =
+            sst_cloud.clone();
+        let control_backend: std::sync::Arc<dyn cntryl_midge_storage::StorageBackend> =
+            cloud.clone();
         let (event_tx, events) = crossbeam::channel::unbounded();
         let hybrid = std::sync::Arc::new(
             cntryl_midge_storage::HybridStorage::new_with_class_stores_and_event_sender(
@@ -495,7 +526,9 @@ impl ProviderMetadataBootstrapFixture {
         crate::runtime::ddl::fence_remote_registry_on_startup(
             &hybrid,
             &authority,
-            &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+            &cntryl_midge_core::common::OperationDeadline::from_budget(
+                std::time::Duration::from_secs(5),
+            ),
         )?;
         let fenced_catalog = crate::runtime::hybrid_persistence::CloudPersistence::new(
             std::sync::Arc::clone(&hybrid),
@@ -546,14 +579,16 @@ impl ProviderMetadataBootstrapFixture {
         use cntryl_midge_durability::lease::PrimaryLease as _;
 
         self.lease.release()?;
-        let successor = std::sync::Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
-            cntryl_midge_durability::lease::CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: String::new(),
-            },
-            self.local_cache.path().to_path_buf(),
-            std::sync::Arc::clone(&self.cloud),
-        ));
+        let successor = std::sync::Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "test".into(),
+                    prefix: String::new(),
+                },
+                self.local_cache.path().to_path_buf(),
+                std::sync::Arc::clone(&self.cloud),
+            ),
+        );
         let successor_guard = std::sync::Arc::clone(&successor).try_acquire()?;
         let successor_store = successor
             .get_leader_store()
@@ -566,7 +601,9 @@ impl ProviderMetadataBootstrapFixture {
         crate::runtime::ddl::fence_remote_registry_on_startup(
             &self.hybrid,
             &authority,
-            &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+            &cntryl_midge_core::common::OperationDeadline::from_budget(
+                std::time::Duration::from_secs(5),
+            ),
         )?;
         let fenced_catalog = crate::runtime::hybrid_persistence::CloudPersistence::new(
             std::sync::Arc::clone(&self.hybrid),
@@ -736,7 +773,9 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
     let bodies = crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
         &fixture.cloud,
         &generation,
-        &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+        &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(
+            5,
+        )),
     )?;
     for name in [
         cntryl_midge_durability::metadata::files::FORMAT,
@@ -753,15 +792,16 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
         fresh_cache.path(),
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
-    let restored: cntryl_midge_durability::metadata::Manifest = cntryl_midge_durability::metadata::codec::decode(
-        cntryl_midge_durability::metadata::codec::MANIFEST,
-        &std::fs::read(
-            fresh_cache
-                .path()
-                .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT),
-        )?,
-    )
-    .expect("decode committed manifest snapshot");
+    let restored: cntryl_midge_durability::metadata::Manifest =
+        cntryl_midge_durability::metadata::codec::decode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &std::fs::read(
+                fresh_cache
+                    .path()
+                    .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT),
+            )?,
+        )
+        .expect("decode committed manifest snapshot");
     assert_eq!(
         restored.flush_frontiers().get(0).unwrap(),
         cntryl_midge_durability::metadata::FamilyFrontier::Live {
@@ -959,10 +999,12 @@ fn should_refuse_metadata_bootstrap_over_a_fully_retired_wal_catalog() -> MidgeR
         1,
     ))
     .seal();
-    let entry = cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
-        .map_err(MidgeError::Corruption)?;
-    let mut catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::empty(epoch)
-        .map_err(MidgeError::Internal)?;
+    let entry =
+        cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+            .map_err(MidgeError::Corruption)?;
+    let mut catalog =
+        cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::empty(epoch)
+            .map_err(MidgeError::Internal)?;
     catalog
         .append_run(epoch, std::slice::from_ref(&entry))
         .map_err(MidgeError::from)?;
@@ -994,7 +1036,9 @@ fn should_reject_provider_bootstrap_when_split_sst_store_has_remote_objects() ->
         std::sync::Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         std::sync::Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
     )?;
-    let sst_key = cntryl_midge_core::cloud_layout::object_key(&cntryl_midge_core::cloud_layout::file_name(0, 0, 1));
+    let sst_key = cntryl_midge_core::cloud_layout::object_key(
+        &cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
+    );
     crate::runtime::cloud_startup::cloud_io::BlockingCloudIo::new(&fixture.sst_cloud)
         .put(&sst_key, b"retained remote SST bytes".to_vec())?;
 
@@ -1044,7 +1088,9 @@ fn should_reject_provider_bootstrap_when_current_epoch_ddl_registry_has_history(
         Some(&fixture.hybrid),
         &edit,
         Some(&authority),
-        &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+        &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(
+            5,
+        )),
     )?;
 
     // Act

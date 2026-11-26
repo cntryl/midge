@@ -6,10 +6,10 @@ use super::{
     IntentLookup, OrdinalOp, TransactionOp, NO_RANGE_CHILD, RANGE_HEADER_LEN, RANGE_MAGIC,
     RANGE_TABLE_ENTRY_LEN, RANGE_VERSION,
 };
+use bytes::Bytes;
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_core::io::stream::FileWriter;
 use cntryl_midge_core::io::{Fs, FsPath};
-use bytes::Bytes;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 #[derive(Debug)]

@@ -34,7 +34,10 @@ impl ReadFs for ControlledFs {
 }
 
 impl Fs for ControlledFs {
-    fn try_lock_exclusive(&self, path: &FsPath) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
+    fn try_lock_exclusive(
+        &self,
+        path: &FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 

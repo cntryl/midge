@@ -2,8 +2,8 @@
 
 use super::*;
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
-use cntryl_midge_durability::lease::PrimaryLease as _;
 use cntryl_midge_core::types::KeyState;
+use cntryl_midge_durability::lease::PrimaryLease as _;
 
 const WAIT: Duration = Duration::from_secs(3);
 const MANUAL_ID: u64 = 96_001;
@@ -50,7 +50,8 @@ impl NotificationFixture {
             // singleton could legally move without reading its data blocks.
             let mut overlap = el.state.manifest.files[0].clone();
             overlap.sst_seq = 2;
-            overlap.name = cntryl_midge_core::cloud_layout::file_name(0, overlap.level, overlap.sst_seq);
+            overlap.name =
+                cntryl_midge_core::cloud_layout::file_name(0, overlap.level, overlap.sst_seq);
             std::fs::write(el.state.host_sst_dir().join(&overlap.name), &input_bytes)?;
             if cloud {
                 std::fs::write(remote_sst_path_for_test(&el, &overlap.name), &input_bytes)?;
@@ -58,8 +59,11 @@ impl NotificationFixture {
             el.state.manifest.test_mut().files.push(overlap);
             el.state.manifest.test_mut().next_sst_seqs.insert(0, 3);
             el.state.restore_sequence_floor_from_manifest();
-            cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&el.state.fs, &el.state.manifest)
-                .map_err(MidgeError::Internal)?;
+            cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
+                &el.state.fs,
+                &el.state.manifest,
+            )
+            .map_err(MidgeError::Internal)?;
         }
         Ok(Self {
             el,
@@ -373,15 +377,20 @@ fn should_retain_inputs_without_routing_notification_when_publication_validation
 fn committed_intents(
     cloud: &cntryl_midge_storage::cloud::CloudStorage,
     lease: &cntryl_midge_durability::lease::CloudStorageLease,
-) -> MidgeResult<Vec<crate::runtime::IntentLogEntry>> {
+) -> MidgeResult<Vec<cntryl_midge_durability::metadata::intent::IntentLogEntry>> {
     let directory = tempfile::tempdir()?;
-    let bytes =
-        get_committed_cloud_metadata_for_test(cloud, lease, cntryl_midge_durability::metadata::files::INTENT_LOG);
+    let bytes = get_committed_cloud_metadata_for_test(
+        cloud,
+        lease,
+        cntryl_midge_durability::metadata::files::INTENT_LOG,
+    );
     std::fs::write(
-        directory.path().join(cntryl_midge_durability::metadata::files::INTENT_LOG),
+        directory
+            .path()
+            .join(cntryl_midge_durability::metadata::files::INTENT_LOG),
         bytes,
     )?;
-    crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
         &cntryl_midge_core::io::real::test_root(directory.path()),
         cntryl_midge_durability::RecoveryPolicy::Strict,
     )
@@ -444,7 +453,7 @@ fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
         let committed = committed_intents(&cloud, &lease)?;
         assert!(
             committed.iter().any(|intent| matches!(intent,
-                crate::runtime::IntentLogEntry::CompactionPublish { added, .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish { added, .. }
                     if added.iter().any(|file| file.name == outputs[0])
             )),
             "the failed clear retains the previously committed remote intent"

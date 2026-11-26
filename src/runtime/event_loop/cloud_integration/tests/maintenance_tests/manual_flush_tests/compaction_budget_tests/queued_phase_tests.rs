@@ -189,7 +189,9 @@ fn assert_common_queued_evidence(evidence: &QueuedEvidence) {
     );
 }
 
-fn names(files: &[cntryl_midge_durability::metadata::FileMeta]) -> std::collections::BTreeSet<String> {
+fn names(
+    files: &[cntryl_midge_durability::metadata::FileMeta],
+) -> std::collections::BTreeSet<String> {
     files.iter().map(|file| file.name.clone()).collect()
 }
 
@@ -373,7 +375,8 @@ fn should_keep_typed_timeout_when_actual_final_clear_mirror_exhausts_original_bu
 ) -> MidgeResult<()> {
     // Arrange: real output/manifest phases leave less than the ordinary I/O cap.
     // Act: the final metadata write returns late; replay its actual error receipt.
-    let (evidence, reads, phase) = cntryl_midge_core::failpoints::with_read_gate(final_clear_timeout_case)?;
+    let (evidence, reads, phase) =
+        cntryl_midge_core::failpoints::with_read_gate(final_clear_timeout_case)?;
 
     // Assert: safe settled authority and exact row precede error classification.
     assert_common_queued_evidence(&evidence);

@@ -1,18 +1,18 @@
 //! Incremental cloud WAL replay through the engine's durable flush protocol.
 
 use super::RuntimeStorageMaterialization;
-use cntryl_midge_core::common::{MidgeError, MidgeResult};
-use cntryl_midge_core::io::ReadFs;
-use cntryl_midge_table::memtable::SkipListMemtable;
-use cntryl_midge_durability::metadata::accounting::Origin;
 use crate::runtime::actors::flush::{
     FlushActor, FlushBuildOutput, FlushIdentity, FlushMirrorTask, FlushPublicationDelta,
     FlushPublishTask, FlushWorkerResult,
 };
 use crate::runtime::state::FlushManifestPublication;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::ReadFs;
+use cntryl_midge_durability::metadata::accounting::Origin;
 use cntryl_midge_durability::wal::recovery::streaming::{
     replay_wal_with_options, ReplayOptions, StreamingReplayLimits,
 };
+use cntryl_midge_table::memtable::SkipListMemtable;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -108,7 +108,9 @@ impl CloudReplay {
             }
         }
         let policy = match materialized.state.recovery_policy() {
-            cntryl_midge_durability::RecoveryPolicy::Strict => cntryl_midge_durability::wal::recovery::ReplayPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict => {
+                cntryl_midge_durability::wal::recovery::ReplayPolicy::Strict
+            }
             cntryl_midge_durability::RecoveryPolicy::Salvage => {
                 cntryl_midge_durability::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
@@ -136,7 +138,9 @@ impl CloudReplay {
             self.limits,
             ReplayOptions {
                 scope: scope.as_ref(),
-                ..ReplayOptions::new(cntryl_midge_durability::wal::replay::ReplaySelection::Frontiers(&frontiers))
+                ..ReplayOptions::new(
+                    cntryl_midge_durability::wal::replay::ReplaySelection::Frontiers(&frontiers),
+                )
             },
             &mut |tables, boundary| {
                 checkpoint(
@@ -251,7 +255,9 @@ impl SubstitutedWal {
             .as_ref()
             .ok_or_else(|| MidgeError::Internal("substituted WAL without cloud storage".into()))?;
         let scope = materialized.state.startup_scope.clone().unwrap_or_else(|| {
-            cntryl_midge_core::common::DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded())
+            cntryl_midge_core::common::DeadlineScope::new(
+                cntryl_midge_core::common::OperationDeadline::unbounded(),
+            )
         });
         let first = self
             .entries
@@ -358,10 +364,9 @@ fn checkpoint_family(
     state.next_flush_id = state.next_flush_id.checked_add(1).ok_or_else(|| {
         MidgeError::ResourceLimit("flush identity space exhausted during recovery".into())
     })?;
-    let staging_path = std::path::Path::new(cntryl_midge_table::sst::fs::FLUSH_STAGING_DIR).join(format!(
-        "recovery-{}-{}.tmp",
-        config.writer_epoch, identity.flush_id
-    ));
+    let staging_path = std::path::Path::new(cntryl_midge_table::sst::fs::FLUSH_STAGING_DIR).join(
+        format!("recovery-{}-{}.tmp", config.writer_epoch, identity.flush_id),
+    );
     let completion = super::timing::measure("recovery_checkpoint_construction", || {
         actor.submit_build(identity, table, staging_path, config.hybrid_storage.clone())?;
         let FlushWorkerResult::Build(completion) = receive_completion(
@@ -503,7 +508,11 @@ fn commit_and_mirror_checkpoint(
         leader_store: config.leader_store.clone(),
         leader_holder_id: config.leader_holder_id.clone(),
         deadline: state.startup_scope.as_ref().map_or_else(
-            || cntryl_midge_core::common::OperationDeadline::from_budget(config.runtime_response_timeout),
+            || {
+                cntryl_midge_core::common::OperationDeadline::from_budget(
+                    config.runtime_response_timeout,
+                )
+            },
             cntryl_midge_core::common::DeadlineScope::deadline,
         ),
     })?;
@@ -573,7 +582,9 @@ fn reserve_sst_sequence(
             &config.metadata_publication_lock,
             |_| validate_lease(config),
             &state.startup_scope.clone().unwrap_or_else(|| {
-                cntryl_midge_core::common::DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded())
+                cntryl_midge_core::common::DeadlineScope::new(
+                    cntryl_midge_core::common::OperationDeadline::unbounded(),
+                )
             }),
         )?;
         validate_lease(config)?;
@@ -603,9 +614,9 @@ fn install_checkpoint_output(
         if cloud_metadata_published {
             state
                 .fs
-                .remove_file(&cntryl_midge_core::io::FsPath::new(cntryl_midge_core::cloud_layout::object_key(
-                    name,
-                )))
+                .remove_file(&cntryl_midge_core::io::FsPath::new(
+                    cntryl_midge_core::cloud_layout::object_key(name),
+                ))
                 .map_err(cntryl_midge_core::io::FsError::into_midge)?;
             let (sst_bytes, wal_bytes) = local_storage_bytes(state)?;
             storage.reconcile_local_disk_usage(sst_bytes, wal_bytes);
@@ -623,7 +634,10 @@ pub(super) fn local_storage_bytes(state: &crate::runtime::RuntimeState) -> Midge
             state.startup_scope.as_ref(),
         )
     };
-    Ok((bytes(cntryl_midge_table::sst::fs::SST_DIR)?, bytes(cntryl_midge_durability::wal::WAL_DIR)?))
+    Ok((
+        bytes(cntryl_midge_table::sst::fs::SST_DIR)?,
+        bytes(cntryl_midge_durability::wal::WAL_DIR)?,
+    ))
 }
 
 pub(super) fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {

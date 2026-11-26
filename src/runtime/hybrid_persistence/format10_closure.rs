@@ -22,9 +22,11 @@ pub(crate) fn capture_selected_format10_closure(
     deadline: &OperationDeadline,
 ) -> MidgeResult<CapturedFormat10Closure> {
     let scope = DeadlineScope::new(*deadline);
-    cntryl_midge_durability::metadata::journal::with_manifest_writer_view_lock_within(fs, &scope, || {
-        capture_selected_under_writer_lock(fs, publication_lock, deadline)
-    })
+    cntryl_midge_durability::metadata::journal::with_manifest_writer_view_lock_within(
+        fs,
+        &scope,
+        || capture_selected_under_writer_lock(fs, publication_lock, deadline),
+    )
 }
 
 fn capture_selected_under_writer_lock(
@@ -59,7 +61,9 @@ fn capture_selected_under_writer_lock(
         }
         total = total
             .checked_add(metadata.len)
-            .filter(|length| *length <= cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES)
+            .filter(|length| {
+                *length <= cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES
+            })
             .ok_or_else(|| {
                 MidgeError::ResourceLimit(
                     "FORMAT 10 selected closure exceeds its byte bound".into(),
@@ -74,7 +78,9 @@ fn capture_selected_under_writer_lock(
         let file = fs
             .open_read(&cntryl_midge_core::io::FsPath::new(&path))
             .map_err(cntryl_midge_core::io::FsError::into_midge)?;
-        let actual_len = file.len().map_err(cntryl_midge_core::io::FsError::into_midge)?;
+        let actual_len = file
+            .len()
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?;
         if actual_len != expected_len {
             return Err(MidgeError::Corruption(format!(
                 "FORMAT 10 selected object '{path}' changed during capture"
@@ -113,7 +119,9 @@ pub(crate) fn publish_format10_closure(
 ) -> MidgeResult<(u64, Vec<CloudMetadataObject>)> {
     let horizon =
         cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(bodies)?;
-    if bodies.is_empty() || bodies.len() > cntryl_midge_durability::metadata::local_authority::MAX_OBJECTS + 2 {
+    if bodies.is_empty()
+        || bodies.len() > cntryl_midge_durability::metadata::local_authority::MAX_OBJECTS + 2
+    {
         return Err(MidgeError::ResourceLimit(
             "FORMAT 10 metadata closure exceeds its object bound".into(),
         ));
@@ -123,7 +131,9 @@ pub(crate) fn publish_format10_closure(
         |total, body| {
             total
                 .checked_add(u64::try_from(body.len()).unwrap_or(u64::MAX))
-                .filter(|next| *next <= cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES)
+                .filter(|next| {
+                    *next <= cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES
+                })
         },
     );
     if total_bytes.is_none() {
@@ -136,9 +146,12 @@ pub(crate) fn publish_format10_closure(
         bodies
             .iter()
             .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
-            .chain(
-                cut_proof.map(|bytes| (cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF, bytes)),
-            )
+            .chain(cut_proof.map(|bytes| {
+                (
+                    cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF,
+                    bytes,
+                )
+            }))
     };
     let objects = payloads()
         .map(|(relative_path, body)| {

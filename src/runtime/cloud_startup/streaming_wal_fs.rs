@@ -4,11 +4,11 @@
 //! exposes its canonical names without copying WAL objects onto local disk.
 //! It implements only [`ReadFs`], so replay cannot mutate through it.
 
+use bytes::Bytes;
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use cntryl_midge_core::io::buffered_read::BufferedReadFile;
 use cntryl_midge_core::io::traits::{DirEntry, Metadata};
 use cntryl_midge_core::io::{FsError, FsPath, FsResult, ReadFs};
-use bytes::Bytes;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -196,7 +196,8 @@ pub(crate) fn validate_wal_source(
     }
     let mut offset = 0_u64;
     let mut crc = 0;
-    let mut progress = cntryl_midge_core::telemetry::recovery_progress::WorkProgress::new("crc_validation");
+    let mut progress =
+        cntryl_midge_core::telemetry::recovery_progress::WorkProgress::new("crc_validation");
     while offset < expected_len {
         let length = (range_buffer_bytes as u64).min(expected_len - offset);
         let bytes = read_exact_range(file.as_ref(), offset, length)?;
@@ -304,7 +305,9 @@ mod tests {
             backend.submit_range_head_request(
                 cntryl_midge_storage::StorageRequest::new(
                     &key,
-                    cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+                    cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(
+                        5,
+                    )),
                     Duration::from_secs(5),
                 ),
                 tx,

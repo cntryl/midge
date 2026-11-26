@@ -1568,3 +1568,6 @@ impl Drop for CrashFile {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
