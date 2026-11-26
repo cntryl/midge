@@ -1,14 +1,14 @@
 //! Owned spill-source reads on the existing bounded validation worker.
 
 use super::{ValidationCompletion, ValidationTask, ValidationWorker, MAX_VALIDATION_JOBS};
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::actors::wal::{SpilledValidationInput, SpilledValidationProof};
 use crate::runtime::event_loop::wal::{SpilledTransactionRequest, WalCoordinator};
 use crate::runtime::event_loop::EventLoop;
 use crate::runtime::snapshot_pins::OwnedSnapshotPin;
 use crate::runtime::state::RecentDeleteRange;
 use crate::runtime::{ReadSnapshot, RuntimeMsg, RuntimeResponse};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crossbeam::channel::Receiver;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -28,7 +28,9 @@ pub(in crate::runtime::event_loop) struct SpilledValidationJob {
 impl SpilledValidationJob {
     pub(super) fn read(self, cancelled: &std::sync::atomic::AtomicBool) -> ValidationCompletion {
         let proof = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::failpoints::fail_point!("midge::validation::before_spill_snapshot_reads");
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::validation::before_spill_snapshot_reads"
+            );
             if self.deadline.is_expired() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(MidgeError::Timeout(
                     "spilled validation expired before storage reads".into(),
@@ -46,7 +48,9 @@ impl SpilledValidationJob {
                 cancelled,
                 memory: &self.memory,
             });
-            crate::failpoints::fail_point!("midge::validation::after_spill_snapshot_reads");
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::validation::after_spill_snapshot_reads"
+            );
             proof
         }))
         .unwrap_or_else(|_| {

@@ -42,8 +42,8 @@
 //!   it is retired after cloud durability (or immediately for a local seal),
 //!   so it cannot fall out of ownership between components.
 
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::actors::wal::WalRotationReceipt;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::collections::BTreeMap;
 
 /// Proof that the transition protocol installed `Syncing` for `generation`.

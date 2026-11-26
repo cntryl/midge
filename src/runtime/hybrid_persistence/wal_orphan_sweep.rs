@@ -2,10 +2,10 @@
 
 use super::catalog::{load_and_repair_catalog_within, CatalogAuthority};
 use super::{InventoryCursor, OrphanSweepContext, OrphanSweepProgress};
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::lease::CloudMetadataHead;
-use crate::storage::cloud::{CloudListPageRequest, MAX_LIST_PAGE_KEYS};
-use crate::wal::format::{ChainLink, SegmentHeader, HEADER_LEN};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::CloudMetadataHead;
+use cntryl_midge_durability::wal::format::{ChainLink, SegmentHeader, HEADER_LEN};
+use cntryl_midge_storage::cloud::{CloudListPageRequest, MAX_LIST_PAGE_KEYS};
 use std::sync::atomic::Ordering;
 
 #[cfg(test)]
@@ -95,7 +95,7 @@ fn reclaim_candidate(
     progress: &mut OrphanSweepProgress,
     validate_lease: &mut impl FnMut(&OperationDeadline) -> MidgeResult<()>,
 ) -> MidgeResult<()> {
-    let Some((epoch, id)) = crate::wal::parse_segment_object_key(key) else {
+    let Some((epoch, id)) = cntryl_midge_durability::wal::parse_segment_object_key(key) else {
         retain(context, progress);
         return Ok(());
     };
@@ -159,7 +159,8 @@ fn header_matches_closed_range(
         && header.id == id
         && header.first_seq <= anchor.last_seq
         && (header.prev.id != 0 || header.prev == ChainLink::GENESIS)
-        && crate::wal::format::follows(header.prev, None, &header.open_facts()).is_ok()
+        && cntryl_midge_durability::wal::format::follows(header.prev, None, &header.open_facts())
+            .is_ok()
 }
 
 fn validate_shared_generation(

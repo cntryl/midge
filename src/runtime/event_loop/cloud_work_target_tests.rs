@@ -1,10 +1,10 @@
 //! Cloud actor admission using the retained stage-02 S3 overlap shape.
 
 use super::{tests::create_test_cloud_event_loop, EventLoop};
-use crate::common::MidgeResult;
 use crate::compaction::strategy::CompactionPurpose;
-use crate::metadata::FileMeta;
-use crate::storage::hybrid::policy::StorageBudgetPolicy;
+use cntryl_midge_core::common::MidgeResult;
+use cntryl_midge_durability::metadata::FileMeta;
+use cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy;
 use std::sync::Arc;
 
 const MIB: usize = 1024 * 1024;
@@ -17,7 +17,7 @@ fn key((client, transaction, operation): Position) -> Vec<u8> {
 }
 
 fn name(level: u32, generation: u64, partition: u32) -> String {
-    crate::cloud_layout::compaction_file_name(1, level, generation, partition)
+    cntryl_midge_core::cloud_layout::compaction_file_name(1, level, generation, partition)
 }
 
 fn file(
@@ -104,7 +104,7 @@ fn observed_cloud_layout(
         .extend(observed_targets());
     let factory = super::resources::compaction_sst_factory(
         Arc::clone(&el.state.fs),
-        crate::codec::CompressionPolicy::default(),
+        cntryl_midge_core::codec::CompressionPolicy::default(),
     );
     el.actors.compaction_actor = crate::runtime::actors::CompactionActor::new_with_config(
         Arc::new(factory),
@@ -262,7 +262,9 @@ fn selected_plan(el: &mut EventLoop) -> MidgeResult<crate::compaction::Compactio
     el.actors
         .compaction_actor
         .check_compaction(&el.state)?
-        .ok_or_else(|| crate::common::MidgeError::Internal("fixture has no cloud debt".into()))
+        .ok_or_else(|| {
+            cntryl_midge_core::common::MidgeError::Internal("fixture has no cloud debt".into())
+        })
 }
 
 #[test]

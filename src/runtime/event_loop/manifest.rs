@@ -1,7 +1,7 @@
 use super::{EventLoop, HandleOutcome};
-#[cfg(test)]
-use crate::runtime::FileMeta;
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
+#[cfg(test)]
+use cntryl_midge_durability::metadata::intent::FileMeta;
 use crossbeam::channel::Receiver;
 
 pub(super) struct ManifestCoordinator;
@@ -13,7 +13,7 @@ impl ManifestCoordinator {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Fenced(
+                    error: cntryl_midge_core::common::MidgeError::Fenced(
                         "local DDL journal outcome is unknown; reopen before further changes"
                             .into(),
                     ),
@@ -27,7 +27,8 @@ impl ManifestCoordinator {
 
     fn ddl_authority(
         event_loop: &EventLoop,
-    ) -> crate::common::MidgeResult<Option<crate::runtime::ddl::DdlLeaseAuthority>> {
+    ) -> cntryl_midge_core::common::MidgeResult<Option<crate::runtime::ddl::DdlLeaseAuthority>>
+    {
         if !event_loop.actors.cloud_coordinator.provider_ddl_fencing {
             return Ok(None);
         }
@@ -38,7 +39,7 @@ impl ManifestCoordinator {
                 .leader_store
                 .clone()
                 .ok_or_else(|| {
-                    crate::common::MidgeError::Fenced(
+                    cntryl_midge_core::common::MidgeError::Fenced(
                         "provider cloud DDL requires a leader store".into(),
                     )
                 })?,
@@ -48,7 +49,7 @@ impl ManifestCoordinator {
                 .leader_holder_id
                 .clone()
                 .ok_or_else(|| {
-                    crate::common::MidgeError::Fenced(
+                    cntryl_midge_core::common::MidgeError::Fenced(
                         "provider cloud DDL requires a lease holder".into(),
                     )
                 })?,
@@ -99,7 +100,7 @@ impl ManifestCoordinator {
     pub(super) fn persist(
         event_loop: &mut EventLoop,
         request_id: u64,
-        origin: crate::metadata::accounting::Origin,
+        origin: cntryl_midge_durability::metadata::accounting::Origin,
     ) -> HandleOutcome {
         if Self::reject_uncertain_local_ddl(event_loop, request_id) {
             return HandleOutcome::Continue;
@@ -174,7 +175,7 @@ impl ManifestCoordinator {
                         request_id,
                         RuntimeResponse::Error {
                             request_id,
-                            error: crate::common::MidgeError::Fenced(format!(
+                            error: cntryl_midge_core::common::MidgeError::Fenced(format!(
                                 "DDL authority remains ambiguous: {error}"
                             )),
                         },
@@ -194,7 +195,7 @@ impl ManifestCoordinator {
             } else {
                 let edit = crate::runtime::ddl::create_edit(&event_loop.state, name)?;
                 let cf_id = match &edit {
-                    crate::metadata::ManifestEdit::CreateColumnFamily { id, .. } => *id,
+                    cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily { id, .. } => *id,
                     _ => unreachable!("create_edit returned a non-create edit"),
                 };
                 crate::runtime::ddl::execute_within(
@@ -235,11 +236,11 @@ impl ManifestCoordinator {
 
     fn mirror_committed_create(
         event_loop: &mut EventLoop,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
-        crate::failpoints::fail_point!(
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::ddl::after_create_local_commit_before_metadata_mirror",
-            |_| Err(crate::common::MidgeError::Internal(
+            |_| Err(cntryl_midge_core::common::MidgeError::Internal(
                 "failpoint: create metadata mirror failed after local commit".to_string()
             ))
         );
@@ -250,7 +251,7 @@ impl ManifestCoordinator {
         event_loop: &mut EventLoop,
         _msg_rx: &Receiver<RuntimeMsg>,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         discard_unflushed: bool,
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
@@ -299,7 +300,7 @@ impl ManifestCoordinator {
                         request_id,
                         RuntimeResponse::Error {
                             request_id,
-                            error: crate::common::MidgeError::Fenced(format!(
+                            error: cntryl_midge_core::common::MidgeError::Fenced(format!(
                                 "DDL authority remains ambiguous: {error}"
                             )),
                         },
@@ -339,8 +340,8 @@ impl ManifestCoordinator {
     fn finish_committed_drop(
         event_loop: &mut EventLoop,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-        deadline: &crate::common::OperationDeadline,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) {
         Self::cancel_column_family_pending_work(event_loop, cf_id);
         event_loop.publish_snapshot();
@@ -392,11 +393,11 @@ impl ManifestCoordinator {
 
     fn mirror_committed_drop(
         event_loop: &mut EventLoop,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
-        crate::failpoints::fail_point!(
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::ddl::after_drop_local_commit_before_metadata_mirror",
-            |_| Err(crate::common::MidgeError::Internal(
+            |_| Err(cntryl_midge_core::common::MidgeError::Internal(
                 "failpoint: drop metadata mirror failed after local commit".to_string()
             ))
         );
@@ -405,7 +406,7 @@ impl ManifestCoordinator {
 
     fn cancel_column_family_pending_work(
         event_loop: &mut EventLoop,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) {
         let error_message = format!("column family {cf_id} was dropped");
         if let Some(waiters) = event_loop.publication.flush_barrier_waiters.remove(&cf_id) {
@@ -414,7 +415,9 @@ impl ManifestCoordinator {
                     waiter.request_id,
                     RuntimeResponse::Error {
                         request_id: waiter.request_id,
-                        error: crate::common::MidgeError::InvalidArgument(error_message.clone()),
+                        error: cntryl_midge_core::common::MidgeError::InvalidArgument(
+                            error_message.clone(),
+                        ),
                     },
                 );
             }
@@ -429,7 +432,9 @@ impl ManifestCoordinator {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::InvalidArgument(error_message.clone()),
+                    error: cntryl_midge_core::common::MidgeError::InvalidArgument(
+                        error_message.clone(),
+                    ),
                 },
             );
         }
@@ -438,7 +443,7 @@ impl ManifestCoordinator {
     fn respond_result(
         event_loop: &mut EventLoop,
         request_id: u64,
-        result: crate::common::MidgeResult<()>,
+        result: cntryl_midge_core::common::MidgeResult<()>,
     ) {
         let resp = result.map_or_else(
             |error| RuntimeResponse::Error { request_id, error },
@@ -455,7 +460,7 @@ mod tests {
 
     #[test]
     fn should_fence_ddl_authority_from_recorded_state_not_error_text(
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         // Arrange: the DDL path records the ambiguity it could not resolve.
         // Rewording or wrapping its error must not change what happens here.
         let mut event_loop = create_test_local_event_loop()?;
@@ -472,7 +477,7 @@ mod tests {
 
     #[test]
     fn should_not_fence_ddl_authority_when_nothing_recorded_the_ambiguity(
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         // Arrange
         let mut event_loop = create_test_local_event_loop()?;
 

@@ -1,0 +1,2341 @@
+//! Cloud-backed primary lease.
+//!
+//! Real cloud mode coordinates through a provider-backed lease object using
+//! conditional create/update semantics. The local cache path is still used for
+//! staged diagnostics only; provider-backed fencing epochs live in the remote
+//! lease document.
+//!
+//! Filesystem-simulated cloud uses the same provider protocol over its shared object store.
+
+use super::clock::LeaseClock;
+use super::traits::{
+    CloudFormatMigrationGate, CloudFormatMigrationPending, CloudMetadataGeneration,
+    CloudMetadataGenerationIdentity, CloudMetadataHead, LeaderAcquisition, LeaderRecord,
+    LeaderStore, LeaseError, LeaseGuard, LeaseValidity, PrimaryLease,
+};
+use cntryl_midge_storage::cloud::{
+    CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata,
+};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Default TTL for cloud leases (30 seconds).
+const DEFAULT_CLOUD_LEASE_TTL_SECS: u64 = 30;
+// Retain the conservative mutation reserve before monotonic expiry. Provider
+// requests also carry their caller's remaining deadline; the reserve does not
+// describe the configurable provider default timeout.
+pub(crate) const RENEWAL_WRITE_DEADLINE_MARGIN: Duration = Duration::from_secs(11);
+
+/// Key used for the lease object in cloud storage.
+const LEASE_OBJECT_KEY: &str = cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY;
+const AUTHORITY_SENTINEL_KEY: &str = "metadata/authority-initialized.v1";
+const AUTHORITY_SENTINEL_PENDING_BODY: &[u8] = b"midge cloud metadata authority v3 pending\n";
+const AUTHORITY_SENTINEL_BODY: &[u8] = b"midge cloud metadata authority v3 initialized\n";
+const METADATA_GENERATIONS_PREFIX: &str = "metadata/generations/";
+pub const MAX_LEASE_DOCUMENT_BYTES: usize = 4096;
+const BACKUP_EXPIRED_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
+mod metadata_pointer;
+
+/// Cloud storage lease configuration.
+#[derive(Debug, Clone)]
+pub struct CloudLeaseConfig {
+    /// Bucket / container name.
+    pub bucket: String,
+    /// Object key prefix (e.g. `"databases/myapp/"`).
+    pub prefix: String,
+}
+
+/// Provider-backed view of the lease document used by WAL epoch fencing.
+struct ProviderLeaderStore {
+    cloud: Arc<CloudStorage>,
+    ttl: Duration,
+    owner_token: String,
+    validity: Arc<LeaseValidity>,
+    clock_skew_tolerance: Mutex<Duration>,
+    clock: LeaseClock,
+    metadata_pointer_cache: Mutex<Option<metadata_pointer::CachedPointer>>,
+    migration_gate_cache: Mutex<Option<CachedMigrationGate>>,
+}
+
+#[derive(Clone)]
+struct CachedMigrationGate {
+    holder_id: String,
+    owner_token: String,
+    epoch: u64,
+    gate: Option<CloudFormatMigrationGate>,
+}
+
+struct LeaseDeadlines {
+    valid_until: Instant,
+    now: chrono::DateTime<chrono::Utc>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthoritySentinelState {
+    Missing,
+    Pending,
+    Active,
+}
+
+impl ProviderLeaderStore {
+    fn lease_deadlines(&self) -> Result<LeaseDeadlines, LeaseError> {
+        let valid_until = Instant::now().checked_add(self.ttl).ok_or_else(|| {
+            LeaseError::Internal("cloud lease TTL exceeds the monotonic clock range".into())
+        })?;
+        let now = self.clock.now();
+        let expires_at = lease_expiry(now, self.ttl).ok_or_else(|| {
+            LeaseError::Internal("cloud lease TTL exceeds the wall-clock expiry range".into())
+        })?;
+        Ok(LeaseDeadlines {
+            valid_until,
+            now,
+            expires_at,
+        })
+    }
+
+    fn new(
+        cloud: Arc<CloudStorage>,
+        ttl: Duration,
+        owner_token: String,
+        validity: Arc<LeaseValidity>,
+        clock_skew_tolerance: Duration,
+        clock: LeaseClock,
+    ) -> Self {
+        Self {
+            cloud,
+            ttl,
+            owner_token,
+            validity,
+            clock_skew_tolerance: Mutex::new(clock_skew_tolerance),
+            clock,
+            metadata_pointer_cache: Mutex::new(None),
+            migration_gate_cache: Mutex::new(None),
+        }
+    }
+
+    fn cache_migration_gate(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        gate: Option<CloudFormatMigrationGate>,
+    ) {
+        *self
+            .migration_gate_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(CachedMigrationGate {
+            holder_id: holder_id.to_string(),
+            owner_token: self.owner_token.clone(),
+            epoch,
+            gate,
+        });
+    }
+
+    fn invalidate_migration_gate(&self) {
+        *self
+            .migration_gate_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    fn with_cached_migration_gate<T>(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        operation: impl FnOnce(Option<&CloudFormatMigrationGate>) -> T,
+    ) -> Option<T> {
+        self.migration_gate_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|cache| {
+                cache.holder_id == holder_id
+                    && cache.owner_token == self.owner_token
+                    && cache.epoch == epoch
+            })
+            .map(|cache| operation(cache.gate.as_ref()))
+    }
+}
+
+impl ProviderLeaderStore {
+    fn read_acquisition_state(
+        &self,
+        cloud: &CloudStorage,
+    ) -> Result<(Option<LeaseDocument>, Option<ObjectMetadata>), LeaseError> {
+        let current = provider_read_doc_with_metadata(cloud, cloud.callback_timeout())?;
+        let (existing, metadata) = match current {
+            Some((document, metadata)) => (Some(document), Some(metadata)),
+            None => (None, None),
+        };
+        if existing.as_ref().is_some_and(|document| {
+            !matches!(
+                document.version,
+                LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5
+            ) || document.committed_metadata.is_some()
+                || (document.version == LeaseDocumentVersion::V5
+                    && document.migration_gate.is_none())
+        }) {
+            return Err(legacy_metadata_migration_error());
+        }
+        let sentinel = provider_read_authority_sentinel(cloud, cloud.callback_timeout())?;
+        match (existing.as_ref(), sentinel) {
+            (None, AuthoritySentinelState::Missing) => {
+                provider_create_authority_sentinel(cloud, cloud.callback_timeout())?;
+            }
+            (None, AuthoritySentinelState::Pending) | (Some(_), AuthoritySentinelState::Active) => {
+            }
+            (None, AuthoritySentinelState::Active) => return Err(missing_initialized_lease_error()),
+            (Some(document), AuthoritySentinelState::Pending)
+                if document.committed_metadata.is_none() => {}
+            (Some(_), AuthoritySentinelState::Missing) => {
+                return Err(missing_authority_sentinel_error())
+            }
+            (Some(_), AuthoritySentinelState::Pending) => {
+                return Err(LeaseError::Indeterminate(
+                    "pending cloud metadata authority marker accompanies committed metadata".into(),
+                ))
+            }
+        }
+        if let Some(existing) = existing.as_ref() {
+            if !existing.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())? {
+                return Err(LeaseError::AcquisitionFailed(format!(
+                    "another instance holds the lease (holder: {}, expires: {})",
+                    existing.holder_id, existing.expires_at
+                )));
+            }
+        }
+        Ok((existing, metadata))
+    }
+
+    fn acquire_with_cloud(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+        cloud: &CloudStorage,
+        mut acquisition: Option<&mut LeaderAcquisition<'_>>,
+    ) -> Result<LeaderRecord, LeaseError> {
+        let (existing, metadata) = self.read_acquisition_state(cloud)?;
+        let epoch = existing
+            .as_ref()
+            .and_then(|document| document.epoch)
+            .unwrap_or(0)
+            .max(minimum_epoch)
+            .checked_add(1)
+            .ok_or(LeaseError::EpochExhausted)?;
+        let LeaseDeadlines {
+            valid_until,
+            now,
+            expires_at,
+        } = self.lease_deadlines()?;
+        let version = existing
+            .as_ref()
+            .map_or(LeaseDocumentVersion::V4, |document| {
+                if document.version == LeaseDocumentVersion::V5 {
+                    LeaseDocumentVersion::V5
+                } else {
+                    LeaseDocumentVersion::V4
+                }
+            });
+        let migration_gate = existing
+            .as_ref()
+            .and_then(|document| document.migration_gate.clone());
+        let document = LeaseDocument {
+            version,
+            epoch: Some(epoch),
+            holder_id: holder_id.to_string(),
+            owner_token: Some(self.owner_token.clone()),
+            acquired_at: now.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+            committed_metadata: None,
+            migration_gate,
+        };
+        let headers = match metadata {
+            Some(metadata) => mutation_precondition_headers(&metadata).ok_or_else(|| {
+                LeaseError::IoError("existing cloud lease has no conditional update token".into())
+            })?,
+            None => vec![("If-None-Match".to_string(), "*".to_string())],
+        };
+        if let Some(acquisition) = acquisition.as_deref_mut() {
+            // A committed request can lose its response. Retain only an exact
+            // cleanup candidate before submit; release must still read and
+            // match holder, owner token and epoch before conditional expiration.
+            acquisition.begin_mutation(Some(epoch))?;
+        }
+        provider_write_doc(cloud, &document, headers)?;
+        let scope = acquisition.as_ref().map(|acquisition| acquisition.scope());
+        self.finish_acquisition(cloud, &document, epoch, valid_until, scope)?;
+        Ok(LeaderRecord {
+            epoch,
+            holder_id: document.holder_id,
+            acquired_at: document.acquired_at,
+        })
+    }
+
+    fn finish_acquisition(
+        &self,
+        cloud: &CloudStorage,
+        document: &LeaseDocument,
+        epoch: u64,
+        valid_until: Instant,
+        scope: Option<&cntryl_midge_core::common::DeadlineScope>,
+    ) -> Result<(), LeaseError> {
+        if provider_read_doc_with_timeout(cloud, cloud.callback_timeout())?.as_ref()
+            != Some(document)
+        {
+            return Err(LeaseError::RenewalFailed(
+                "cloud lease changed before metadata authority marker activation completed".into(),
+            ));
+        }
+        if let Some(scope) = scope {
+            scope
+                .check("cloud lease authority acceptance")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        self.claim_metadata_pointer(cloud, document, cloud.callback_timeout())?;
+        provider_activate_authority_sentinel(cloud, cloud.callback_timeout())?;
+        if let Some(scope) = scope {
+            scope
+                .check("cloud metadata pointer claim acceptance")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        self.validity.activate(epoch, valid_until)?;
+        self.cache_migration_gate(&document.holder_id, epoch, document.migration_gate.clone());
+        Ok(())
+    }
+}
+
+impl ProviderLeaderStore {
+    fn read_migration_lease(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> Result<(LeaseDocument, ObjectMetadata), LeaseError> {
+        let remaining = deadline
+            .remaining()
+            .min(self.validity.remaining(epoch)?)
+            .min(self.cloud.callback_timeout());
+        let (document, metadata) = provider_read_doc_with_metadata(&self.cloud, remaining)?
+            .ok_or_else(|| LeaseError::RenewalFailed("cloud lease document disappeared".into()))?;
+        if !owns_document(&document, holder_id, &self.owner_token, epoch) {
+            return Err(LeaseError::RenewalFailed(
+                "cloud lease owner changed during FORMAT migration".into(),
+            ));
+        }
+        if document.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())? {
+            return Err(LeaseError::RenewalFailed(
+                "cloud lease expired during FORMAT migration".into(),
+            ));
+        }
+        self.validity.remaining(epoch)?;
+        Ok((document, metadata))
+    }
+
+    fn write_migration_gate(
+        &self,
+        expected: &LeaseDocument,
+        metadata: &ObjectMetadata,
+        replacement: &LeaseDocument,
+        holder_id: &str,
+        epoch: u64,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> Result<(), LeaseError> {
+        let encoded = format_lease_document(replacement);
+        if encoded.len() > MAX_LEASE_DOCUMENT_BYTES {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT migration gate exceeds the 4096-byte lease limit".into(),
+            ));
+        }
+        let headers = mutation_precondition_headers(metadata).ok_or_else(|| {
+            LeaseError::Indeterminate(
+                "cloud lease migration transition has no conditional token".into(),
+            )
+        })?;
+        self.invalidate_migration_gate();
+        let write_timeout = deadline
+            .remaining()
+            .min(self.validity.remaining(epoch)?)
+            .min(self.cloud.callback_timeout());
+        if write_timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "cloud lease migration transition has no remaining budget".into(),
+            ));
+        }
+        let write_result =
+            provider_write_doc_with_timeout(&self.cloud, replacement, headers, write_timeout);
+        if matches!(&write_result, Err(LeaseError::AcquisitionFailed(_))) {
+            return write_result;
+        }
+        let readback_timeout = deadline
+            .remaining()
+            .min(self.validity.remaining(epoch).unwrap_or(Duration::ZERO))
+            .min(self.cloud.callback_timeout());
+        let readback = provider_read_doc_with_timeout(&self.cloud, readback_timeout);
+        if let Ok(Some(actual)) = &readback {
+            let gate_matches = actual.version == replacement.version
+                && actual.migration_gate == replacement.migration_gate;
+            if gate_matches
+                && owns_document(actual, holder_id, &self.owner_token, epoch)
+                && actual.committed_metadata == replacement.committed_metadata
+            {
+                self.validity.remaining(epoch)?;
+                self.cache_migration_gate(holder_id, epoch, replacement.migration_gate.clone());
+                return Ok(());
+            }
+        }
+        match write_result {
+            Ok(()) => Err(LeaseError::Indeterminate(
+                "cloud lease migration transition changed before exact owner/gate readback".into(),
+            )),
+            Err(write_error) => Err(LeaseError::Indeterminate(format!(
+                "cloud lease migration transition outcome is unknown (expected prior {:?}, current owner {:?}): {write_error}; readback: {}",
+                expected.epoch,
+                readback.as_ref().ok().and_then(|value| value.as_ref()).and_then(|doc| doc.epoch),
+                readback.err().map_or_else(|| "state did not match".into(), |error| error.to_string())
+            ))),
+        }
+    }
+
+    fn read_format_migration_gate_inner(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<Option<CloudFormatMigrationGate>, LeaseError> {
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(timeout);
+        let (document, _) = self.read_migration_lease(holder_id, epoch, &deadline)?;
+        match document.version {
+            LeaseDocumentVersion::V4 if document.migration_gate.is_none() => {
+                self.cache_migration_gate(holder_id, epoch, None);
+                Ok(None)
+            }
+            LeaseDocumentVersion::V5 => {
+                self.cache_migration_gate(holder_id, epoch, document.migration_gate.clone());
+                Ok(document.migration_gate)
+            }
+            _ => Err(LeaseError::Indeterminate(
+                "cloud lease protocol does not support FORMAT migration gates".into(),
+            )),
+        }
+    }
+
+    fn install_format_10_pending_inner(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        pending: CloudFormatMigrationPending,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        validate_migration_gate(&CloudFormatMigrationGate::Pending(pending.clone()))?;
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(timeout);
+        let (current, metadata) = self.read_migration_lease(holder_id, epoch, &deadline)?;
+        if current.version != LeaseDocumentVersion::V4
+            || current.committed_metadata.is_some()
+            || current.migration_gate.is_some()
+        {
+            return Err(LeaseError::RenewalFailed(
+                "pending FORMAT migration can only be installed over an ungated v4 lease".into(),
+            ));
+        }
+        let selected = self.migration_selected_generation(holder_id, epoch, &deadline)?;
+        let expected_source = selected
+            .as_ref()
+            .map(CloudMetadataGenerationIdentity::from_generation)
+            .ok_or_else(|| {
+                LeaseError::Indeterminate(
+                    "pending FORMAT migration requires a selected v9 predecessor".into(),
+                )
+            })?;
+        if expected_source != pending.source {
+            return Err(LeaseError::AcquisitionFailed(
+                "selected cloud metadata is not the exact FORMAT migration predecessor".into(),
+            ));
+        }
+        let replacement = LeaseDocument {
+            version: LeaseDocumentVersion::V5,
+            migration_gate: Some(CloudFormatMigrationGate::Pending(pending)),
+            ..current.clone()
+        };
+        self.write_migration_gate(
+            &current,
+            &metadata,
+            &replacement,
+            holder_id,
+            epoch,
+            &deadline,
+        )?;
+        let selected_after = match self.migration_selected_generation(holder_id, epoch, &deadline) {
+            Ok(selected) => selected,
+            Err(error) => {
+                self.invalidate_migration_gate();
+                return Err(error);
+            }
+        };
+        if selected_after.as_ref() != selected.as_ref() {
+            self.invalidate_migration_gate();
+            return Err(LeaseError::Indeterminate(
+                "cloud pointer changed while installing the pending FORMAT migration gate".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn activate_format_10_gate_inner(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        migration_id: &str,
+        candidate: &CloudMetadataGeneration,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(timeout);
+        let (current, metadata) = self.read_migration_lease(holder_id, epoch, &deadline)?;
+        let Some(CloudFormatMigrationGate::Pending(pending)) = current.migration_gate.as_ref()
+        else {
+            return Err(LeaseError::RenewalFailed(
+                "FORMAT 10 gate finalization requires a pending lease state".into(),
+            ));
+        };
+        if current.version != LeaseDocumentVersion::V5 || pending.migration_id != migration_id {
+            return Err(LeaseError::RenewalFailed(
+                "pending FORMAT migration identity changed before finalization".into(),
+            ));
+        }
+        let candidate_identity = CloudMetadataGenerationIdentity::from_generation(candidate);
+        if candidate_identity != pending.candidate.generation {
+            return Err(LeaseError::AcquisitionFailed(
+                "candidate descriptor differs from the exact pending FORMAT migration".into(),
+            ));
+        }
+        let selected = self.migration_selected_generation(holder_id, epoch, &deadline)?;
+        if selected.as_ref() != Some(candidate) {
+            return Err(LeaseError::AcquisitionFailed(
+                "cloud pointer does not select the exact pending FORMAT 10 candidate".into(),
+            ));
+        }
+        let replacement = LeaseDocument {
+            migration_gate: Some(CloudFormatMigrationGate::Active { target_format: 10 }),
+            ..current.clone()
+        };
+        self.write_migration_gate(
+            &current,
+            &metadata,
+            &replacement,
+            holder_id,
+            epoch,
+            &deadline,
+        )?;
+        let selected_after = match self.migration_selected_generation(holder_id, epoch, &deadline) {
+            Ok(selected) => selected,
+            Err(error) => {
+                self.invalidate_migration_gate();
+                return Err(error);
+            }
+        };
+        if selected_after.as_ref() != Some(candidate) {
+            self.invalidate_migration_gate();
+            return Err(LeaseError::Indeterminate(
+                "cloud pointer changed while finalizing the FORMAT 10 gate".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl LeaderStore for ProviderLeaderStore {
+    fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
+        self.acquire_leadership_with_minimum_epoch(holder_id, 0)
+    }
+
+    fn acquire_leadership_with_minimum_epoch(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+    ) -> Result<LeaderRecord, LeaseError> {
+        self.acquire_with_cloud(holder_id, minimum_epoch, &self.cloud, None)
+    }
+
+    fn acquire_leadership_with_context(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+        acquisition: &mut LeaderAcquisition<'_>,
+    ) -> Result<LeaderRecord, LeaseError> {
+        acquisition.check()?;
+        let cloud = self.cloud.with_startup_scope(acquisition.scope().clone());
+        self.acquire_with_cloud(holder_id, minimum_epoch, &cloud, Some(acquisition))
+    }
+
+    fn read_current_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<LeaderRecord>, LeaseError> {
+        Ok(
+            provider_read_doc_with_timeout(&self.cloud, timeout)?.map(|document| LeaderRecord {
+                epoch: document.epoch.unwrap_or(0),
+                holder_id: document.holder_id,
+                acquired_at: document.acquired_at,
+            }),
+        )
+    }
+
+    fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
+        Ok(
+            provider_read_doc(&self.cloud)?.map(|document| LeaderRecord {
+                epoch: document.epoch.unwrap_or(0),
+                holder_id: document.holder_id,
+                acquired_at: document.acquired_at,
+            }),
+        )
+    }
+
+    fn read_format_migration_gate(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<Option<CloudFormatMigrationGate>, LeaseError> {
+        self.read_format_migration_gate_inner(holder_id, epoch, timeout)
+    }
+
+    fn install_format_10_pending(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        pending: CloudFormatMigrationPending,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.install_format_10_pending_inner(holder_id, epoch, pending, timeout)
+    }
+
+    fn activate_format_10_gate(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        migration_id: &str,
+        candidate: &CloudMetadataGeneration,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.activate_format_10_gate_inner(holder_id, epoch, migration_id, candidate, timeout)
+    }
+
+    fn read_committed_metadata(&self, timeout: Duration) -> Result<CloudMetadataHead, LeaseError> {
+        self.read_separate_metadata_head(timeout)
+    }
+
+    fn read_committed_metadata_for_writer(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<CloudMetadataHead, LeaseError> {
+        self.cached_metadata_head(holder_id, epoch, timeout)
+    }
+
+    fn validate_metadata_epoch_with_timeout(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.cached_metadata_head(holder_id, epoch, timeout)
+            .map(|_| ())
+    }
+
+    fn publish_committed_metadata(
+        &self,
+        holder_id: &str,
+        expected_epoch: u64,
+        expected_previous: Option<&CloudMetadataGeneration>,
+        generation: CloudMetadataGeneration,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.publish_separate_metadata(
+            holder_id,
+            expected_epoch,
+            expected_previous,
+            generation,
+            timeout,
+        )
+    }
+
+    fn validate_epoch_with_timeout(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        let read_timeout = timeout.min(self.validity.remaining(expected_epoch)?);
+        match provider_read_doc_with_timeout(&self.cloud, read_timeout)? {
+            Some(document)
+                if matches!(document.version, LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5)
+                    && owns_document(
+                        &document,
+                        expected_holder_id,
+                        &self.owner_token,
+                        expected_epoch,
+                    ) =>
+            {
+                if document.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())? {
+                    return Err(LeaseError::RenewalFailed(
+                        "cloud lease expired before epoch validation".to_string(),
+                    ));
+                }
+                self.cache_migration_gate(
+                    expected_holder_id,
+                    expected_epoch,
+                    document.migration_gate.clone(),
+                );
+                self.validity.remaining(expected_epoch).map(|_| ())
+            }
+            Some(document) => Err(LeaseError::RenewalFailed(format!(
+                "epoch/holder mismatch: expected holder={expected_holder_id} epoch={expected_epoch}, found holder={} epoch={}",
+                document.holder_id,
+                document.epoch.unwrap_or(0)
+            ))),
+            None => Err(LeaseError::RenewalFailed(
+                "leader record missing".to_string(),
+            )),
+        }
+    }
+
+    fn with_writer_epoch(
+        &self,
+        _expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "cloud WAL storage effect deadline exhausted".into(),
+            ));
+        }
+
+        // Provider-backed leases already hold a conservative monotonic
+        // validity window. Checking that local deadline around a local-cache
+        // effect avoids a remote lease-object read for every WAL write and
+        // fsync. Shared cloud publications still use their conditional CAS.
+        self.validity.remaining(expected_epoch)?;
+        operation();
+        self.validity.remaining(expected_epoch).map(|_| ())
+    }
+
+    fn validate_epoch(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+    ) -> Result<(), LeaseError> {
+        self.validate_epoch_with_timeout(
+            expected_holder_id,
+            expected_epoch,
+            self.cloud.callback_timeout(),
+        )
+    }
+
+    fn renew_leadership(&self, holder_id: &str, expected_epoch: u64) -> Result<(), LeaseError> {
+        let renewal_window = self
+            .validity
+            .remaining(expected_epoch)?
+            .checked_sub(RENEWAL_WRITE_DEADLINE_MARGIN)
+            .filter(|window| !window.is_zero())
+            .ok_or_else(|| {
+                LeaseError::RenewalFailed(
+                    "insufficient monotonic validity remains for bounded provider renewal"
+                        .to_string(),
+                )
+            })?;
+        let deadline = Instant::now().checked_add(renewal_window).ok_or_else(|| {
+            LeaseError::Internal("cloud lease renewal deadline is out of range".to_string())
+        })?;
+        loop {
+            // A read may time out without mutating authority. Leave room for
+            // the heartbeat retry pause and a fresh read/CAS attempt.
+            let read_timeout = (deadline.saturating_duration_since(Instant::now()) / 2)
+                .min(self.cloud.callback_timeout())
+                .min(self.validity.remaining(expected_epoch)?);
+            if read_timeout.is_zero() {
+                return Err(LeaseError::RenewalFailed(
+                    "cloud lease renewal crossed its bounded provider deadline".to_string(),
+                ));
+            }
+            let (existing, metadata) = provider_read_doc_with_metadata(&self.cloud, read_timeout)?
+                .ok_or_else(|| {
+                    LeaseError::RenewalFailed("cloud lease document disappeared".to_string())
+                })?;
+            if !matches!(
+                existing.version,
+                LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5
+            ) || !owns_document(&existing, holder_id, &self.owner_token, expected_epoch)
+            {
+                return Err(LeaseError::RenewalFailed(format!(
+                    "cloud lease ownership changed (holder: {}, epoch: {:?})",
+                    existing.holder_id, existing.epoch
+                )));
+            }
+            // A malformed expiry cannot be taken over by another conforming
+            // writer; the current locally valid owner may repair it. A valid
+            // expiry that has passed is an actual loss of authority.
+            match existing.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())
+            {
+                Ok(true) => {
+                    return Err(LeaseError::RenewalFailed(
+                        "cloud lease expired before renewal".to_string(),
+                    ));
+                }
+                Ok(false) | Err(LeaseError::Indeterminate(_)) => {}
+                Err(error) => return Err(error),
+            }
+            let headers = mutation_precondition_headers(&metadata).ok_or_else(|| {
+                LeaseError::RenewalFailed(
+                    "cloud lease has no token for conditional renewal".to_string(),
+                )
+            })?;
+            let LeaseDeadlines {
+                valid_until,
+                expires_at,
+                ..
+            } = self.lease_deadlines()?;
+            let document = LeaseDocument {
+                expires_at: expires_at.to_rfc3339(),
+                ..existing
+            };
+            let write_timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .min(self.cloud.callback_timeout());
+            if write_timeout.is_zero() {
+                return Err(LeaseError::RenewalFailed(
+                    "cloud lease renewal crossed its bounded provider deadline".to_string(),
+                ));
+            }
+            match provider_write_doc_with_timeout(&self.cloud, &document, headers, write_timeout) {
+                Ok(()) => {
+                    // Renewal preserves the gate. An older renewal response
+                    // cannot overwrite a concurrently confirmed transition.
+                    if let Err(error) = self.validity.advance(expected_epoch, valid_until) {
+                        let _ = self.release_leadership(holder_id, expected_epoch);
+                        return Err(error);
+                    }
+                    return Ok(());
+                }
+                Err(LeaseError::AcquisitionFailed(_)) => {
+                    // This PUT was definitely rejected. Retry only after
+                    // rereading the same holder, token, epoch and live expiry.
+                }
+                Err(error) => {
+                    if matches!(
+                        error,
+                        LeaseError::IoError(_)
+                            | LeaseError::Indeterminate(_)
+                            | LeaseError::Timeout(_)
+                    ) {
+                        // A delayed PUT may still land. Fence before the
+                        // reconciler can conditionally expire its result.
+                        self.validity.fence(expected_epoch);
+                        spawn_ambiguous_renewal_reconciler(
+                            Arc::clone(&self.cloud),
+                            document,
+                            self.clock_skew_tolerance(),
+                            self.clock.clone(),
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    fn release_leadership(&self, holder_id: &str, expected_epoch: u64) -> Result<(), LeaseError> {
+        let release_offset = chrono::Duration::from_std(
+            self.clock_skew_tolerance()
+                .saturating_add(Duration::from_millis(1)),
+        )
+        .unwrap_or(chrono::Duration::MAX);
+        let deadline = Instant::now()
+            .checked_add(self.cloud.callback_timeout())
+            .ok_or_else(|| {
+                LeaseError::Internal("cloud lease release deadline is out of range".to_string())
+            })?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(LeaseError::Timeout(
+                    "cloud lease release crossed its provider deadline".to_string(),
+                ));
+            }
+            let Some((current, metadata)) =
+                provider_read_doc_with_metadata(&self.cloud, remaining)?
+            else {
+                return Ok(());
+            };
+            if !matches!(
+                current.version,
+                LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5
+            ) {
+                tracing::warn!(%holder_id, "skipping cloud lease release after legacy document replacement");
+                return Ok(());
+            }
+            if !owns_document(&current, holder_id, &self.owner_token, expected_epoch) {
+                tracing::warn!(%holder_id, expected_epoch, "skipping stale cloud lease release");
+                return Ok(());
+            }
+            let headers = mutation_precondition_headers(&metadata).ok_or_else(|| {
+                LeaseError::IoError("cloud lease release lacks a conditional token".to_string())
+            })?;
+            let released = LeaseDocument {
+                expires_at: (self.clock.now() - release_offset).to_rfc3339(),
+                ..current
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(LeaseError::Timeout(
+                    "cloud lease release crossed its provider deadline".to_string(),
+                ));
+            }
+            match provider_write_doc_with_timeout(&self.cloud, &released, headers, remaining) {
+                Ok(()) => {
+                    self.invalidate_migration_gate();
+                    return Ok(());
+                }
+                Err(LeaseError::AcquisitionFailed(_)) => {
+                    // This PUT was definitely rejected. Re-read the current
+                    // epoch and preserve its committed pointer.
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn set_clock_skew_tolerance(&self, tolerance: Duration) -> Result<(), LeaseError> {
+        *self.clock_skew_tolerance.lock().map_err(|_| {
+            LeaseError::Internal("cloud lease tolerance lock poisoned".to_string())
+        })? = tolerance;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn read_test_coordination_document(&self) -> Result<Option<String>, LeaseError> {
+        provider_read_doc_with_timeout(&self.cloud, self.cloud.callback_timeout())
+            .map(|document| document.map(|document| format_lease_document(&document)))
+    }
+
+    #[cfg(test)]
+    fn write_test_coordination_document(&self, content: &str) -> Result<(), LeaseError> {
+        let document = parse_lease_document(content).ok_or_else(|| {
+            LeaseError::Internal("test lease coordination document is malformed".into())
+        })?;
+        provider_write_doc_with_timeout(
+            &self.cloud,
+            &document,
+            Vec::new(),
+            self.cloud.callback_timeout(),
+        )
+    }
+}
+
+impl ProviderLeaderStore {
+    fn clock_skew_tolerance(&self) -> Duration {
+        *self
+            .clock_skew_tolerance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn owns_document(
+    document: &LeaseDocument,
+    holder_id: &str,
+    owner_token: &str,
+    expected_epoch: u64,
+) -> bool {
+    document.holder_id == holder_id
+        && document.owner_token.as_deref() == Some(owner_token)
+        && document.epoch == Some(expected_epoch)
+}
+
+/// Primary lease implementation for cloud-backed storage.
+///
+/// The coordination document is written to shared object storage with conditional
+/// create/update headers, including filesystem-backed simulated storage.
+///
+/// Provider-backed coordination uses a V3 document. Its required field names
+/// differ from the legacy format so older binaries fail to parse and refuse
+/// takeover rather than discarding the committed metadata pointer. Existing
+/// provider V1 documents are rejected.
+///
+pub struct CloudStorageLease {
+    /// Cloud provider configuration.
+    config: CloudLeaseConfig,
+    /// Unique identity of this holder (pid@hostname).
+    holder_id: String,
+    /// Random per-instance token exposed to backend-focused tests.
+    #[cfg(test)]
+    owner_token: String,
+    /// TTL for the lease.
+    ttl: Duration,
+    /// Whether we currently hold the lease.
+    acquired: AtomicBool,
+    /// Monotonic validity for the current cloud-lease acquisition.
+    validity: Arc<LeaseValidity>,
+    /// Epoch from the active coordination store, set after successful acquisition.
+    acquired_epoch: std::sync::atomic::AtomicU64,
+    /// Identity retained for a conditional release retry after local writes are fenced.
+    pending_release_epoch: Mutex<Option<u64>>,
+    /// Backend selected once at construction; all lifecycle dispatch uses this trait.
+    leader_store: Arc<dyn LeaderStore>,
+    clock_skew_tolerance: Duration,
+}
+
+/// Keep the full TTL precision in the shared expiry so it cannot precede
+/// the holder's monotonic validity because of truncation.
+pub(super) fn lease_expiry(
+    now: chrono::DateTime<chrono::Utc>,
+    ttl: Duration,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    now.checked_add_signed(chrono::Duration::from_std(ttl).ok()?)
+}
+
+impl CloudStorageLease {
+    pub fn lease_validity(&self) -> Arc<LeaseValidity> {
+        Arc::clone(&self.validity)
+    }
+
+    /// Exercise the production lease protocol over a filesystem object store.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn new(config: CloudLeaseConfig, shared_path: impl AsRef<std::path::Path>) -> Self {
+        let store = Arc::new(
+            cntryl_midge_storage::filesystem::FileSystem::new(shared_path)
+                .expect("create the filesystem object store for the lease fixture"),
+        );
+        let cloud = Arc::new(CloudStorage::from_object_store(
+            store,
+            Duration::from_secs(5),
+        ));
+        Self::new_provider_backed_with_ttl(
+            config,
+            cloud,
+            Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
+            LeaseClock::default(),
+        )
+    }
+
+    /// Override the bounded wall-clock skew allowance used for takeover.
+    pub fn with_clock_skew_tolerance(mut self, tolerance: Duration) -> Result<Self, LeaseError> {
+        if tolerance > self.ttl {
+            return Err(LeaseError::Internal(format!(
+                "lease clock-skew tolerance {tolerance:?} exceeds TTL {:?}",
+                self.ttl
+            )));
+        }
+        self.leader_store.set_clock_skew_tolerance(tolerance)?;
+        self.clock_skew_tolerance = tolerance;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn new_provider_backed(
+        config: CloudLeaseConfig,
+        _local_cache_path: std::path::PathBuf,
+        cloud: Arc<CloudStorage>,
+    ) -> Self {
+        Self::new_provider_backed_with_ttl(
+            config,
+            cloud,
+            Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
+            LeaseClock::default(),
+        )
+    }
+
+    fn new_provider_backed_with_ttl(
+        config: CloudLeaseConfig,
+        cloud: Arc<CloudStorage>,
+        ttl: Duration,
+        clock: LeaseClock,
+    ) -> Self {
+        let holder_id = format!(
+            "{}@{}",
+            std::process::id(),
+            hostname::get()
+                .unwrap_or_else(|_| std::ffi::OsString::from("unknown"))
+                .to_string_lossy()
+        );
+        let owner_token = uuid::Uuid::new_v4().to_string();
+        let clock_skew_tolerance = Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS / 2);
+        let validity = Arc::new(LeaseValidity::new());
+        let leader_store = Arc::new(ProviderLeaderStore::new(
+            cloud,
+            ttl,
+            owner_token.clone(),
+            Arc::clone(&validity),
+            clock_skew_tolerance,
+            clock,
+        ));
+        Self {
+            config,
+            holder_id,
+            #[cfg(test)]
+            owner_token,
+            ttl,
+            acquired: AtomicBool::new(false),
+            validity,
+            acquired_epoch: std::sync::atomic::AtomicU64::new(0),
+            pending_release_epoch: Mutex::new(None),
+            leader_store,
+            clock_skew_tolerance,
+        }
+    }
+
+    /// A provider lease whose document lives in `cloud`, timed by `clock`.
+    #[must_use]
+    pub fn new_provider_backed_with_clock_skew_tolerance_and_ttl(
+        config: CloudLeaseConfig,
+        cloud: Arc<CloudStorage>,
+        clock_skew_tolerance: Duration,
+        ttl: Duration,
+        clock: LeaseClock,
+    ) -> Self {
+        Self::new_provider_backed_with_ttl(config, cloud, ttl, clock)
+            .with_clock_skew_tolerance(clock_skew_tolerance)
+            .expect("engine validates lease clock-skew tolerance")
+    }
+
+    /// Full object key for the lease file.
+    ///
+    /// Logical object key for the lease file. `CloudStorage` applies the
+    /// configured namespace/prefix, so remote writes use `LEASE_OBJECT_KEY`
+    /// directly and keep this helper for diagnostics.
+    fn lease_key(&self) -> String {
+        if self.config.prefix.is_empty() {
+            LEASE_OBJECT_KEY.to_string()
+        } else {
+            let prefix = self.config.prefix.trim_end_matches('/');
+            format!("{prefix}/{LEASE_OBJECT_KEY}")
+        }
+    }
+
+    #[cfg(test)]
+    fn read_lease_file(&self) -> Result<Option<LeaseDocument>, LeaseError> {
+        self.leader_store
+            .read_test_coordination_document()?
+            .map(|content| {
+                parse_lease_document(&content).ok_or_else(|| {
+                    LeaseError::Indeterminate(
+                        "local lease coordination document is malformed".to_string(),
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    #[cfg(test)]
+    fn write_lease_file(&self, document: &LeaseDocument) -> Result<(), LeaseError> {
+        self.leader_store
+            .write_test_coordination_document(&format_lease_document(document))
+    }
+}
+
+impl CloudStorageLease {
+    fn acquire_in_scope(
+        self: Arc<Self>,
+        minimum_epoch: u64,
+        scope: Option<&cntryl_midge_core::common::DeadlineScope>,
+    ) -> Result<LeaseGuard, LeaseError> {
+        if let Some(scope) = scope {
+            scope
+                .check("cloud primary lease acquisition")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        let mut pending_release = self
+            .pending_release_epoch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending_release.is_some() {
+            return Err(LeaseError::AlreadyAcquired(
+                "prior cloud lease release is still pending".into(),
+            ));
+        }
+        if self.acquired.load(Ordering::Acquire) {
+            return Err(LeaseError::AlreadyAcquired(
+                "lease already acquired by this instance".into(),
+            ));
+        }
+        let record = if let Some(scope) = scope {
+            super::traits::acquire_leadership_with_minimum_epoch_within(
+                self.leader_store.as_ref(),
+                &self.holder_id,
+                minimum_epoch,
+                scope,
+                &mut |epoch| {
+                    *pending_release = Some(epoch);
+                },
+            )?
+        } else {
+            self.leader_store
+                .acquire_leadership_with_minimum_epoch(&self.holder_id, minimum_epoch)?
+        };
+        self.acquired_epoch.store(record.epoch, Ordering::Release);
+        self.acquired.store(true, Ordering::Release);
+        *pending_release = None;
+        if let Some(scope) = scope {
+            // The successful result and cleanup epoch are fully tracked before
+            // cancellation can classify the remaining recovery as ordinary timeout.
+            scope.resolve_ambiguous_mutation();
+            scope
+                .check("confirmed cloud primary lease acquisition")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        tracing::info!(holder_id = %self.holder_id, bucket = %self.config.bucket,
+            lease_key = %self.lease_key(), "cloud storage lease acquired");
+        Ok(LeaseGuard::token())
+    }
+}
+
+impl PrimaryLease for CloudStorageLease {
+    fn try_acquire(self: std::sync::Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+        self.try_acquire_with_minimum_epoch(0)
+    }
+
+    fn try_acquire_with_minimum_epoch(
+        self: Arc<Self>,
+        minimum_epoch: u64,
+    ) -> Result<LeaseGuard, LeaseError> {
+        self.acquire_in_scope(minimum_epoch, None)
+    }
+
+    fn try_acquire_with_minimum_epoch_within(
+        self: Arc<Self>,
+        minimum_epoch: u64,
+        scope: &cntryl_midge_core::common::DeadlineScope,
+    ) -> Result<LeaseGuard, LeaseError> {
+        self.acquire_in_scope(minimum_epoch, Some(scope))
+    }
+
+    fn renew(&self) -> Result<(), LeaseError> {
+        let expected_epoch = self.acquired_epoch.load(Ordering::Acquire);
+        let result = (|| {
+            if !self.acquired.load(Ordering::Acquire) {
+                return Err(LeaseError::RenewalFailed("lease not acquired".to_string()));
+            }
+            self.validity.remaining(expected_epoch)?;
+            // The conditional PUT proves ownership; no separate validation.
+            self.leader_store
+                .renew_leadership(&self.holder_id, expected_epoch)?;
+            tracing::trace!("cloud storage lease renewed");
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            if self
+                .validity
+                .is_transient_renewal_failure(&error, expected_epoch)
+            {
+                return Err(error);
+            }
+            self.validity.fence(expected_epoch);
+            let mut pending_release = self
+                .pending_release_epoch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.acquired.load(Ordering::Acquire)
+                && self.acquired_epoch.load(Ordering::Acquire) == expected_epoch
+            {
+                // Writes are fenced, but a persisted lease from this epoch
+                // may still need a conditional cleanup attempt.
+                *pending_release = Some(expected_epoch);
+                self.acquired.store(false, Ordering::Release);
+                self.acquired_epoch.store(0, Ordering::Release);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn release(&self) -> Result<(), LeaseError> {
+        let mut pending_release = self
+            .pending_release_epoch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let released_epoch = if let Some(epoch) = *pending_release {
+            epoch
+        } else if self.acquired.load(Ordering::Acquire) {
+            self.acquired_epoch.load(Ordering::Acquire)
+        } else {
+            return Ok(()); // Idempotent after confirmed release.
+        };
+        let result = self
+            .leader_store
+            .release_leadership(&self.holder_id, released_epoch);
+        // A failed provider release leaves the remote lease to expire on its
+        // own. The local writer must still stop accepting writes immediately.
+        self.validity.deactivate(released_epoch);
+        self.acquired.store(false, Ordering::Release);
+        self.acquired_epoch.store(0, Ordering::Release);
+        *pending_release = result.as_ref().err().map(|_| released_epoch);
+
+        if result.is_ok() {
+            tracing::info!(holder_id = %self.holder_id, "cloud storage lease released");
+        }
+        result
+    }
+
+    fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    fn holder_id(&self) -> String {
+        self.holder_id.clone()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.acquired_epoch.load(Ordering::Acquire)
+    }
+
+    fn get_leader_store(&self) -> Option<Arc<dyn LeaderStore>> {
+        Some(Arc::clone(&self.leader_store))
+    }
+}
+/// Parsed lease document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseDocumentVersion {
+    Legacy,
+    V3,
+    V4,
+    V5,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LeaseDocument {
+    version: LeaseDocumentVersion,
+    epoch: Option<u64>,
+    holder_id: String,
+    owner_token: Option<String>,
+    acquired_at: String,
+    expires_at: String,
+    committed_metadata: Option<CloudMetadataGeneration>,
+    migration_gate: Option<CloudFormatMigrationGate>,
+}
+
+impl LeaseDocument {
+    /// Check if the lease has expired based on `expires_at`.
+    #[cfg(test)]
+    fn is_expired(&self) -> Result<bool, LeaseError> {
+        self.is_expired_with_tolerance(Duration::ZERO, chrono::Utc::now())
+    }
+
+    /// Whether the lease had expired, beyond `tolerance`, at `now`.
+    fn is_expired_with_tolerance(
+        &self,
+        tolerance: Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, LeaseError> {
+        let expires = chrono::DateTime::parse_from_rfc3339(&self.expires_at).map_err(|_| {
+            LeaseError::Indeterminate(format!(
+                "cloud lease expiry is invalid; ownership is ambiguous (holder: {}, epoch: {:?})",
+                self.holder_id, self.epoch
+            ))
+        })?;
+        let tolerance = chrono::Duration::from_std(tolerance).map_err(|_| {
+            LeaseError::Internal("lease clock-skew tolerance is out of range".to_string())
+        })?;
+        Ok(now.signed_duration_since(expires) > tolerance)
+    }
+}
+
+/// Format a lease document as a simple line-based text file. V3 encodes its
+/// bounded metadata descriptor as JSON on one line.
+fn format_lease_document(doc: &LeaseDocument) -> String {
+    match doc.version {
+        LeaseDocumentVersion::Legacy => {
+            let epoch = doc
+                .epoch
+                .map_or_else(String::new, |epoch| format!("epoch: {epoch}\n"));
+            let owner_token = doc
+                .owner_token
+                .as_ref()
+                .map_or_else(String::new, |token| format!("owner_token: {token}\n"));
+            format!(
+                "{epoch}holder_id: {}\n{owner_token}acquired_at: {}\nexpires_at: {}\n",
+                doc.holder_id, doc.acquired_at, doc.expires_at,
+            )
+        }
+        LeaseDocumentVersion::V3 => {
+            let metadata = serde_json::to_string(&doc.committed_metadata)
+                .expect("metadata generation has infallible JSON serialization");
+            format!(
+                "lease_version: 3\nfencing_epoch: {}\nholder: {}\nowner: {}\nacquired: {}\nexpires: {}\nmetadata: {metadata}\n",
+                doc.epoch.expect("V3 lease has an epoch"),
+                doc.holder_id,
+                doc.owner_token.as_deref().expect("V3 lease has an owner token"),
+                doc.acquired_at,
+                doc.expires_at,
+            )
+        }
+        LeaseDocumentVersion::V5 => {
+            let gate = serde_json::to_string(
+                doc.migration_gate
+                    .as_ref()
+                    .expect("V5 lease has a migration gate"),
+            )
+            .expect("migration gate has infallible JSON serialization");
+            format!(
+                "lease_version: 5\nfencing_epoch: {}\nholder: {}\nowner: {}\nacquired: {}\nexpires: {}\nupgrade: {gate}\n",
+                doc.epoch.expect("V5 lease has an epoch"),
+                doc.holder_id,
+                doc.owner_token.as_deref().expect("V5 lease has an owner token"),
+                doc.acquired_at,
+                doc.expires_at,
+            )
+        }
+        LeaseDocumentVersion::V4 => format!(
+            "lease_version: 4\nfencing_epoch: {}\nholder: {}\nowner: {}\nacquired: {}\nexpires: {}\n",
+            doc.epoch.expect("V4 lease has an epoch"),
+            doc.holder_id,
+            doc.owner_token.as_deref().expect("V4 lease has an owner token"),
+            doc.acquired_at,
+            doc.expires_at,
+        ),
+    }
+}
+
+/// Preserve the committed metadata pointer in a backup while ensuring the
+/// restored database does not inherit the source database's active lease.
+pub fn expired_backup_lease_document(content: &[u8]) -> Result<Vec<u8>, LeaseError> {
+    if content.len() > MAX_LEASE_DOCUMENT_BYTES {
+        return Err(LeaseError::Indeterminate(
+            "cloud lease document is too large to include in a backup".to_string(),
+        ));
+    }
+    let content = std::str::from_utf8(content).map_err(|_| {
+        LeaseError::Indeterminate("cloud lease document is not valid UTF-8".to_string())
+    })?;
+    let mut document = parse_lease_document(content).ok_or_else(|| {
+        LeaseError::Indeterminate(
+            "cloud lease document is malformed; backup cannot preserve its metadata pointer"
+                .to_string(),
+        )
+    })?;
+    if document.version == LeaseDocumentVersion::V5
+        && !matches!(
+            document.migration_gate.as_ref(),
+            Some(CloudFormatMigrationGate::Active { target_format: 10 })
+        )
+    {
+        return Err(LeaseError::Indeterminate(
+            "pending or unsupported cloud format migration gate cannot be rewritten into a backup"
+                .into(),
+        ));
+    }
+    document.expires_at = BACKUP_EXPIRED_TIMESTAMP.to_string();
+    Ok(format_lease_document(&document).into_bytes())
+}
+
+/// Parse a lease document from the simple key-value text format.
+fn parse_lease_document(content: &str) -> Option<LeaseDocument> {
+    if content.len() > MAX_LEASE_DOCUMENT_BYTES {
+        return None;
+    }
+    if content
+        .lines()
+        .any(|line| line.starts_with("lease_version:"))
+    {
+        return match content
+            .lines()
+            .find_map(|line| line.strip_prefix("lease_version: "))?
+        {
+            "5" => parse_v5_lease_document(content),
+            _ => parse_v3_lease_document(content),
+        };
+    }
+    parse_legacy_lease_document(content)
+}
+
+fn parse_legacy_lease_document(content: &str) -> Option<LeaseDocument> {
+    let mut epoch = None;
+    let mut holder_id = None;
+    let mut owner_token = None;
+    let mut acquired_at = None;
+    let mut expires_at = None;
+
+    for line in content.lines() {
+        if let Some(value) = line.strip_prefix("epoch: ") {
+            epoch = Some(value.parse::<u64>().ok()?);
+        } else if let Some(value) = line.strip_prefix("holder_id: ") {
+            holder_id = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("owner_token: ") {
+            owner_token = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("acquired_at: ") {
+            acquired_at = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("expires_at: ") {
+            expires_at = Some(value.to_string());
+        }
+    }
+
+    Some(LeaseDocument {
+        version: LeaseDocumentVersion::Legacy,
+        epoch,
+        holder_id: holder_id?,
+        owner_token,
+        acquired_at: acquired_at?,
+        expires_at: expires_at?,
+        committed_metadata: None,
+        migration_gate: None,
+    })
+}
+
+fn parse_v3_lease_document(content: &str) -> Option<LeaseDocument> {
+    if !content.ends_with('\n') || content.contains('\r') {
+        return None;
+    }
+    let mut version = None;
+    let mut epoch = None;
+    let mut holder_id = None;
+    let mut owner_token = None;
+    let mut acquired_at = None;
+    let mut expires_at = None;
+    let mut committed_metadata = None;
+    for line in content.lines() {
+        let (name, value) = line.split_once(": ")?;
+        match name {
+            "lease_version" if version.replace(value).is_none() => {}
+            "fencing_epoch" if epoch.replace(value.parse::<u64>().ok()?).is_none() => {}
+            "holder" if holder_id.replace(value.to_string()).is_none() => {}
+            "owner" if owner_token.replace(value.to_string()).is_none() => {}
+            "acquired" if acquired_at.replace(value.to_string()).is_none() => {}
+            "expires" if expires_at.replace(value.to_string()).is_none() => {}
+            "metadata"
+                if committed_metadata
+                    .replace(serde_json::from_str::<Option<CloudMetadataGeneration>>(value).ok()?)
+                    .is_none() => {}
+            _ => return None,
+        }
+    }
+    let version = match version? {
+        "3" => LeaseDocumentVersion::V3,
+        "4" if committed_metadata.is_none() => LeaseDocumentVersion::V4,
+        _ => return None,
+    };
+    let epoch = epoch?;
+    let holder_id = holder_id?;
+    let owner_token = owner_token?;
+    let acquired_at = acquired_at?;
+    let expires_at = expires_at?;
+    if epoch == 0 || holder_id.is_empty() || owner_token.is_empty() || acquired_at.is_empty() {
+        return None;
+    }
+    let committed_metadata = if version == LeaseDocumentVersion::V3 {
+        committed_metadata?
+    } else {
+        None
+    };
+    if let Some(generation) = committed_metadata.as_ref() {
+        validate_metadata_generation(generation).ok()?;
+    }
+    Some(LeaseDocument {
+        version,
+        epoch: Some(epoch),
+        holder_id,
+        owner_token: Some(owner_token),
+        acquired_at,
+        expires_at,
+        committed_metadata,
+        migration_gate: None,
+    })
+}
+
+fn parse_v5_lease_document(content: &str) -> Option<LeaseDocument> {
+    if !content.ends_with('\n') || content.contains('\r') {
+        return None;
+    }
+    let mut version = None;
+    let mut epoch = None;
+    let mut holder_id = None;
+    let mut owner_token = None;
+    let mut acquired_at = None;
+    let mut expires_at = None;
+    let mut migration_gate = None;
+    for line in content.lines() {
+        let (name, value) = line.split_once(": ")?;
+        match name {
+            "lease_version" if version.replace(value).is_none() => {}
+            "fencing_epoch" if epoch.replace(value.parse::<u64>().ok()?).is_none() => {}
+            "holder" if holder_id.replace(value.to_string()).is_none() => {}
+            "owner" if owner_token.replace(value.to_string()).is_none() => {}
+            "acquired" if acquired_at.replace(value.to_string()).is_none() => {}
+            "expires" if expires_at.replace(value.to_string()).is_none() => {}
+            "upgrade"
+                if migration_gate
+                    .replace(serde_json::from_str::<CloudFormatMigrationGate>(value).ok()?)
+                    .is_none() => {}
+            _ => return None,
+        }
+    }
+    if version? != "5" {
+        return None;
+    }
+    let epoch = epoch?;
+    let holder_id = holder_id?;
+    let owner_token = owner_token?;
+    let acquired_at = acquired_at?;
+    let expires_at = expires_at?;
+    let migration_gate = migration_gate?;
+    if epoch == 0 || holder_id.is_empty() || owner_token.is_empty() || acquired_at.is_empty() {
+        return None;
+    }
+    validate_migration_gate(&migration_gate).ok()?;
+    Some(LeaseDocument {
+        version: LeaseDocumentVersion::V5,
+        epoch: Some(epoch),
+        holder_id,
+        owner_token: Some(owner_token),
+        acquired_at,
+        expires_at,
+        committed_metadata: None,
+        migration_gate: Some(migration_gate),
+    })
+}
+
+fn validate_migration_gate(gate: &CloudFormatMigrationGate) -> Result<(), LeaseError> {
+    let valid_digest = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    match gate {
+        CloudFormatMigrationGate::Pending(pending) => {
+            let migration_id = uuid::Uuid::parse_str(&pending.migration_id).map_err(|_| {
+                LeaseError::Indeterminate("cloud migration ID is not a UUID".into())
+            })?;
+            if migration_id.to_string() != pending.migration_id
+                || pending.target_format != 10
+                || pending.source.ordinal == 0
+                || pending.candidate.generation.ordinal
+                    != pending.source.ordinal.checked_add(1).ok_or_else(|| {
+                        LeaseError::Indeterminate("cloud migration source ordinal exhausted".into())
+                    })?
+                || !valid_digest(&pending.source.descriptor_sha256)
+                || !valid_digest(&pending.source_sha256)
+                || !valid_digest(&pending.candidate.generation.descriptor_sha256)
+                || pending.candidate.descriptor_key
+                    != CloudFormatMigrationPending::candidate_descriptor_key(&pending.migration_id)
+            {
+                return Err(LeaseError::Indeterminate(
+                    "cloud pending FORMAT migration descriptor is invalid".into(),
+                ));
+            }
+        }
+        CloudFormatMigrationGate::Active { target_format } if *target_format == 10 => {}
+        CloudFormatMigrationGate::Active { .. } => {
+            return Err(LeaseError::Indeterminate(
+                "cloud active FORMAT gate has an unsupported target".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_metadata_generation(
+    generation: &CloudMetadataGeneration,
+) -> Result<(), LeaseError> {
+    if generation.id == super::SharedGenerationId::NONE {
+        return Err(LeaseError::Internal(
+            "committed shared generation has zero ordinal".into(),
+        ));
+    }
+    if generation.uses_format_10() {
+        return validate_format_10_generation(generation);
+    }
+    if generation
+        .objects
+        .first()
+        .is_some_and(|object| object.file_name == crate::metadata::cloud_manifest::CHAIN_FILE_NAME)
+    {
+        if generation.objects.len() > crate::metadata::cloud_manifest::MAX_CHAIN_OBJECTS {
+            return Err(LeaseError::Indeterminate(
+                "cloud manifest chain exceeds object bound".into(),
+            ));
+        }
+        let mut total = 0_u64;
+        for (index, object) in generation.objects.iter().enumerate() {
+            let ordinal = generation
+                .id
+                .get()
+                .checked_sub(index as u64)
+                .ok_or_else(|| {
+                    LeaseError::Indeterminate("cloud manifest ordinal underflow".into())
+                })?;
+            if object.file_name != crate::metadata::cloud_manifest::CHAIN_FILE_NAME
+                || object.len == 0
+            {
+                return Err(LeaseError::Indeterminate(
+                    "invalid cloud manifest chain reference".into(),
+                ));
+            }
+            crate::metadata::cloud_manifest::validate_key(&object.object_key, ordinal)
+                .map_err(|error| LeaseError::Indeterminate(error.to_string()))?;
+            total = total.checked_add(object.len).ok_or_else(|| {
+                LeaseError::Indeterminate("cloud manifest length overflow".into())
+            })?;
+        }
+        if total > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+            return Err(LeaseError::Indeterminate(
+                "cloud manifest chain exceeds read bound".into(),
+            ));
+        }
+        return Ok(());
+    }
+    if generation.objects.is_empty()
+        || generation.objects.len() > crate::metadata::files::CLOUD_MIRRORED.len()
+    {
+        return Err(LeaseError::Internal(
+            "cloud metadata generation has an invalid object count".to_string(),
+        ));
+    }
+    let mut seen_files = std::collections::HashSet::new();
+    for object in &generation.objects {
+        if !crate::metadata::files::CLOUD_MIRRORED.contains(&object.file_name.as_str())
+            || !seen_files.insert(object.file_name.as_str())
+        {
+            return Err(LeaseError::Internal(format!(
+                "cloud metadata generation has an invalid or duplicate filename '{}'",
+                object.file_name
+            )));
+        }
+        validate_immutable_body_key(object)?;
+    }
+    if !seen_files.contains(crate::metadata::files::FORMAT)
+        || !seen_files.contains(crate::metadata::files::MANIFEST_SNAPSHOT)
+    {
+        return Err(LeaseError::Internal(
+            "cloud metadata generation lacks FORMAT or manifest snapshot".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_immutable_body_key(object: &super::CloudMetadataObject) -> Result<String, LeaseError> {
+    let invalid_key = || {
+        LeaseError::Internal(format!(
+            "cloud metadata '{}' has an invalid immutable object key",
+            object.file_name
+        ))
+    };
+    let (generation_id, file_name) = object
+        .object_key
+        .strip_prefix(METADATA_GENERATIONS_PREFIX)
+        .and_then(|relative| relative.split_once('/'))
+        .ok_or_else(invalid_key)?;
+    let parsed_id = uuid::Uuid::parse_str(generation_id).map_err(|_| {
+        LeaseError::Internal(format!(
+            "cloud metadata '{}' has an invalid generation ID",
+            object.file_name
+        ))
+    })?;
+    if parsed_id.to_string() != generation_id || file_name != object.file_name {
+        return Err(LeaseError::Internal(format!(
+            "cloud metadata '{}' has a noncanonical immutable object key",
+            object.file_name
+        )));
+    }
+    Ok(generation_id.to_owned())
+}
+
+fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result<(), LeaseError> {
+    use crate::metadata::files::FORMAT;
+    use crate::metadata::local_authority::{
+        closure_path_parts, HEAD_PATH, MAX_CLOSURE_BYTES, MAX_HEAD_BYTES, MAX_OBJECTS,
+    };
+
+    if generation.objects.len() > MAX_OBJECTS + 3 {
+        return Err(LeaseError::Indeterminate(
+            "cloud FORMAT 10 metadata exceeds its object bound".into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    let mut selected_generation = None;
+    let mut publication_uuid: Option<String> = None;
+    let mut have_manifest_base = false;
+    let mut have_intent_base = false;
+    for object in &generation.objects {
+        let object_publication = validate_immutable_body_key(object)?;
+        if publication_uuid.get_or_insert_with(|| object_publication.clone()) != &object_publication
+        {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT 10 descriptor mixes immutable publication UUIDs".into(),
+            ));
+        }
+        let name = object.file_name.as_str();
+        if object.len == 0 || !seen.insert(name) {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT 10 descriptor contains an empty or duplicate object".into(),
+            ));
+        }
+        total = total.checked_add(object.len).ok_or_else(|| {
+            LeaseError::Indeterminate("cloud FORMAT 10 metadata length overflow".into())
+        })?;
+        match name {
+            FORMAT if object.len == b"midge-format-version=10\n".len() as u64 => continue,
+            HEAD_PATH if object.len <= MAX_HEAD_BYTES as u64 => continue,
+            crate::metadata::files::CLOUD_CUT_PROOF
+                if object.len <= crate::metadata::files::MAX_CLOUD_CUT_PROOF_BYTES as u64 =>
+            {
+                continue;
+            }
+            _ => {}
+        }
+        let (path_generation, body) = closure_path_parts(name)
+            .map_err(|error| LeaseError::Indeterminate(error.to_string()))?;
+        if *selected_generation.get_or_insert(path_generation) != path_generation {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT 10 descriptor mixes metadata generations".into(),
+            ));
+        }
+        have_manifest_base |= body == "manifest/base";
+        have_intent_base |= body == "intent/base";
+    }
+    if total > MAX_CLOSURE_BYTES
+        || !have_manifest_base
+        || !have_intent_base
+        || !seen.contains(FORMAT)
+    {
+        return Err(LeaseError::Indeterminate(
+            "cloud FORMAT 10 descriptor is incomplete or exceeds its read bound".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn legacy_metadata_migration_error() -> LeaseError {
+    LeaseError::Indeterminate(
+        "legacy cloud lease layout is unsupported; rebuild or re-import into FORMAT 9".to_string(),
+    )
+}
+
+fn missing_initialized_lease_error() -> LeaseError {
+    LeaseError::Indeterminate(
+        "cloud metadata authority was initialized but the lease document is missing; refusing to reset its committed pointer"
+            .to_string(),
+    )
+}
+
+fn missing_authority_sentinel_error() -> LeaseError {
+    LeaseError::Indeterminate(
+        "V3 cloud lease is missing its permanent metadata authority sentinel".to_string(),
+    )
+}
+
+fn mutation_precondition_headers(metadata: &ObjectMetadata) -> Option<Vec<(String, String)>> {
+    cntryl_midge_storage::cloud::object_match_precondition_headers(
+        &metadata.etag,
+        metadata.generation.as_deref(),
+    )
+}
+
+/// Classify a non-not-found [`CloudError`] from a lease HEAD/GET into the
+/// matching [`LeaseError`]. A malformed/ambiguous response gets its own
+/// bucket distinct from a plain I/O failure, since the former means the
+/// object exists but its state can't be trusted either way.
+fn classify_lease_read_error(
+    operation: &str,
+    error: &cntryl_midge_storage::cloud::CloudError,
+) -> LeaseError {
+    use cntryl_midge_storage::cloud::CloudError;
+    match error {
+        #[cfg(any(test, feature = "cloud-common"))]
+        CloudError::NotFound(_) => unreachable!("callers must check is_not_found() first"),
+        CloudError::Protocol(msg) => {
+            LeaseError::Indeterminate(format!("cloud lease {operation} response: {msg}"))
+        }
+        CloudError::Timeout(_) => {
+            LeaseError::Timeout(format!("cloud lease {operation} failed: {error}"))
+        }
+        other => LeaseError::IoError(format!("cloud lease {operation} failed: {other}")),
+    }
+}
+
+fn provider_read_authority_sentinel(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<AuthoritySentinelState, LeaseError> {
+    match provider_read_event_with_timeout(timeout, |budget, callback| {
+        cloud.submit_get_within(AUTHORITY_SENTINEL_KEY, budget, callback);
+    }) {
+        Ok(CloudEvent::Get { result, .. }) => match result {
+            CloudOutcome::Ok(bytes) => parse_authority_sentinel(&bytes),
+            CloudOutcome::Err(error) if error.is_not_found() => Ok(AuthoritySentinelState::Missing),
+            CloudOutcome::Err(error) => Err(classify_lease_read_error("sentinel GET", &error)),
+        },
+        Ok(other) => Err(LeaseError::Indeterminate(format!(
+            "unexpected cloud metadata authority sentinel response: {other:?}"
+        ))),
+        Err(error) => Err(LeaseError::Timeout(format!(
+            "cloud metadata authority sentinel GET: {error}"
+        ))),
+    }
+}
+
+/// Read the read-only backup authority proof without acquiring or rewriting a lease.
+pub fn read_active_format_10_backup_generation(
+    cloud: &CloudStorage,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
+) -> Result<CloudMetadataGeneration, LeaseError> {
+    read_active_format_10_backup_generation_for_owner(cloud, deadline, None)
+}
+
+pub fn read_active_format_10_backup_generation_for_owner(
+    cloud: &CloudStorage,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
+    expected_owner: Option<(&str, u64)>,
+) -> Result<CloudMetadataGeneration, LeaseError> {
+    let remaining = |context: &str| {
+        deadline
+            .clamp_nonzero(cloud.callback_timeout())
+            .ok_or_else(|| LeaseError::Timeout(format!("{context} exceeded backup deadline")))
+    };
+    let document = provider_read_doc_with_timeout(cloud, remaining("lease read")?)?
+        .ok_or_else(|| LeaseError::Indeterminate("backup cloud lease is missing".into()))?;
+    if document.version != LeaseDocumentVersion::V5
+        || !matches!(
+            document.migration_gate.as_ref(),
+            Some(CloudFormatMigrationGate::Active { target_format: 10 })
+        )
+    {
+        return Err(LeaseError::Indeterminate(
+            "backup cloud lease does not carry the active FORMAT 10 gate".into(),
+        ));
+    }
+    if expected_owner.is_some_and(|(holder, epoch)| {
+        document.holder_id != holder || document.epoch != Some(epoch)
+    }) {
+        return Err(LeaseError::RenewalFailed(
+            "CloudSim backup lease is no longer owned by the capturing engine".into(),
+        ));
+    }
+    if provider_read_authority_sentinel(cloud, remaining("authority sentinel read")?)?
+        != AuthoritySentinelState::Active
+    {
+        return Err(LeaseError::Indeterminate(
+            "backup cloud metadata authority sentinel is not active".into(),
+        ));
+    }
+    metadata_pointer::offline_active_format10_generation(
+        cloud,
+        &document,
+        remaining("metadata pointer read")?,
+    )
+}
+
+fn parse_authority_sentinel(bytes: &[u8]) -> Result<AuthoritySentinelState, LeaseError> {
+    if bytes == AUTHORITY_SENTINEL_PENDING_BODY {
+        Ok(AuthoritySentinelState::Pending)
+    } else if bytes == AUTHORITY_SENTINEL_BODY {
+        Ok(AuthoritySentinelState::Active)
+    } else {
+        Err(LeaseError::Indeterminate(
+            "cloud metadata authority sentinel is malformed".to_string(),
+        ))
+    }
+}
+
+fn provider_read_authority_sentinel_with_metadata(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<Option<(AuthoritySentinelState, ObjectMetadata)>, LeaseError> {
+    match provider_read_event_with_timeout(timeout, |budget, callback| {
+        cloud.submit_get_with_metadata_within(AUTHORITY_SENTINEL_KEY, budget, callback);
+    }) {
+        Ok(CloudEvent::GetWithMetadata { result, .. }) => match result {
+            CloudOutcome::Ok((bytes, metadata)) => {
+                Ok(Some((parse_authority_sentinel(&bytes)?, metadata)))
+            }
+            CloudOutcome::Err(error) if error.is_not_found() => Ok(None),
+            CloudOutcome::Err(error) => Err(classify_lease_read_error("sentinel GET", &error)),
+        },
+        Ok(other) => Err(LeaseError::Indeterminate(format!(
+            "unexpected cloud metadata authority sentinel response: {other:?}"
+        ))),
+        Err(error) => Err(LeaseError::Timeout(format!(
+            "cloud metadata authority sentinel GET: {error}"
+        ))),
+    }
+}
+
+fn provider_create_authority_sentinel(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<(), LeaseError> {
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(timeout);
+    let request_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| {
+            LeaseError::Timeout("cloud metadata authority sentinel create has no budget".into())
+        })?;
+    let mut headers = vec![("If-None-Match".to_string(), "*".to_string())];
+    cntryl_midge_storage::cloud::set_request_timeout_header(&mut headers, request_timeout);
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_put(
+        AUTHORITY_SENTINEL_KEY,
+        AUTHORITY_SENTINEL_PENDING_BODY.to_vec(),
+        headers,
+        tx,
+    );
+    let wait_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| {
+            LeaseError::Timeout(
+                "cloud metadata authority sentinel create exceeded its submit budget".into(),
+            )
+        })?;
+    match rx.recv_timeout(wait_timeout) {
+        Ok(CloudEvent::Put {
+            result: CloudOutcome::Ok(()),
+            ..
+        }) => Ok(()),
+        Ok(CloudEvent::Put {
+            result: CloudOutcome::Err(error),
+            ..
+        }) if error.is_precondition_failed() => Err(LeaseError::Indeterminate(
+            "another initializer created the cloud metadata authority sentinel before the lease"
+                .to_string(),
+        )),
+        Ok(CloudEvent::Put {
+            result: CloudOutcome::Err(error),
+            ..
+        }) => Err(LeaseError::IoError(format!(
+            "cloud metadata authority sentinel create failed: {error}"
+        ))),
+        Ok(other) => Err(LeaseError::Indeterminate(format!(
+            "unexpected cloud metadata authority sentinel create response: {other:?}"
+        ))),
+        Err(error) => Err(LeaseError::Timeout(format!(
+            "cloud metadata authority sentinel create: {error}"
+        ))),
+    }
+}
+
+fn provider_activate_authority_sentinel(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<(), LeaseError> {
+    let started = Instant::now();
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_start(started, timeout);
+    let Some((state, metadata)) = provider_read_authority_sentinel_with_metadata(cloud, timeout)?
+    else {
+        return Err(missing_authority_sentinel_error());
+    };
+    match state {
+        AuthoritySentinelState::Active => return Ok(()),
+        AuthoritySentinelState::Missing => return Err(missing_authority_sentinel_error()),
+        AuthoritySentinelState::Pending => {}
+    }
+    let headers = mutation_precondition_headers(&metadata).ok_or_else(|| {
+        LeaseError::IoError("pending cloud metadata authority sentinel has no CAS token".into())
+    })?;
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(LeaseError::Timeout(
+            "cloud metadata authority sentinel activation deadline exhausted".into(),
+        ));
+    }
+    let mut headers = headers;
+    cntryl_midge_storage::cloud::set_request_timeout_header(&mut headers, remaining);
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_put(
+        AUTHORITY_SENTINEL_KEY,
+        AUTHORITY_SENTINEL_BODY.to_vec(),
+        headers,
+        tx,
+    );
+    let wait_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| {
+            LeaseError::Timeout(
+                "cloud metadata authority sentinel activation exceeded its submit budget".into(),
+            )
+        })?;
+    let result = match rx.recv_timeout(wait_timeout) {
+        Ok(CloudEvent::Put {
+            result: CloudOutcome::Ok(()),
+            ..
+        }) => return Ok(()),
+        Ok(CloudEvent::Put {
+            result: CloudOutcome::Err(error),
+            ..
+        }) => LeaseError::IoError(format!(
+            "cloud metadata authority sentinel activation failed: {error}"
+        )),
+        Ok(other) => LeaseError::Indeterminate(format!(
+            "unexpected cloud metadata authority sentinel activation response: {other:?}"
+        )),
+        Err(error) => LeaseError::Timeout(format!(
+            "cloud metadata authority sentinel activation timed out: {error}"
+        )),
+    };
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if !remaining.is_zero()
+        && matches!(
+            provider_read_authority_sentinel(cloud, remaining.min(cloud.callback_timeout())),
+            Ok(AuthoritySentinelState::Active)
+        )
+    {
+        return Ok(());
+    }
+    Err(result)
+}
+
+fn provider_read_doc(cloud: &CloudStorage) -> Result<Option<LeaseDocument>, LeaseError> {
+    provider_read_doc_with_timeout(cloud, cloud.callback_timeout())
+}
+
+/// Submission and callback waiting consume one read budget. A callback queued
+/// by a slow synchronous backend cannot turn an exhausted deadline into success.
+fn provider_read_event_with_timeout(
+    timeout: Duration,
+    submit: impl FnOnce(Duration, cntryl_midge_storage::cloud::CloudCallback),
+) -> Result<CloudEvent, std::sync::mpsc::RecvTimeoutError> {
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(timeout);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let request_timeout = deadline
+        .clamp_nonzero(timeout)
+        .ok_or(std::sync::mpsc::RecvTimeoutError::Timeout)?;
+    submit(request_timeout, tx);
+    let wait_timeout = deadline
+        .clamp_nonzero(request_timeout)
+        .ok_or(std::sync::mpsc::RecvTimeoutError::Timeout)?;
+    rx.recv_timeout(wait_timeout)
+}
+
+fn provider_read_doc_with_metadata(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<Option<(LeaseDocument, ObjectMetadata)>, LeaseError> {
+    match provider_read_event_with_timeout(timeout, |budget, callback| {
+        cloud.submit_get_with_metadata_within(LEASE_OBJECT_KEY, budget, callback);
+    }) {
+        Ok(CloudEvent::GetWithMetadata {
+            key: returned_key,
+            result,
+        }) => {
+            drop(returned_key);
+            match result {
+                CloudOutcome::Ok((bytes, metadata)) => {
+                    let content = String::from_utf8(bytes).map_err(|error| {
+                        LeaseError::Indeterminate(format!(
+                            "cloud lease document is not UTF-8: {error}"
+                        ))
+                    })?;
+                    let document = parse_lease_document(&content).ok_or_else(|| {
+                        LeaseError::Indeterminate("cloud lease document is malformed".to_string())
+                    })?;
+                    if mutation_precondition_headers(&metadata).is_none() {
+                        return Err(LeaseError::IoError(
+                            "existing cloud lease has no conditional update token".to_string(),
+                        ));
+                    }
+                    Ok(Some((document, metadata)))
+                }
+                CloudOutcome::Err(error) if error.is_not_found() => Ok(None),
+                CloudOutcome::Err(error) => Err(classify_lease_read_error("GET", &error)),
+            }
+        }
+        Ok(other) => Err(LeaseError::IoError(format!(
+            "unexpected metadata-bearing cloud lease GET response: {other:?}"
+        ))),
+        Err(error) => Err(LeaseError::Timeout(format!("cloud lease GET: {error}"))),
+    }
+}
+
+fn provider_read_doc_with_timeout(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<Option<LeaseDocument>, LeaseError> {
+    match provider_read_event_with_timeout(timeout, |budget, callback| {
+        cloud.submit_get_within(LEASE_OBJECT_KEY, budget, callback);
+    }) {
+        Ok(CloudEvent::Get { result, .. }) => match result {
+            CloudOutcome::Ok(bytes) => {
+                let content = String::from_utf8(bytes).map_err(|error| {
+                    LeaseError::Indeterminate(format!("cloud lease document is not UTF-8: {error}"))
+                })?;
+                parse_lease_document(&content).map(Some).ok_or_else(|| {
+                    LeaseError::Indeterminate("cloud lease document is malformed".to_string())
+                })
+            }
+            CloudOutcome::Err(error) if error.is_not_found() => Ok(None),
+            CloudOutcome::Err(error) => Err(classify_lease_read_error("GET", &error)),
+        },
+        Ok(other) => Err(LeaseError::IoError(format!(
+            "unexpected cloud lease GET response: {other:?}"
+        ))),
+        Err(error) => Err(LeaseError::Timeout(format!("cloud lease GET: {error}"))),
+    }
+}
+
+fn provider_write_doc(
+    cloud: &CloudStorage,
+    document: &LeaseDocument,
+    headers: Vec<(String, String)>,
+) -> Result<(), LeaseError> {
+    provider_write_doc_with_timeout(cloud, document, headers, cloud.callback_timeout())
+}
+
+fn provider_write_doc_with_timeout(
+    cloud: &CloudStorage,
+    document: &LeaseDocument,
+    mut headers: Vec<(String, String)>,
+    timeout: Duration,
+) -> Result<(), LeaseError> {
+    let started = Instant::now();
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_start(started, timeout);
+    let request_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| LeaseError::Timeout("cloud lease PUT has no remaining budget".into()))?;
+    cntryl_midge_storage::cloud::set_request_timeout_header(&mut headers, request_timeout);
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_put(
+        LEASE_OBJECT_KEY,
+        format_lease_document(document).into_bytes(),
+        headers,
+        tx,
+    );
+    let Some(wait_timeout) = deadline.clamp_nonzero(cloud.callback_timeout()) else {
+        return reconcile_ambiguous_lease_write(
+            cloud,
+            document,
+            "cloud lease PUT exhausted its submission budget".into(),
+            Duration::ZERO,
+        );
+    };
+    match rx.recv_timeout(wait_timeout) {
+        Ok(CloudEvent::Put { result, .. }) => match result {
+            CloudOutcome::Ok(()) => Ok(()),
+            // These typed responses establish that this PUT did not commit.
+            // A fresh read can retry the CAS under the caller's existing
+            // deadline; failure of that read does not make this PUT uncertain.
+            CloudOutcome::Err(
+                error @ (CloudError::PreconditionFailed(_) | CloudError::ConditionalConflict(_)),
+            ) => Err(LeaseError::AcquisitionFailed(format!(
+                "cloud lease conditional write was rejected: {error}"
+            ))),
+            CloudOutcome::Err(error) => reconcile_ambiguous_lease_write(
+                cloud,
+                document,
+                format!("cloud lease conditional write failed: {error}"),
+                timeout.saturating_sub(started.elapsed()),
+            ),
+        },
+        Ok(other) => reconcile_ambiguous_lease_write(
+            cloud,
+            document,
+            format!("unexpected cloud lease PUT response: {other:?}"),
+            timeout.saturating_sub(started.elapsed()),
+        ),
+        Err(error) => reconcile_ambiguous_lease_write(
+            cloud,
+            document,
+            format!("cloud lease PUT timed out: {error}"),
+            timeout.saturating_sub(started.elapsed()),
+        ),
+    }
+}
+
+fn reconcile_ambiguous_lease_write(
+    cloud: &CloudStorage,
+    expected: &LeaseDocument,
+    original_error: String,
+    remaining: Duration,
+) -> Result<(), LeaseError> {
+    if remaining.is_zero() {
+        return Err(LeaseError::Indeterminate(format!(
+            "{original_error}; cloud lease write deadline expired before readback"
+        )));
+    }
+    match provider_read_doc_with_timeout(cloud, remaining.min(cloud.callback_timeout())) {
+        Ok(Some(actual)) if actual == *expected => {
+            tracing::info!(
+                holder_id = %expected.holder_id,
+                epoch = ?expected.epoch,
+                "confirmed ambiguous cloud lease write by readback"
+            );
+            Ok(())
+        }
+        Ok(_) => Err(LeaseError::IoError(original_error)),
+        Err(read_error) => Err(LeaseError::Indeterminate(format!(
+            "{original_error}; cloud lease readback could not determine whether the write landed: {read_error}"
+        ))),
+    }
+}
+
+fn spawn_ambiguous_renewal_reconciler(
+    cloud: Arc<CloudStorage>,
+    expected: LeaseDocument,
+    clock_skew_tolerance: Duration,
+    clock: LeaseClock,
+) {
+    let expected_expiry = chrono::DateTime::parse_from_rfc3339(&expected.expires_at)
+        .map_or_else(|_| clock.now(), |value| value.with_timezone(&chrono::Utc));
+    let tolerance =
+        chrono::Duration::from_std(clock_skew_tolerance).unwrap_or(chrono::Duration::MAX);
+    let reconcile_until = expected_expiry
+        .checked_add_signed(tolerance)
+        .and_then(|value| value.checked_add_signed(chrono::Duration::seconds(1)))
+        .unwrap_or(expected_expiry);
+
+    let spawn = std::thread::Builder::new()
+        .name("midge-lease-renew-reconciler".to_string())
+        .spawn(move || {
+            let poll_interval = if cfg!(test) {
+                Duration::from_millis(10)
+            } else {
+                Duration::from_millis(100)
+            };
+            while clock.now() <= reconcile_until {
+                if let Ok(Some((current, metadata))) =
+                    provider_read_doc_with_metadata(&cloud, Duration::from_millis(500))
+                {
+                    let same_authority = current.epoch == expected.epoch
+                        && current.holder_id == expected.holder_id
+                        && current.owner_token == expected.owner_token;
+                    if !same_authority {
+                        // A different authority won. Its provider identity
+                        // is never used by this cleanup obligation.
+                        return;
+                    }
+                    if !current
+                        .is_expired_with_tolerance(clock_skew_tolerance, clock.now())
+                        .unwrap_or(false)
+                    {
+                        if let Some(headers) = mutation_precondition_headers(&metadata) {
+                            let release_offset =
+                                clock_skew_tolerance.saturating_add(Duration::from_millis(1));
+                            let chrono_offset = chrono::Duration::from_std(release_offset)
+                                .unwrap_or(chrono::Duration::MAX);
+                            let expired = LeaseDocument {
+                                expires_at: (clock.now() - chrono_offset).to_rfc3339(),
+                                ..current
+                            };
+                            let _ = provider_write_doc_with_timeout(
+                                &cloud,
+                                &expired,
+                                headers,
+                                Duration::from_millis(500),
+                            );
+                        }
+                    }
+                }
+                // Absence and transient read failure are not completion proof:
+                // an already-accepted PUT may still become visible, so retain
+                // the obligation through the bound.
+                std::thread::sleep(poll_interval);
+            }
+        });
+    if let Err(error) = spawn {
+        tracing::error!(%error, "failed to start ambiguous lease-renewal reconciler");
+    }
+}
+
+#[cfg(test)]
+#[path = "cloud/tests.rs"]
+mod tests;

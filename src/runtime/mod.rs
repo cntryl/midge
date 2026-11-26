@@ -17,7 +17,6 @@ pub mod durability;
 pub mod event_loop;
 pub mod frontiers;
 pub(crate) mod hybrid_persistence;
-pub mod intent_persistence;
 pub(crate) mod keyed_group_commit;
 pub(crate) mod range_cover;
 pub(crate) mod read_resources;
@@ -45,11 +44,12 @@ mod startup_gate;
 mod startup_observer;
 pub(crate) mod write_admission;
 
+pub use cntryl_midge_durability::metadata::intent::{FileMeta, IntentLogEntry, PublicationPhase};
+pub use cntryl_midge_durability::metadata::intent_persistence::IntentPersistence;
 pub use event_loop::EventLoop;
-pub use intent_persistence::IntentPersistence;
 pub use read_snapshot::ReadSnapshot;
 
-pub use crate::types::ConflictPolicy;
+pub use cntryl_midge_core::types::ConflictPolicy;
 pub use state::RuntimeState;
 
 pub(crate) use config::RecoveredCloudWalSegment;
@@ -63,10 +63,7 @@ pub(crate) use metadata_publication::{
 pub(crate) use protocol::next_request_id;
 #[cfg(test)]
 pub use protocol::CompactionPlan;
-pub use protocol::{
-    FileMeta, IntentLogEntry, KeyAssertion, PublicationPhase, RuntimeMsg, RuntimeResponse,
-    TestRuntimeMsg, TransactionOp,
-};
+pub use protocol::{KeyAssertion, RuntimeMsg, RuntimeResponse, TestRuntimeMsg, TransactionOp};
 pub(crate) use protocol::{
     SpilledTransactionSubmission, TransactionSubmission, VerificationBarrierAction,
 };
@@ -79,5 +76,9 @@ pub use startup_observer::{StartupEvent, StartupObserver};
 
 #[cfg(test)]
 mod cardinality_proof_tests;
+#[cfg(all(test, feature = "internal-testing"))]
+mod recovery_progress_tests;
+#[cfg(test)]
+mod storage_boundary_tests;
 #[cfg(test)]
 mod tests;

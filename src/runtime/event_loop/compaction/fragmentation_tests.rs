@@ -2,14 +2,14 @@
 
 use super::super::tests::receive_owned_compaction_completion;
 use super::{CompactionCoordinator, EventLoop};
-use crate::common::{MidgeError, MidgeResult};
 use crate::compaction::strategy::CompactionPurpose;
 use crate::compaction::{CompactionPlan, LeveledCompactionConfig};
 use crate::runtime::actors::compaction::CompactionActor;
 use crate::runtime::{RuntimeMsg, RuntimeState};
-use crate::sst::traits::RawSstVersion;
-use crate::sst::SstFactory as _;
-use crate::types::EntryType;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::types::EntryType;
+use cntryl_midge_table::sst::traits::RawSstVersion;
+use cntryl_midge_table::sst::SstFactory as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ struct FragmentFixture {
     el: EventLoop,
     completions: crossbeam::channel::Receiver<RuntimeMsg>,
     source: String,
-    targets: Vec<crate::metadata::FileMeta>,
+    targets: Vec<cntryl_midge_durability::metadata::FileMeta>,
 }
 
 impl FragmentFixture {
@@ -37,7 +37,7 @@ impl FragmentFixture {
         )?;
         let factory = super::super::resources::compaction_sst_factory(
             Arc::clone(&el.state.fs),
-            crate::codec::CompressionPolicy::None,
+            cntryl_midge_core::codec::CompressionPolicy::None,
         );
         let mut actor = CompactionActor::new_with_config(
             Arc::new(factory),
@@ -82,11 +82,12 @@ impl FragmentFixture {
         sequence: u64,
         keys: &[&[u8]],
         value_bytes: usize,
-    ) -> MidgeResult<crate::metadata::FileMeta> {
-        let name = crate::cloud_layout::file_name(0, level, sequence);
+    ) -> MidgeResult<cntryl_midge_durability::metadata::FileMeta> {
+        let name = cntryl_midge_core::cloud_layout::file_name(0, level, sequence);
         std::fs::create_dir_all(self.el.state.host_sst_dir())?;
-        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&self.el.state.fs), 4096)
-            .with_compression_policy(crate::codec::CompressionPolicy::None);
+        let factory =
+            cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&self.el.state.fs), 4096)
+                .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::None);
         let mut writer = factory.create()?;
         for key in keys {
             let historical_key = level == 1 && sequence == 1 && *key == b"c0";
@@ -110,7 +111,7 @@ impl FragmentFixture {
         let path = self.el.state.host_sst_dir().join(&name);
         writer.finish_to_path(&path)?;
         let bytes = std::fs::read(path)?;
-        let file = crate::metadata::FileMeta {
+        let file = cntryl_midge_durability::metadata::FileMeta {
             name,
             cf_id: 0,
             level,
@@ -129,8 +130,11 @@ impl FragmentFixture {
     }
 
     fn persist(&self) -> MidgeResult<()> {
-        crate::metadata::ManifestPersistence::save(&self.el.state.db_path, &self.el.state.manifest)
-            .map_err(MidgeError::Internal)
+        cntryl_midge_durability::metadata::ManifestPersistence::save(
+            &self.el.state.db_path,
+            &self.el.state.manifest,
+        )
+        .map_err(MidgeError::Internal)
     }
 
     fn plan(&mut self) -> MidgeResult<CompactionPlan> {
@@ -189,7 +193,7 @@ impl FragmentFixture {
         let mut recovered = RuntimeState::try_new(
             directory.path(),
             false,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
         recovered.replay_intent_log()?;
         assert!(recovered.intent_log.is_empty());
@@ -230,7 +234,7 @@ impl FragmentFixture {
 fn raw_rows(state: &RuntimeState, names: &[String]) -> MidgeResult<Vec<RawSstVersion>> {
     let factory = super::super::resources::compaction_sst_factory(
         Arc::clone(&state.fs),
-        crate::codec::CompressionPolicy::None,
+        cntryl_midge_core::codec::CompressionPolicy::None,
     );
     let mut rows = Vec::new();
     for name in names {
@@ -248,7 +252,7 @@ fn raw_rows(state: &RuntimeState, names: &[String]) -> MidgeResult<Vec<RawSstVer
 #[test]
 fn should_recover_fragmented_source_when_critical_l0_work_interrupts_promotion() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: a broad source overlaps six genuine target SSTs beyond the work target.
         let mut fixture = FragmentFixture::new()?;
         let before = fixture.raw_rows(&[fixture.source.clone()])?;
@@ -278,8 +282,9 @@ fn should_recover_fragmented_source_when_critical_l0_work_interrupts_promotion()
         // These fixture ingests must be durable inputs before real moves can
         // journal their promotion. A later compaction checkpoint is optional.
         fixture.persist()?;
-        let durable = crate::metadata::ManifestPersistence::load(&fixture.el.state.db_path)
-            .map_err(MidgeError::Internal)?;
+        let durable =
+            cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.el.state.db_path)
+                .map_err(MidgeError::Internal)?;
         assert!(fixture
             .el
             .state
@@ -335,7 +340,7 @@ fn should_recover_fragmented_source_when_critical_l0_work_interrupts_promotion()
 
 #[test]
 fn should_reject_fragment_publication_when_source_or_replacement_changes() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: use actual worker outputs and the captured live source identity.
         let mut fixture = FragmentFixture::new()?;
         let plan = fixture.plan()?;
@@ -409,7 +414,7 @@ fn should_reject_fragment_publication_when_source_or_replacement_changes() -> Mi
 
 #[test]
 fn should_reject_fragment_publication_when_cut_or_source_neighbors_change() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: a real source-only worker has finished, without publishing its output.
         let mut fixture = FragmentFixture::new()?;
         let plan = fixture.plan()?;
@@ -484,23 +489,24 @@ fn should_reject_fragment_publication_when_cut_or_source_neighbors_change() -> M
 fn should_recover_fragment_when_publication_stops_after_durable_manifest_batch() -> MidgeResult<()>
 {
     // Arrange: real source fragmentation has completed under the ordinary publication owner.
-    let (mut fixture, expected, completion) = crate::failpoints::with_read_gate(|| {
-        let mut fixture = FragmentFixture::new()?;
-        let names = fixture
-            .el
-            .state
-            .manifest
-            .files
-            .iter()
-            .map(|file| file.name.clone())
-            .collect::<Vec<_>>();
-        let expected = fixture.raw_rows(&names)?;
-        let plan = fixture.plan()?;
-        assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
-        let completion = fixture.compute(plan)?;
-        Ok::<_, MidgeError>((fixture, expected, completion))
-    })?;
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let (mut fixture, expected, completion) =
+        cntryl_midge_core::failpoints::with_read_gate(|| {
+            let mut fixture = FragmentFixture::new()?;
+            let names = fixture
+                .el
+                .state
+                .manifest
+                .files
+                .iter()
+                .map(|file| file.name.clone())
+                .collect::<Vec<_>>();
+            let expected = fixture.raw_rows(&names)?;
+            let plan = fixture.plan()?;
+            assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
+            let completion = fixture.compute(plan)?;
+            Ok::<_, MidgeError>((fixture, expected, completion))
+        })?;
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let (inputs, outputs) = match &completion {
         RuntimeMsg::CompactionComplete {

@@ -1,10 +1,10 @@
 //! Bind submitted writer work to its exact lease authority.
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::lease::{
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::lease::{
     ActiveWriterEffect, LeaderStore, LeaseValidity, WriterEffectGroup, WriterEffectGroups,
 };
-use crate::wal::writer_authority::{WriterAuthority, WriterGroupAuthority};
+use cntryl_midge_durability::wal::writer_authority::{WriterAuthority, WriterGroupAuthority};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,7 +35,7 @@ impl LeaseWriterAuthority {
 
 impl WriterAuthority for LeaseWriterAuthority {
     fn run(&self, operation: &mut dyn FnMut()) -> MidgeResult<()> {
-        crate::wal::writer_effect::with_writer_effect(
+        cntryl_midge_durability::wal::writer_effect::with_writer_effect(
             |run| {
                 if let Some(store) = &self.leader_store {
                     store
@@ -77,7 +77,7 @@ impl WriterGroupAuthority for LeaseWriterAuthority {
         timeout: Duration,
         operation: &mut dyn FnMut(),
     ) -> MidgeResult<()> {
-        crate::wal::writer_effect::with_writer_effect(
+        cntryl_midge_durability::wal::writer_effect::with_writer_effect(
             |run| {
                 self.native_groups()?
                     .run_active(&self.holder_id, self.epoch, active, timeout, run)

@@ -1,0 +1,820 @@
+//! WAL upload scheduling, worker execution, retries, and acknowledgements.
+
+use super::{
+    cb, mpsc, thread, Arc, BoundedEventQueue, Duration, HeldUploads, HybridStorage, Instant,
+    JoinHandle, Mutex, StorageBackend, StorageEvent, StorageOutcome, UploadQueue, UploadState,
+    UploadStatus, MAX_CLOUD_ERROR_BYTES,
+};
+use crate::CloudUploadFailureKind;
+
+#[derive(Debug)]
+pub(super) struct VerifiedUpload {
+    key: String,
+    size: usize,
+    checksum: u32,
+}
+
+type VerifiedUploads = Arc<Mutex<super::HashMap<u64, VerifiedUpload>>>;
+
+#[derive(Clone)]
+pub(super) struct WalUploadWorkerConfig {
+    pub(super) timeout: Duration,
+    pub(super) concurrency: usize,
+    pub(super) memory: cntryl_midge_core::common::resource_budget::ResourceBudget,
+}
+
+pub(super) struct UploadAttemptAdmission {
+    pub(super) timeout: Duration,
+    pub(super) memory: Option<Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
+}
+
+impl HybridStorage {
+    pub fn queue_cloud_metadata_mirror_complete(&self, operation_id: u64, writer_epoch: u64) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudMetadataMirrorComplete {
+                operation_id,
+                writer_epoch,
+            },
+        );
+    }
+
+    pub fn queue_cloud_wal_publication_complete(&self, operation_id: u64, writer_epoch: u64) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudWalPublicationComplete {
+                operation_id,
+                writer_epoch,
+            },
+        );
+    }
+
+    /// Consume an upload's confirmation once. Missing or evicted confirmations
+    /// fall back to remote readback; this cache never grants catalog authority.
+    pub fn take_verified_upload(&self, id: u64, key: &str, bytes: &[u8]) -> bool {
+        self.verified_uploads
+            .lock()
+            .remove(&id)
+            .is_some_and(|proof| {
+                proof.key == key
+                    && proof.size == bytes.len()
+                    && proof.checksum == crc32c::crc32c(bytes)
+            })
+    }
+
+    pub fn queue_cloud_wal_prune_complete(&self, segment_id: u64, result: StorageOutcome<()>) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudWalPruneComplete { segment_id, result },
+        );
+    }
+
+    pub fn queue_cloud_wal_prune_attempt_failed(&self, segment_id: u64, error: String) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudWalPruneAttemptFailed { segment_id, error },
+        );
+    }
+
+    pub fn ensure_wal_upload_capacity(
+        &self,
+        additional_bytes: u64,
+    ) -> cntryl_midge_core::MidgeResult<()> {
+        let mut queue = self.upload_queue.lock();
+        if let Err(error) = queue.ensure_capacity(additional_bytes) {
+            self.counters.record(|m| {
+                m.record_write_stall_cloud();
+            });
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn ensure_wal_write_admission(
+        &self,
+        held: HeldUploads,
+    ) -> cntryl_midge_core::MidgeResult<()> {
+        let queue = self.upload_queue.lock();
+        if !queue.is_stalled(held) {
+            return Ok(());
+        }
+        Err(cntryl_midge_core::MidgeError::WriteStall(format!(
+            "CloudAsync WAL upload queue remains at capacity: entries={}+{} held/{}, bytes={}+{} held/{}",
+            queue.entries.len(),
+            held.entries,
+            queue.max_entries,
+            queue.pending_bytes,
+            held.bytes,
+            queue.max_bytes
+        )))
+    }
+
+    pub fn is_wal_upload_stalled(&self, held: HeldUploads) -> bool {
+        self.upload_queue.lock().is_stalled(held)
+    }
+
+    /// How long until the upload queue next needs
+    /// [`Self::process_uploads`]: `poll` while an upload waits to start or
+    /// to finish, else until its earliest retry is due, so a segment that
+    /// keeps failing does not keep its caller polling. `None` when nothing
+    /// is queued.
+    pub fn next_upload_turn(&self, poll: Duration) -> Option<Duration> {
+        let upload = self.upload_queue.lock().next_turn(Instant::now(), poll);
+        let cleanup = self.next_remote_delete_turn(poll);
+        upload.into_iter().chain(cleanup).min()
+    }
+
+    /// Queue a local file for bounded remote publication under an explicit
+    /// object key. The runtime owns the meaning of the request id and frontier.
+    pub fn enqueue_object_upload(
+        &self,
+        request_id: u64,
+        object_key: String,
+        source: cntryl_midge_core::io::FsLocation,
+        frontier: u64,
+    ) -> cntryl_midge_core::MidgeResult<()> {
+        let size_bytes = source
+            .len()
+            .map_err(|error| cntryl_midge_core::MidgeError::Io(error.into_io()))?;
+        let upload_state = UploadState {
+            segment_id: request_id,
+            object_key,
+            source: Arc::new(source),
+            status: UploadStatus::Pending,
+            max_sequence: frontier,
+            retries: 0,
+            size_bytes,
+        };
+
+        let mut queue = self.upload_queue.lock();
+        if let Err(error) = queue.try_push(upload_state) {
+            self.counters.record(|m| {
+                m.record_write_stall_cloud();
+            });
+            return Err(error);
+        }
+
+        if queue.entries.len() >= queue.max_entries / 2
+            || queue.pending_bytes >= queue.max_bytes / 2
+        {
+            tracing::warn!(
+                queue_size = queue.entries.len(),
+                queue_bytes = queue.pending_bytes,
+                request_id,
+                "CloudAsync WAL upload queue growing; cloud uploads may be slow"
+            );
+        }
+
+        tracing::debug!(
+            request_id,
+            frontier,
+            queue_size = queue.entries.len(),
+            queue_bytes = queue.pending_bytes,
+            "object enqueued for cloud upload"
+        );
+        Ok(())
+    }
+
+    /// Process pending uploads (should be called periodically by runtime)
+    ///
+    /// **WAL DURABILITY PIPELINE**
+    ///
+    /// Initiates cloud uploads for pending WAL segments.
+    /// This is the ONLY place where WAL segments are uploaded to cloud.
+    /// - Reads pending uploads from `upload_queue`
+    /// - Initiates cloud upload via cloud backend (not `submit_write`)
+    /// - Retries a failed upload with backoff until it succeeds; only a
+    ///   corrupt remote object or a fenced writer ends it
+    /// - Emits CloudAck/CloudFail events to `event_queue`
+    ///
+    /// Non-blocking - actual uploads happen asynchronously in the dedicated worker thread.
+    ///
+    /// Returns any drained CloudAck/CloudFail events for the runtime to consume.
+    pub fn process_uploads(&self) -> Vec<StorageEvent> {
+        // 1) Drain worker completion events first.
+        let drained_events = {
+            let mut events = self.event_queue.lock();
+            events.drain()
+        };
+
+        self.process_pending_remote_deletes();
+
+        let mut queue = self.upload_queue.lock();
+        let now = Instant::now();
+
+        // 2) Apply drained events to the upload state machine.
+        for queued in &drained_events {
+            match &queued.event {
+                StorageEvent::CloudAck {
+                    segment_id,
+                    max_sequence: _,
+                } => {
+                    if let Some(item) = queue
+                        .entries
+                        .iter_mut()
+                        .find(|u| &u.segment_id == segment_id)
+                    {
+                        item.status = UploadStatus::Completed;
+                    }
+                }
+                StorageEvent::CloudFail {
+                    segment_id,
+                    error,
+                    failure_kind,
+                    ..
+                } => {
+                    if failure_kind.ends_upload() {
+                        queue.abandon(*segment_id);
+                    } else {
+                        let retry = queue.retry;
+                        if let Some(item) = queue
+                            .entries
+                            .iter_mut()
+                            .find(|u| &u.segment_id == segment_id)
+                        {
+                            item.record_failure(error.clone(), now, retry);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 3) Schedule any eligible uploads.
+        self.schedule_pending_uploads(&mut queue);
+
+        // 4) Garbage-collect completed items. A failure no retry can fix left
+        // the queue above; every other failure stays queued for its retry.
+        queue.remove_terminal();
+
+        drained_events
+            .into_iter()
+            .filter(|queued| !queued.externally_delivered)
+            .map(|queued| queued.event)
+            .collect()
+    }
+
+    fn schedule_pending_uploads(&self, queue: &mut UploadQueue) {
+        let now = Instant::now();
+        for upload in &mut queue.entries {
+            if !upload.is_due(now) {
+                continue;
+            }
+
+            upload.status = UploadStatus::InFlight { started_at: now };
+            // A writer that lost its authority stops uploading: its objects
+            // could only become ignored orphans.
+            if let Err(error @ cntryl_midge_core::MidgeError::Fenced(_)) =
+                self.check_write_authority()
+            {
+                Self::emit_wal_upload_failure(
+                    upload,
+                    &error.to_string(),
+                    CloudUploadFailureKind::Fenced,
+                    &self.event_queue,
+                    self.external_event_tx.as_ref(),
+                );
+                continue;
+            }
+            if cntryl_midge_core::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
+                self.counters.record(|m| {
+                    m.record_cloud_async_wal_upload_failed();
+                });
+                Self::emit_wal_upload_failure(
+                    upload,
+                    "failpoint: cloud WAL upload failed",
+                    CloudUploadFailureKind::Other,
+                    &self.event_queue,
+                    self.external_event_tx.as_ref(),
+                );
+                continue;
+            }
+
+            if self.upload_worker_failed {
+                Self::emit_wal_upload_failure(
+                    upload,
+                    "cloud upload worker failed to start",
+                    CloudUploadFailureKind::Other,
+                    &self.event_queue,
+                    self.external_event_tx.as_ref(),
+                );
+                continue;
+            }
+
+            let send_result = self
+                .wal_upload_worker
+                .lock()
+                .tx
+                .as_ref()
+                .map(|tx| tx.try_send(upload.clone()));
+            match send_result {
+                Some(Ok(())) => {}
+                Some(Err(mpsc::TrySendError::Full(_))) => {
+                    upload.status = UploadStatus::Pending;
+                    break;
+                }
+                Some(Err(mpsc::TrySendError::Disconnected(_))) => {
+                    tracing::warn!(
+                        segment_id = upload.segment_id,
+                        "cloud upload worker unavailable"
+                    );
+                    Self::emit_wal_upload_failure(
+                        upload,
+                        "cloud upload worker channel disconnected",
+                        CloudUploadFailureKind::Other,
+                        &self.event_queue,
+                        self.external_event_tx.as_ref(),
+                    );
+                }
+                None => Self::emit_wal_upload_failure(
+                    upload,
+                    "cloud upload worker is shutting down",
+                    CloudUploadFailureKind::Other,
+                    &self.event_queue,
+                    self.external_event_tx.as_ref(),
+                ),
+            }
+        }
+    }
+
+    fn duration_micros_to_u64(duration: Duration) -> u64 {
+        u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+    }
+
+    pub(super) fn queue_storage_event(
+        event_queue: &Arc<Mutex<BoundedEventQueue>>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
+        mut event: StorageEvent,
+    ) {
+        match &mut event {
+            StorageEvent::CloudFail { error, .. }
+            | StorageEvent::CloudWalPruneAttemptFailed { error, .. } => {
+                Self::truncate_storage_error(error);
+            }
+            StorageEvent::CloudWalPruneComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            } => Self::truncate_typed_storage_error(error),
+            _ => {}
+        }
+        let externally_delivered =
+            external_event_tx.is_some_and(|tx| tx.try_send(event.clone()).is_ok());
+        if let Err(error) = event_queue.lock().try_push(event, externally_delivered) {
+            tracing::error!(%error, "bounded storage event queue rejected completion");
+        }
+    }
+
+    fn truncate_storage_error(error: &mut String) {
+        if error.len() <= MAX_CLOUD_ERROR_BYTES {
+            return;
+        }
+        let mut end = MAX_CLOUD_ERROR_BYTES;
+        while !error.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        error.truncate(end);
+    }
+
+    /// Bound a typed error's message without losing its classification.
+    fn truncate_typed_storage_error(error: &mut crate::StorageError) {
+        let mut message = error.message().to_string();
+        if message.len() <= MAX_CLOUD_ERROR_BYTES {
+            return;
+        }
+        Self::truncate_storage_error(&mut message);
+        *error = crate::StorageError::new(error.kind(), message);
+    }
+
+    pub(super) fn spawn_wal_upload_worker(
+        counters: &cntryl_midge_core::telemetry::CounterSink,
+        wal_upload_rx: mpsc::Receiver<UploadState>,
+        cloud: &Arc<dyn StorageBackend>,
+        event_queue: &Arc<Mutex<BoundedEventQueue>>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
+        config: &WalUploadWorkerConfig,
+        verified_uploads: &VerifiedUploads,
+    ) -> (Vec<JoinHandle<()>>, bool) {
+        let receiver = Arc::new(Mutex::new(wal_upload_rx));
+        let mut handles = Vec::with_capacity(config.concurrency);
+        for ordinal in 0..config.concurrency {
+            let worker_counters = counters.clone();
+            let receiver = Arc::clone(&receiver);
+            let cloud = Arc::clone(cloud);
+            let event_queue = Arc::clone(event_queue);
+            let external_event_tx = external_event_tx.cloned();
+            let verified_uploads = Arc::clone(verified_uploads);
+            let config = config.clone();
+            let gate = cntryl_midge_core::failpoints::worker_gate();
+            let spawn_result = thread::Builder::new()
+                .name(format!("midge-wal-uploader-{ordinal}"))
+                .spawn(move || {
+                    gate.run(|| loop {
+                        // Release the receive lock before any filesystem/provider
+                        // work, allowing the other fixed workers to make progress.
+                        let Ok(upload) = receiver.lock().recv() else {
+                            break;
+                        };
+                        let memory =
+                            match reserve_upload_memory(&upload, cloud.as_ref(), &config.memory) {
+                                Ok(memory) => memory,
+                                Err(error) => {
+                                    Self::emit_wal_upload_failure(
+                                        &upload,
+                                        &error.to_string(),
+                                        CloudUploadFailureKind::Other,
+                                        &event_queue,
+                                        external_event_tx.as_ref(),
+                                    );
+                                    continue;
+                                }
+                            };
+                        Self::process_wal_upload_attempt(
+                            &worker_counters,
+                            &upload,
+                            &cloud,
+                            &event_queue,
+                            external_event_tx.as_ref(),
+                            &UploadAttemptAdmission {
+                                timeout: config.timeout,
+                                memory: Some(memory),
+                            },
+                            &verified_uploads,
+                        );
+                    });
+                });
+
+            match spawn_result {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    tracing::error!("Failed to spawn WAL upload worker: {error}");
+                    counters.record(|m| {
+                        m.record_thread_spawn_failure();
+                    });
+                }
+            }
+        }
+        let failed = handles.is_empty();
+        (handles, failed)
+    }
+
+    pub(super) fn process_wal_upload_attempt(
+        counters: &cntryl_midge_core::telemetry::CounterSink,
+        upload: &UploadState,
+        cloud: &Arc<dyn StorageBackend>,
+        event_queue: &Arc<Mutex<BoundedEventQueue>>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
+        admission: &UploadAttemptAdmission,
+        verified_uploads: &VerifiedUploads,
+    ) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::process_wal_upload(counters, upload, cloud, admission, verified_uploads)
+        }));
+        let terminal_event = if let Ok(event) = result {
+            event
+        } else {
+            counters.record(|m| {
+                m.record_cloud_async_wal_upload_failed();
+            });
+            Self::wal_upload_failure_event(
+                upload,
+                "cloud WAL upload worker panicked",
+                CloudUploadFailureKind::Other,
+            )
+        };
+        // Publication deliberately sits outside the unwind boundary. Once an
+        // attempt result is observable, no caught panic may synthesize a second
+        // and contradictory terminal event for that same attempt.
+        Self::queue_storage_event(event_queue, external_event_tx, terminal_event);
+    }
+
+    fn process_wal_upload(
+        counters: &cntryl_midge_core::telemetry::CounterSink,
+        upload: &UploadState,
+        cloud: &Arc<dyn StorageBackend>,
+        admission: &UploadAttemptAdmission,
+        verified_uploads: &VerifiedUploads,
+    ) -> StorageEvent {
+        let upload_start = Instant::now();
+        let callback_timeout = admission.timeout;
+        counters.record(|m| {
+            m.record_cloud_async_wal_upload_started();
+        });
+
+        Self::log_wal_upload_start(upload, true);
+        let data = match Self::read_wal_file(upload) {
+            Ok(data) => data,
+            Err(error) => {
+                return Self::wal_upload_failure_event(
+                    upload,
+                    &error,
+                    CloudUploadFailureKind::Other,
+                );
+            }
+        };
+
+        Self::record_wal_bytes(counters, &data);
+        cntryl_midge_core::failpoints::fail_point!("midge::cloud::before_wal_upload");
+        if cntryl_midge_core::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
+            counters.record(|m| {
+                m.record_cloud_async_wal_upload_failed();
+            });
+            return Self::wal_upload_failure_event(
+                upload,
+                "failpoint: cloud WAL upload failed",
+                CloudUploadFailureKind::Other,
+            );
+        }
+
+        let expected_data = data.clone();
+        let object_key = upload.object_key.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut request = crate::StorageRequest::new(
+            &upload.object_key,
+            cntryl_midge_core::OperationDeadline::from_budget(callback_timeout),
+            callback_timeout,
+        )
+        .with_precondition(crate::StoragePrecondition::IfAbsent);
+        if let Some(memory) = &admission.memory {
+            request = request.with_reservation(Arc::clone(memory));
+        }
+        cloud.submit_write_receipt_request(request, data, tx);
+
+        let mut provider_confirmed = false;
+        let result = Self::handle_wal_upload_result(
+            counters,
+            upload,
+            upload_start,
+            &rx,
+            callback_timeout,
+            |receipt| {
+                if let Some(receipt) = receipt {
+                    return if receipt.matches(&expected_data) {
+                        provider_confirmed = true;
+                        Ok(())
+                    } else {
+                        Err(crate::StorageError::new(
+                            crate::StorageErrorKind::Corruption,
+                            "WAL write receipt differs from uploaded bytes",
+                        ))
+                    };
+                }
+                verify_upload_ranges(cloud, &object_key, &expected_data, admission)
+            },
+        );
+        if provider_confirmed && matches!(result, StorageEvent::CloudAck { .. }) {
+            let mut confirmed = verified_uploads.lock();
+            // Retained events and delayed acknowledgements cannot grow this
+            // optimization without bound. Overflow simply uses readback.
+            if confirmed.len() < super::MAX_PENDING_WAL_UPLOADS
+                || confirmed.contains_key(&upload.segment_id)
+            {
+                confirmed.insert(
+                    upload.segment_id,
+                    VerifiedUpload {
+                        key: object_key,
+                        size: expected_data.len(),
+                        checksum: crc32c::crc32c(&expected_data),
+                    },
+                );
+            }
+        }
+        result
+    }
+}
+
+impl HybridStorage {
+    fn log_wal_upload_start(upload: &UploadState, with_worker: bool) {
+        if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some()
+            && upload.segment_id.is_multiple_of(1000)
+        {
+            if with_worker {
+                eprintln!(
+                    "[midge] CloudAsync upload start: segment_id={} max_sequence={} path={}",
+                    upload.segment_id, upload.max_sequence, upload.source
+                );
+            } else {
+                eprintln!(
+                    "[midge] CloudAsync inline upload start: segment_id={} max_sequence={} path={}",
+                    upload.segment_id, upload.max_sequence, upload.source
+                );
+            }
+        }
+    }
+
+    fn record_wal_bytes(counters: &cntryl_midge_core::telemetry::CounterSink, data: &[u8]) {
+        let bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        counters.record(|m| {
+            m.record_cloud_upload(bytes);
+        });
+    }
+
+    fn read_wal_file(upload: &UploadState) -> Result<Vec<u8>, String> {
+        upload
+            .source
+            .read_exact_size(upload.size_bytes)
+            .map(Vec::from)
+            .map_err(|error| format!("read {}: {error}", upload.source))
+    }
+
+    fn emit_wal_upload_failure(
+        upload: &UploadState,
+        error: &str,
+        failure_kind: CloudUploadFailureKind,
+        event_queue: &Arc<Mutex<BoundedEventQueue>>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
+    ) {
+        let fail = Self::wal_upload_failure_event(upload, error, failure_kind);
+        Self::queue_storage_event(event_queue, external_event_tx, fail);
+    }
+
+    fn wal_upload_failure_event(
+        upload: &UploadState,
+        error: &str,
+        failure_kind: CloudUploadFailureKind,
+    ) -> StorageEvent {
+        StorageEvent::CloudFail {
+            segment_id: upload.segment_id,
+            error: error.to_string(),
+            failures: upload.retries.saturating_add(1),
+            failure_kind,
+        }
+    }
+
+    fn log_wal_upload_ack(upload: &UploadState) {
+        cntryl_midge_core::failpoints::fail_point!("midge::cloud::in_wal_upload_ack_log");
+        if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some()
+            && upload.segment_id.is_multiple_of(1000)
+        {
+            eprintln!(
+                "[midge] CloudAsync upload ack: segment_id={} max_sequence={}",
+                upload.segment_id, upload.max_sequence
+            );
+        }
+    }
+
+    fn wal_upload_ack_event(upload: &UploadState) -> StorageEvent {
+        StorageEvent::CloudAck {
+            segment_id: upload.segment_id,
+            max_sequence: upload.max_sequence,
+        }
+    }
+
+    fn handle_wal_upload_result(
+        counters: &cntryl_midge_core::telemetry::CounterSink,
+        upload: &UploadState,
+        upload_start: Instant,
+        rx: &std::sync::mpsc::Receiver<
+            Result<Option<crate::StorageWriteReceipt>, crate::StorageError>,
+        >,
+        callback_timeout: Duration,
+        mut verify_remote: impl FnMut(
+            Option<crate::StorageWriteReceipt>,
+        ) -> Result<(), crate::StorageError>,
+    ) -> StorageEvent {
+        let (write_reported_success, write_error, write_failure_kind, receipt) =
+            match rx.recv_timeout(callback_timeout) {
+                Ok(result) => match result {
+                    Ok(receipt) => (true, None, CloudUploadFailureKind::Other, receipt),
+                    Err(error) => {
+                        let failure_kind = if error.is_timeout() {
+                            CloudUploadFailureKind::Timeout
+                        } else {
+                            CloudUploadFailureKind::Other
+                        };
+                        (false, Some(error.to_string()), failure_kind, None)
+                    }
+                },
+                Err(mpsc::RecvTimeoutError::Timeout) => (
+                    false,
+                    Some("cloud WAL upload callback timed out".to_string()),
+                    CloudUploadFailureKind::Timeout,
+                    None,
+                ),
+                Err(mpsc::RecvTimeoutError::Disconnected) => (
+                    false,
+                    Some(
+                        "cloud WAL upload callback channel closed or returned an unexpected event"
+                            .to_string(),
+                    ),
+                    CloudUploadFailureKind::Other,
+                    None,
+                ),
+            };
+
+        match verify_remote(receipt) {
+            Ok(()) => {
+                let upload_elapsed = upload_start.elapsed();
+                let upload_latency_us = Self::duration_micros_to_u64(upload_elapsed);
+                Self::log_wal_upload_ack(upload);
+                counters.record(|m| {
+                    m.record_cloud_async_wal_upload_completed(upload_latency_us);
+                    m.record_cloud_wal_upload_latency(upload_elapsed);
+                });
+                Self::wal_upload_ack_event(upload)
+            }
+            Err(readback_error) => {
+                counters.record(|m| {
+                    m.record_cloud_async_wal_upload_failed();
+                });
+                let error = if write_reported_success {
+                    format!("remote WAL readback validation failed: {readback_error}")
+                } else {
+                    format!(
+                        "{}; remote WAL readback did not confirm the write: {readback_error}",
+                        write_error.unwrap_or_else(|| "cloud WAL upload failed".to_string())
+                    )
+                };
+                let failure_kind = if readback_error.kind() == crate::StorageErrorKind::Corruption {
+                    CloudUploadFailureKind::Corruption
+                } else if write_failure_kind == CloudUploadFailureKind::Timeout
+                    || readback_error.is_timeout()
+                {
+                    CloudUploadFailureKind::Timeout
+                } else {
+                    CloudUploadFailureKind::Other
+                };
+                Self::wal_upload_failure_event(upload, &error, failure_kind)
+            }
+        }
+    }
+}
+
+fn reserve_upload_memory(
+    upload: &UploadState,
+    cloud: &dyn StorageBackend,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
+) -> cntryl_midge_core::MidgeResult<
+    Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>,
+> {
+    // Source, retained expected bytes and conservative fallback readback,
+    // plus every body copy the provider advertises. Reserve before reading.
+    let bytes = usize::try_from(upload.size_bytes)
+        .ok()
+        .and_then(|size| size.checked_mul(3usize.saturating_add(cloud.write_payload_copies())))
+        .ok_or_else(|| {
+            cntryl_midge_core::MidgeError::ResourceLimit(
+                "WAL upload memory size overflows address space".into(),
+            )
+        })?;
+    budget
+        .reserve(bytes, "WAL upload bodies and verification")
+        .map(Arc::new)
+}
+
+fn verify_upload_ranges(
+    cloud: &Arc<dyn StorageBackend>,
+    key: &str,
+    expected: &[u8],
+    admission: &UploadAttemptAdmission,
+) -> Result<(), crate::StorageError> {
+    use crate::{StorageError, StorageErrorKind, StoragePrecondition, StorageRequest};
+    let deadline = cntryl_midge_core::OperationDeadline::from_budget(admission.timeout);
+    let metadata = HybridStorage::head_range_object_from_backend(cloud, key, deadline.remaining())?;
+    if metadata.size != expected.len() as u64 || !metadata.same_version(&metadata) {
+        return Err(StorageError::new(
+            StorageErrorKind::Corruption,
+            "WAL upload identity is incomplete or has a conflicting size",
+        ));
+    }
+    for (ordinal, chunk) in expected.chunks(64 * 1024).enumerate() {
+        let mut request = StorageRequest::new(key, deadline, admission.timeout)
+            .with_precondition(StoragePrecondition::IfMatch(metadata.clone()));
+        if let Some(memory) = &admission.memory {
+            request = request.with_reservation(Arc::clone(memory));
+        }
+        let start = (ordinal * 64 * 1024) as u64;
+        let (tx, rx) = mpsc::channel();
+        cloud.submit_range_read_request(request, start..start + chunk.len() as u64, tx);
+        let bytes = rx.recv_timeout(deadline.remaining()).map_err(|error| {
+            crate::storage_timeout_error(format!("WAL upload range verification: {error}"))
+        })??;
+        if deadline.is_expired() {
+            return Err(crate::storage_timeout_error(
+                "WAL upload verification deadline exhausted",
+            ));
+        }
+        if bytes != chunk {
+            return Err(StorageError::new(
+                StorageErrorKind::Corruption,
+                format!("remote object '{key}' differs from uploaded bytes"),
+            ));
+        }
+    }
+    let current = HybridStorage::head_range_object_from_backend(cloud, key, deadline.remaining())?;
+    if deadline.is_expired() {
+        return Err(crate::storage_timeout_error(
+            "WAL upload verification deadline exhausted",
+        ));
+    }
+    if !metadata.same_version(&current) {
+        return Err(StorageError::new(
+            StorageErrorKind::Corruption,
+            "WAL object changed during verification",
+        ));
+    }
+    Ok(())
+}

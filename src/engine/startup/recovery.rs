@@ -1,10 +1,10 @@
 use super::{CloudStartupRecovery, RuntimeRecoveryMaterialization, RuntimeStorageMaterialization};
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
-use crate::config::RecoveryPolicy;
-use crate::io::FsError;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority;
 use crate::runtime::RuntimeState;
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_durability::RecoveryPolicy;
 use std::sync::Arc;
 
 impl RuntimeRecoveryMaterialization {
@@ -14,7 +14,7 @@ impl RuntimeRecoveryMaterialization {
         let Some(fs) = &materialized.runtime_config.sst_read_fs else {
             return Ok(());
         };
-        let fs = crate::telemetry::recovery_progress::observe_reads(Arc::clone(fs));
+        let fs = cntryl_midge_core::telemetry::recovery_progress::observe_reads(Arc::clone(fs));
         if materialized.runtime_config.hybrid_storage.is_none() {
             return Ok(());
         }
@@ -27,7 +27,7 @@ impl RuntimeRecoveryMaterialization {
                 continue;
             }
             let root = Arc::clone(&materialized.state.fs);
-            let path = crate::sst::fs::sst_key(&meta.name);
+            let path = cntryl_midge_table::sst::fs::sst_key(&meta.name);
             if !root.exists(&path).map_err(FsError::into_midge)? {
                 continue;
             }
@@ -36,7 +36,7 @@ impl RuntimeRecoveryMaterialization {
             // Retain the local bytes unless the remote publication proof holds.
             let validation = RuntimeState::validate_sst_fs_proof(
                 Arc::clone(&fs),
-                &crate::runtime::FileMeta::from(meta),
+                &cntryl_midge_durability::metadata::intent::FileMeta::from(meta),
             );
             materialized
                 .state
@@ -77,12 +77,12 @@ impl RuntimeRecoveryMaterialization {
     /// Bytes held by every file below `directory` in `root`; a missing
     /// directory holds none.
     pub(super) fn local_directory_bytes_within(
-        root: &dyn crate::io::Fs,
+        root: &dyn cntryl_midge_core::io::Fs,
         directory: &str,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<u64> {
         check_scope(scope, "startup storage accounting")?;
-        let path = crate::io::FsPath::new(directory);
+        let path = cntryl_midge_core::io::FsPath::new(directory);
         if !root.exists(&path).map_err(FsError::into_midge)? {
             return Ok(0);
         }
@@ -93,12 +93,14 @@ impl RuntimeRecoveryMaterialization {
             let bytes = if entry.is_dir {
                 Self::local_directory_bytes_within(root, &child, scope)?
             } else {
-                root.metadata(&crate::io::FsPath::new(&child))
+                root.metadata(&cntryl_midge_core::io::FsPath::new(&child))
                     .map_err(FsError::into_midge)?
                     .len
             };
             total = total.checked_add(bytes).ok_or_else(|| {
-                crate::common::MidgeError::ResourceLimit("local storage accounting overflow".into())
+                cntryl_midge_core::common::MidgeError::ResourceLimit(
+                    "local storage accounting overflow".into(),
+                )
             })?;
         }
         check_scope(scope, "startup storage accounting completion")?;
@@ -118,7 +120,7 @@ impl RuntimeRecoveryMaterialization {
         Self::evict_resident_manifest_ssts(materialized)?;
         if !materialized.state.salvaged_local_ssts.is_empty() {
             if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-                let mut remote = crate::storage::remote_sst::RemoteSstFs::new(
+                let mut remote = cntryl_midge_storage::remote_sst::RemoteSstFs::new(
                     Arc::clone(&materialized.state.fs),
                     storage.remote_sst_backend(),
                     storage.storage_io_timeout(),
@@ -127,10 +129,10 @@ impl RuntimeRecoveryMaterialization {
                 if let Some(cache) = &materialized.remote_block_cache {
                     remote = remote.with_block_cache(Arc::clone(cache));
                 }
-                let fs: Arc<dyn crate::io::Fs> = Arc::new(remote);
+                let fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(remote);
                 materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
                 materialized.state.recovery_sst_fs =
-                    Some(crate::telemetry::recovery_progress::observe_reads(fs));
+                    Some(cntryl_midge_core::telemetry::recovery_progress::observe_reads(fs));
             }
         }
         if let Some(storage) = &materialized.runtime_config.hybrid_storage {
@@ -162,11 +164,10 @@ impl RuntimeRecoveryMaterialization {
         scope: &DeadlineScope,
     ) -> MidgeResult<Self> {
         scope.check("recovery repair")?;
-        materialized.state.recovery_sst_fs = materialized
-            .runtime_config
-            .sst_read_fs
-            .as_ref()
-            .map(|fs| crate::telemetry::recovery_progress::observe_reads(Arc::clone(fs)));
+        materialized.state.recovery_sst_fs =
+            materialized.runtime_config.sst_read_fs.as_ref().map(|fs| {
+                cntryl_midge_core::telemetry::recovery_progress::observe_reads(Arc::clone(fs))
+            });
         let remote_cleanup_candidates = materialized
             .state
             .non_authoritative_compaction_outputs_for_remote_cleanup()?;
@@ -229,7 +230,7 @@ impl RuntimeRecoveryMaterialization {
         }
 
         if materialized.runtime_config.wal_durability_policy
-            == crate::wal::DurabilityPolicy::CloudAsync
+            == cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync
         {
             materialized
                 .state

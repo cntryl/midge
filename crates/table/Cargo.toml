@@ -1,0 +1,73 @@
+[package]
+name = "cntryl-midge-table"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+autobenches = false
+description = "Memtable and SST table formats for cntryl-midge"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+cntryl-midge-core.workspace = true
+arc-swap.workspace = true
+bytes.workspace = true
+crc32c.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+serde.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+cntryl-stress.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+cntryl-midge-table = { path = ".", features = ["internal-testing"] }
+
+[features]
+default = []
+internal-testing = ["cntryl-midge-core/internal-testing"]
+failpoints = ["cntryl-midge-core/failpoints"]
+
+[lints]
+workspace = true
+
+[target.'cfg(midge_loom)'.dependencies]
+loom = "0.7"
+
+[[bench]]
+name = "tier1_hotpath_bloom"
+harness = false
+[[bench]]
+name = "tier1_hotpath_block_cache"
+harness = false
+[[bench]]
+name = "tier1_hotpath_iterator"
+harness = false
+[[bench]]
+name = "tier1_hotpath_memtable"
+harness = false
+[[bench]]
+name = "tier1_hotpath_sst"
+harness = false
+[[bench]]
+name = "tier1_hotpath_trie"
+harness = false
+[[bench]]
+name = "tier2_subsystem_block_cache"
+harness = false
+[[bench]]
+name = "tier2_subsystem_bloom_build"
+harness = false
+[[bench]]
+name = "tier2_subsystem_memtable_rotate"
+harness = false
+[[bench]]
+name = "tier2_subsystem_range_scan_cache"
+harness = false

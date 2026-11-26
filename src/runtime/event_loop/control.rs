@@ -10,8 +10,8 @@ pub(super) struct RuntimeConfigUpdate {
     pub memtable_flush_threshold: Option<usize>,
     pub enable_compaction: Option<bool>,
     pub l0_compaction_trigger: Option<usize>,
-    pub wal_durability_policy: Option<crate::wal::DurabilityPolicy>,
-    pub wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+    pub wal_durability_policy: Option<cntryl_midge_durability::wal::DurabilityPolicy>,
+    pub wal_batch_config: Option<cntryl_midge_durability::wal::policy::BatchConfig>,
 }
 
 impl EventLoop {
@@ -28,7 +28,7 @@ impl EventLoop {
     pub(super) fn handle_check_write_stall(
         &self,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) {
         if let Err(error) = self.check_lease_health() {
             self.respond(request_id, RuntimeResponse::Error { request_id, error });
@@ -48,7 +48,7 @@ impl EventLoop {
     pub(super) fn handle_wait_for_write_stall_clear(
         &mut self,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) {
         if let Err(error) = self.check_lease_health() {
             self.respond(request_id, RuntimeResponse::Error { request_id, error });
@@ -75,7 +75,7 @@ impl EventLoop {
             request_id,
             RuntimeResponse::ReadAmpMetricsSnapshot {
                 request_id,
-                snapshot: crate::types::ReadAmpMetricsSnapshot {
+                snapshot: cntryl_midge_core::types::ReadAmpMetricsSnapshot {
                     reads_total: metrics.reads_total(),
                     ssts_touched_total: metrics.ssts_touched_total(),
                     l0_ssts_touched_total: metrics.l0_ssts_touched_total(),
@@ -96,7 +96,7 @@ impl EventLoop {
             request_id,
             RuntimeResponse::RecoveryMetricsSnapshot {
                 request_id,
-                snapshot: crate::types::RecoveryMetricsSnapshot {
+                snapshot: cntryl_midge_core::types::RecoveryMetricsSnapshot {
                     wal_recovery_records_replayed: self
                         .state
                         .recovery_stats
@@ -116,7 +116,9 @@ impl EventLoop {
     }
 
     pub(super) fn handle_get_runtime_metrics(&self, request_id: u64) {
-        crate::failpoints::fail_point!("midge::runtime::before_get_runtime_metrics_response");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::runtime::before_get_runtime_metrics_response"
+        );
         let mut snapshot = self.state.runtime_metrics_snapshot();
         let read_path = self.state.diagnostics.snapshot();
         snapshot.durability_waiters_fanned_out_total =
@@ -194,14 +196,14 @@ impl EventLoop {
         // runtime field so `SetRuntimeConfig` remains atomic.
         let switches_cloud_mode = matches!(
             candidate_wal_policy,
-            crate::wal::DurabilityPolicy::CloudAsync
+            cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync
         ) != self.actors.wal_actor.is_cloud_async();
         if switches_cloud_mode {
             self.respond(
                 update.request_id,
                 RuntimeResponse::Error {
                     request_id: update.request_id,
-                    error: crate::common::MidgeError::InvalidArgument(format!(
+                    error: cntryl_midge_core::common::MidgeError::InvalidArgument(format!(
                         "cannot switch WAL durability policy to {candidate_wal_policy:?} at runtime; cloud-backed and local modes key durability generations differently"
                     )),
                 },
@@ -282,7 +284,10 @@ mod tests {
     use super::RuntimeConfigUpdate;
     use crate::runtime::RuntimeResponse;
 
-    fn policy_update(request_id: u64, policy: crate::wal::DurabilityPolicy) -> RuntimeConfigUpdate {
+    fn policy_update(
+        request_id: u64,
+        policy: cntryl_midge_durability::wal::DurabilityPolicy,
+    ) -> RuntimeConfigUpdate {
         RuntimeConfigUpdate {
             request_id,
             memtable_size_limit: None,
@@ -296,34 +301,42 @@ mod tests {
 
     #[test]
     fn should_reject_cross_mode_wal_policy_switches_when_runtime_config_changes(
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         // Arrange
         let mut local = create_test_local_event_loop()?;
         let mut cloud = create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         let local_response = local.routing.router.register(1, "SetRuntimeConfig");
         let cloud_response = cloud.routing.router.register(2, "SetRuntimeConfig");
         let same_mode_response = local.routing.router.register(3, "SetRuntimeConfig");
 
         // Act
-        local
-            .handle_set_runtime_config(&policy_update(1, crate::wal::DurabilityPolicy::CloudAsync));
-        cloud.handle_set_runtime_config(&policy_update(2, crate::wal::DurabilityPolicy::Batched));
-        local.handle_set_runtime_config(&policy_update(3, crate::wal::DurabilityPolicy::Strict));
+        local.handle_set_runtime_config(&policy_update(
+            1,
+            cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync,
+        ));
+        cloud.handle_set_runtime_config(&policy_update(
+            2,
+            cntryl_midge_durability::wal::DurabilityPolicy::Batched,
+        ));
+        local.handle_set_runtime_config(&policy_update(
+            3,
+            cntryl_midge_durability::wal::DurabilityPolicy::Strict,
+        ));
 
         // Assert
         assert!(matches!(
             local_response.recv_timeout(std::time::Duration::from_secs(1)),
             Ok(RuntimeResponse::Error {
-                error: crate::common::MidgeError::InvalidArgument(_),
+                error: cntryl_midge_core::common::MidgeError::InvalidArgument(_),
                 ..
             })
         ));
         assert!(matches!(
             cloud_response.recv_timeout(std::time::Duration::from_secs(1)),
             Ok(RuntimeResponse::Error {
-                error: crate::common::MidgeError::InvalidArgument(_),
+                error: cntryl_midge_core::common::MidgeError::InvalidArgument(_),
                 ..
             })
         ));
@@ -335,7 +348,7 @@ mod tests {
         assert!(cloud.actors.wal_actor.is_cloud_async());
         assert_eq!(
             local.actors.wal_actor.durability_policy(),
-            crate::wal::DurabilityPolicy::Strict
+            cntryl_midge_durability::wal::DurabilityPolicy::Strict
         );
         Ok(())
     }

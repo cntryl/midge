@@ -1,9 +1,9 @@
 //! Real actor completions and immutable ownership; no seeded successful delta.
 
 use super::*;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::metadata::accounting::{Medium, Origin, Snapshot};
-use crate::types::KeyState;
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::types::KeyState;
+use cntryl_midge_durability::metadata::accounting::{Medium, Origin, Snapshot};
 
 const KEY: &[u8] = b"accounted-immutable";
 const VALUE: &[u8] = b"actual-built-published-installed-row";
@@ -82,10 +82,10 @@ impl Fixture {
             .collect();
         assert_eq!(installed.len(), 1);
         let fs = Arc::new(
-            crate::io::RealFs::new(self.event_loop.state.host_sst_dir())
+            cntryl_midge_core::io::RealFs::new(self.event_loop.state.host_sst_dir())
                 .map_err(FsError::into_midge)?,
         );
-        let reader = crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
+        let reader = cntryl_midge_table::sst::FsSstFactoryIo::new(fs, 64 * 1024)
             .open(std::path::Path::new(&delta.file_meta.name))?;
         assert_eq!(
             reader.get_state(KEY)?,
@@ -93,7 +93,7 @@ impl Fixture {
                 bytes::Bytes::from_static(VALUE),
                 1,
                 None,
-                crate::types::EntryType::Put
+                cntryl_midge_core::types::EntryType::Put
             )
         );
         assert_eq!(
@@ -110,7 +110,7 @@ impl Fixture {
     }
 }
 
-fn ordinary(snapshot: &Snapshot) -> &crate::metadata::accounting::Counters {
+fn ordinary(snapshot: &Snapshot) -> &cntryl_midge_durability::metadata::accounting::Counters {
     &snapshot
         .bucket(Origin::OrdinaryLocalFlush, Medium::Persistent)
         .counters
@@ -133,7 +133,7 @@ fn successful_publish(fixture: &mut Fixture) -> FlushPublicationDelta {
 
 #[test]
 fn should_credit_installed_sst_once_when_actual_mirror_receipt_is_replayed() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: a real actor writes, publishes and mirrors this local row.
         let mut fixture = Fixture::new(8 * 1024 * 1024)?;
         let before = fixture.snapshot();
@@ -263,7 +263,7 @@ fn fail_actual_publication(fixture: &mut Fixture) -> MidgeResult<FailedPublicati
 #[test]
 fn should_preserve_original_publication_when_actual_retry_runs_during_shutdown() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: a genuine SST build is retained after a real destination error.
         let mut fixture = Fixture::new(8 * 1024 * 1024)?;
         let before = fixture.snapshot();
@@ -357,7 +357,7 @@ fn should_preserve_original_publication_when_actual_retry_runs_during_shutdown()
 
 #[test]
 fn should_not_count_publication_when_actual_actor_build_exhausts_its_memory() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: the actual actor's resource budget cannot create a writer.
         let mut fixture = Fixture::new(1)?;
         let before = fixture.snapshot();
@@ -394,7 +394,7 @@ fn should_not_count_publication_when_actual_actor_build_exhausts_its_memory() ->
                 bytes::Bytes::from_static(VALUE),
                 1,
                 None,
-                crate::types::EntryType::Put
+                cntryl_midge_core::types::EntryType::Put
             )
         );
         let after = fixture.snapshot().delta(&before).expect("same owner");

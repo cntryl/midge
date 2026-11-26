@@ -1,14 +1,17 @@
 //! Transaction validation and in-memory state publication.
 
 use super::{TransactionApplyOp, WalActor};
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
-use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::wal::DurabilityPolicy;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-type PreflightPoint<'a> = (crate::types::ColumnFamilyId, Option<(&'a [u8], u64)>);
+type PreflightPoint<'a> = (
+    cntryl_midge_core::types::ColumnFamilyId,
+    Option<(&'a [u8], u64)>,
+);
 
 #[cfg(test)]
 thread_local! {
@@ -27,7 +30,7 @@ pub(super) struct ValidationSnapshots<'a> {
     overlay: Option<&'a super::StagedWriteOverlay>,
     proof: Option<&'a super::CommitValidationProof>,
     by_cf: std::collections::HashMap<
-        crate::types::ColumnFamilyId,
+        cntryl_midge_core::types::ColumnFamilyId,
         Option<crate::runtime::ReadSnapshot>,
     >,
 }
@@ -71,7 +74,7 @@ impl<'a> ValidationSnapshots<'a> {
 
     fn get(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> Option<&crate::runtime::ReadSnapshot> {
         let state = self.state;
         let resources = self.resources.as_ref();
@@ -214,7 +217,8 @@ impl WalActor {
         ops: &[crate::runtime::TransactionOp],
         start_sequence: u64,
     ) -> MidgeResult<()> {
-        let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, &[u8])> = HashSet::new();
+        let mut checked_keys: HashSet<(cntryl_midge_core::types::ColumnFamilyId, &[u8])> =
+            HashSet::new();
 
         for op in ops {
             match op {
@@ -227,9 +231,9 @@ impl WalActor {
 
                     if let Some(latest_seq) = Self::latest_key_sequence(snapshots, *cf_id, key)? {
                         if latest_seq > start_sequence {
-                            state
-                                .diagnostics
-                                .record(crate::telemetry::Metrics::record_write_conflict_point);
+                            state.diagnostics.record(
+                                cntryl_midge_core::telemetry::Metrics::record_write_conflict_point,
+                            );
                             return Err(MidgeError::WriteConflict(format!(
                                 "key conflict on cf {cf_id} for key {key:?}: latest seq {latest_seq} > tx start {start_sequence}"
                             )));
@@ -240,9 +244,9 @@ impl WalActor {
                         state.latest_covering_delete_range_sequence(*cf_id, key)
                     {
                         if range_seq > start_sequence {
-                            state
-                                .diagnostics
-                                .record(crate::telemetry::Metrics::record_write_conflict_point);
+                            state.diagnostics.record(
+                                cntryl_midge_core::telemetry::Metrics::record_write_conflict_point,
+                            );
                             return Err(MidgeError::WriteConflict(format!(
                                 "key conflict on cf {cf_id} for key {key:?}: covered by delete-range seq {range_seq} > tx start {start_sequence}"
                             )));
@@ -261,9 +265,9 @@ impl WalActor {
                         end_key.as_ref(),
                         start_sequence,
                     )? {
-                        state
-                            .diagnostics
-                            .record(crate::telemetry::Metrics::record_write_conflict_range);
+                        state.diagnostics.record(
+                            cntryl_midge_core::telemetry::Metrics::record_write_conflict_range,
+                        );
                         return Err(MidgeError::WriteConflict(format!(
                                 "range conflict on cf {cf_id} for [{start_key:?}, {end_key:?}): latest seq {latest_seq} > tx start {start_sequence}"
                             )));
@@ -275,9 +279,9 @@ impl WalActor {
                         end_key.as_ref(),
                     ) {
                         if range_seq > start_sequence {
-                            state
-                                .diagnostics
-                                .record(crate::telemetry::Metrics::record_write_conflict_range);
+                            state.diagnostics.record(
+                                cntryl_midge_core::telemetry::Metrics::record_write_conflict_range,
+                            );
                             return Err(MidgeError::WriteConflict(format!(
                                 "range conflict on cf {cf_id} for [{start_key:?}, {end_key:?}): overlaps delete-range seq {range_seq} > tx start {start_sequence}"
                             )));
@@ -306,7 +310,8 @@ impl WalActor {
         assertions: &[crate::runtime::KeyAssertion],
         start_sequence: u64,
     ) -> MidgeResult<()> {
-        let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, &[u8])> = HashSet::new();
+        let mut checked_keys: HashSet<(cntryl_midge_core::types::ColumnFamilyId, &[u8])> =
+            HashSet::new();
 
         for assertion in assertions {
             let dedupe_key = (assertion.cf_id, assertion.key.as_ref());
@@ -327,7 +332,7 @@ impl WalActor {
                 if latest_seq > start_sequence {
                     state
                         .diagnostics
-                        .record(crate::telemetry::Metrics::record_write_conflict_point);
+                        .record(cntryl_midge_core::telemetry::Metrics::record_write_conflict_point);
                     return Err(MidgeError::WriteConflict(format!(
                             "assertion conflict on cf {} for key {:?}: latest seq {latest_seq} > tx start {start_sequence}",
                             assertion.cf_id, assertion.key
@@ -341,7 +346,7 @@ impl WalActor {
                 if range_seq > start_sequence {
                     state
                         .diagnostics
-                        .record(crate::telemetry::Metrics::record_write_conflict_point);
+                        .record(cntryl_midge_core::telemetry::Metrics::record_write_conflict_point);
                     return Err(MidgeError::WriteConflict(format!(
                         "assertion conflict on cf {} for key {:?}: covered by delete-range seq {range_seq} > tx start {start_sequence}",
                         assertion.cf_id, assertion.key
@@ -355,7 +360,7 @@ impl WalActor {
 
     pub(super) fn latest_key_sequence(
         snapshots: &mut ValidationSnapshots<'_>,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<Option<u64>> {
         if let Some(sequence) = snapshots
@@ -375,13 +380,13 @@ impl WalActor {
 
     fn latest_sequence_snapshot(
         state: &RuntimeState,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         resources: Option<&Arc<crate::runtime::read_resources::ReadResources>>,
     ) -> Option<crate::runtime::ReadSnapshot> {
         let cf_state = state.column_families.get(&cf_id)?;
         let sst_view = state.manifest.read_view_for(cf_id);
 
-        let sst_path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
+        let sst_path_prefix = std::path::PathBuf::from(cntryl_midge_table::sst::fs::SST_DIR);
 
         // Read through the event loop's reader and block caches when given,
         // so validating many ops opens each SST once (#492). Without them
@@ -414,7 +419,7 @@ impl WalActor {
 
     pub(super) fn any_range_sequence_after(
         snapshots: &mut ValidationSnapshots<'_>,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start_key: &[u8],
         end_key: &[u8],
         threshold: u64,
@@ -497,7 +502,7 @@ impl WalActor {
     /// "absent", so an insert can never overwrite a key it could not see.
     pub(super) fn key_exists(
         snapshots: &mut ValidationSnapshots<'_>,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<bool> {
         if let Some(exists) = snapshots.overlay.and_then(|overlay| {
@@ -520,7 +525,7 @@ impl WalActor {
     pub(super) fn apply_to_memtable(
         state: &mut RuntimeState,
         sequence: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: Bytes,
         value: Option<Bytes>,
         expiration: Option<u64>,

@@ -2,10 +2,10 @@
 
 use super::format10_admission::{AdmissionPhase, Format10AdmissionStore};
 use super::metadata_snapshot::CloudMetadataMirrorContext;
-use crate::common::{MidgeError, MidgeResult};
-use crate::lease::{CloudMetadataGeneration, CloudMetadataHead};
-use crate::storage::cloud::BlockingCloud;
-use crate::storage::{
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::lease::{CloudMetadataGeneration, CloudMetadataHead};
+use cntryl_midge_storage::cloud::BlockingCloud;
+use cntryl_midge_storage::{
     StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome, StoragePrecondition,
     StorageRequest,
 };
@@ -21,7 +21,7 @@ const CANDIDATE_BUDGET: usize = 8;
 /// new cut merely to reclaim old ones, or write-idle history never converges.
 pub(crate) fn collect_selected_metadata_within(
     context: &CloudMetadataMirrorContext<'_>,
-    mut validate_lease: impl FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
+    mut validate_lease: impl FnMut(&cntryl_midge_core::common::OperationDeadline) -> MidgeResult<()>,
 ) -> MidgeResult<()> {
     let mut guard = context
         .publication_lock
@@ -40,10 +40,10 @@ pub(crate) fn collect_selected_metadata_within(
             context.deadline.remaining(),
         )
         .map_err(|error| error.into_validation_error("metadata retention authority"))?;
-    let head = if crate::failpoints::is_active(
+    let head = if cntryl_midge_core::failpoints::is_active(
         "midge::cloud::inject_metadata_retention_authority_read_failure",
     ) {
-        Err(crate::lease::LeaseError::Indeterminate(
+        Err(cntryl_midge_durability::lease::LeaseError::Indeterminate(
             "injected uncertain metadata authority read".into(),
         ))
     } else {
@@ -55,7 +55,7 @@ pub(crate) fn collect_selected_metadata_within(
     let head = match head {
         Ok(head) => head,
         Err(error) => {
-            crate::failpoints::fail_point!(
+            cntryl_midge_core::failpoints::fail_point!(
                 "midge::cloud::metadata_retention_authority_read_failed"
             );
             return Err(error.into());
@@ -170,10 +170,10 @@ pub(super) fn collect_after_commit(
         }
         let ordinal = state.cursor;
         state.totals.lists += 1;
-        let page = crate::storage::cloud::CloudListPageRequest {
+        let page = cntryl_midge_storage::cloud::CloudListPageRequest {
             continuation: state.continuation.clone(),
             max_keys: (CANDIDATE_BUDGET - candidates)
-                .min(crate::storage::cloud::MAX_LIST_PAGE_KEYS),
+                .min(cntryl_midge_storage::cloud::MAX_LIST_PAGE_KEYS),
         };
         let Ok(Some(page)) = io.list_page(&format!("manifest/{ordinal:020}/"), page) else {
             state.totals.retained += 1;
@@ -182,7 +182,8 @@ pub(super) fn collect_after_commit(
         for key in page.keys {
             let key = context.cloud.strip_namespace(&key);
             if protected.contains(key)
-                || crate::metadata::cloud_manifest::validate_key(key, ordinal).is_err()
+                || cntryl_midge_durability::metadata::cloud_manifest::validate_key(key, ordinal)
+                    .is_err()
             {
                 continue;
             }
@@ -264,7 +265,7 @@ pub(super) fn reclaim_finished_format10_stages(
 fn remove_format_10_member(
     context: &CloudMetadataMirrorContext<'_>,
     generation: &CloudMetadataGeneration,
-    object: &crate::lease::CloudMetadataObject,
+    object: &cntryl_midge_durability::lease::CloudMetadataObject,
     identity: StorageObjectMetadata,
 ) -> MidgeResult<()> {
     let key = &object.object_key;
@@ -276,7 +277,7 @@ fn remove_format_10_member(
         ));
     }
     validate_current(context, generation)?;
-    crate::failpoints::fail_point!("midge::cloud::before_metadata_retention_delete");
+    cntryl_midge_core::failpoints::fail_point!("midge::cloud::before_metadata_retention_delete");
     if !delete_identity(context, key, identity)? {
         return Err(MidgeError::OutcomeUnknown(
             "reserved FORMAT 10 body deletion remains unproven".into(),
@@ -294,7 +295,9 @@ fn reclaim_candidate(
     let Ok(metadata) = range_identity(context, key) else {
         return Ok(false);
     };
-    if metadata.size == 0 || metadata.size > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+    if metadata.size == 0
+        || metadata.size > cntryl_midge_durability::metadata::cloud_manifest::MAX_CHAIN_BYTES
+    {
         return Ok(false);
     }
     let Ok(bytes) = read_identity(context, key, &metadata) else {
@@ -311,7 +314,7 @@ fn reclaim_candidate(
         return Ok(false);
     }
     validate_current(context, generation)?;
-    crate::failpoints::fail_point!("midge::cloud::before_metadata_retention_delete");
+    cntryl_midge_core::failpoints::fail_point!("midge::cloud::before_metadata_retention_delete");
     delete_identity(context, key, metadata)
 }
 

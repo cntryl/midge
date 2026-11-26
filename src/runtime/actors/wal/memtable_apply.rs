@@ -4,10 +4,10 @@ use super::{
     PreparedGroupOutcome, PreparedTransactionAppend, TransactionAppendResult, TransactionApplyOp,
     TxnSequencePlan, WalActor,
 };
-use crate::common::{MidgeError, MidgeResult};
-use crate::memtable::SkipListMemtable;
 use crate::runtime::state::RuntimeState;
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_table::memtable::SkipListMemtable;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -41,9 +41,9 @@ pub(crate) struct MemtableApplyPlan {
 
 impl MemtableApplyJob {
     pub(crate) fn apply(self, authority: &MemtableApplyAuthority) -> MidgeResult<()> {
-        crate::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
         if self.ordinal == 0 {
-            crate::failpoints::fail_point!("midge::apply::before_first_unit");
+            cntryl_midge_core::failpoints::fail_point!("midge::apply::before_first_unit");
         }
         for operation in self.operations {
             authority()?;
@@ -74,7 +74,7 @@ impl MemtableApplyJob {
         }
         authority()?;
         if self.ordinal == 1 {
-            crate::failpoints::fail_point!("midge::apply::after_second_unit");
+            cntryl_midge_core::failpoints::fail_point!("midge::apply::after_second_unit");
         }
         Ok(())
     }

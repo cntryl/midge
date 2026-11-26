@@ -1,12 +1,12 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
 use super::TransactionApplyOp;
 use super::{TxnSequencePlan, WalActor};
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::wal::DurabilityPolicy;
-use crate::wal::{WalOpKind, WalRecord};
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::wal::DurabilityPolicy;
+use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
 use std::time::Instant;
 
 struct SpilledTransactionContext<'a> {
@@ -14,7 +14,7 @@ struct SpilledTransactionContext<'a> {
     sequence_plan: &'a TxnSequencePlan,
     effective_durability: DurabilityPolicy,
     commit_time_millis: u64,
-    memory: Option<&'a crate::common::resource_budget::ResourceBudget>,
+    memory: Option<&'a cntryl_midge_core::common::resource_budget::ResourceBudget>,
 }
 
 impl WalActor {
@@ -22,9 +22,10 @@ impl WalActor {
     /// same accounting streaming replay uses.
     fn spilled_replay_bytes(
         source: &crate::runtime::transaction_spill::TransactionOpSource,
-        memory: Option<&crate::common::resource_budget::ResourceBudget>,
+        memory: Option<&cntryl_midge_core::common::resource_budget::ResourceBudget>,
     ) -> MidgeResult<usize> {
-        let mut replay_bytes = crate::wal::recovery::streaming::pending_txn_overhead_bytes();
+        let mut replay_bytes =
+            cntryl_midge_durability::wal::recovery::streaming::pending_txn_overhead_bytes();
         source.for_each_bounded(memory, |_, op| {
             let (key_len, value_len, range_end_len) = match &op {
                 crate::runtime::TransactionOp::Put { key, value, .. } => {
@@ -35,12 +36,13 @@ impl WalActor {
                     start_key, end_key, ..
                 } => (start_key.len(), 0, end_key.len()),
             };
-            replay_bytes =
-                replay_bytes.saturating_add(crate::wal::recovery::streaming::pending_record_bytes(
+            replay_bytes = replay_bytes.saturating_add(
+                cntryl_midge_durability::wal::recovery::streaming::pending_record_bytes(
                     key_len,
                     value_len,
                     range_end_len,
-                ));
+                ),
+            );
             Ok(())
         })?;
         Ok(replay_bytes)
@@ -94,7 +96,7 @@ impl WalActor {
             let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
             Self::preflight_point(state, &apply_op).map(|_| ())
         })?;
-        crate::failpoints::fail_point!("midge::wal::after_spilled_preparation");
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::after_spilled_preparation");
         self.ensure_lease_validity()?;
         let admitted = self.admit_spilled_wal(
             source,
@@ -103,7 +105,9 @@ impl WalActor {
             commit_time_millis,
             None,
         )?;
-        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
+        let previous_position = self
+            .writer()
+            .map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
         let mut wal_may_have_changed = false;
         let append_result = self.append_spilled_wal_records(
             request_id,
@@ -132,7 +136,7 @@ impl WalActor {
                         format!("spilled transaction WAL append failed: {error}"),
                     );
                 }
-                return Err(crate::common::error::classify_commit_error(
+                return Err(cntryl_midge_core::common::error::classify_commit_error(
                     error,
                     !wal_may_have_changed,
                 ));
@@ -173,8 +177,8 @@ impl WalActor {
         source: &crate::runtime::transaction_spill::TransactionOpSource,
         params: &super::SpilledTransactionAppendParams,
         proof: Option<&super::SpilledValidationProof>,
-        group: Option<&crate::lease::WriterEffectGroup>,
-        memory: &crate::common::resource_budget::ResourceBudget,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
+        memory: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<super::PreparedSpilledAppend> {
         self.ensure_lease_validity()?;
         let Some(cf_id) =
@@ -210,7 +214,7 @@ impl WalActor {
             let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
             Self::preflight_point(state, &apply_op).map(|_| ())
         })?;
-        crate::failpoints::fail_point!("midge::wal::after_spilled_preparation");
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::after_spilled_preparation");
         self.ensure_lease_validity()?;
         let admitted = self.admit_spilled_wal(
             source,
@@ -219,7 +223,9 @@ impl WalActor {
             commit_time_millis,
             Some(memory),
         )?;
-        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
+        let previous_position = self
+            .writer()
+            .map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
         let mut wal_may_have_changed = false;
         let append_result = self.append_spilled_wal_records(
             request_id,
@@ -245,7 +251,7 @@ impl WalActor {
                         format!("spilled transaction WAL append failed: {error}"),
                     );
                 }
-                return Err(crate::common::error::classify_commit_error(
+                return Err(cntryl_midge_core::common::error::classify_commit_error(
                     error,
                     !wal_may_have_changed,
                 ));
@@ -274,8 +280,8 @@ impl WalActor {
         state: &mut RuntimeState,
         source: &crate::runtime::transaction_spill::TransactionOpSource,
         prepared: super::PreparedSpilledAppend,
-        memory: &crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<(u64, usize, Vec<crate::types::ColumnFamilyId>)> {
+        memory: &cntryl_midge_core::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<(u64, usize, Vec<cntryl_midge_core::types::ColumnFamilyId>)> {
         let mut applied_ops = 0_usize;
         let context = SpilledTransactionContext {
             source,
@@ -312,7 +318,7 @@ impl WalActor {
         source: &crate::runtime::transaction_spill::TransactionOpSource,
         params: &super::SpilledTransactionAppendParams,
         proof: Option<&super::SpilledValidationProof>,
-        memory: Option<&crate::common::resource_budget::ResourceBudget>,
+        memory: Option<&cntryl_midge_core::common::resource_budget::ResourceBudget>,
     ) -> MidgeResult<Option<u32>> {
         if let Some(proof) = proof {
             let cf_id = proof.validate(state)?;
@@ -348,7 +354,9 @@ impl WalActor {
         // so replay keeps or drops it whole whatever frontier a later flush
         // publishes; an appended unit's outcome is unknown.
         self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)
-            .map_err(|error| crate::common::error::classify_commit_error(error, !logged))?;
+            .map_err(|error| {
+                cntryl_midge_core::common::error::classify_commit_error(error, !logged)
+            })?;
         // The WAL now holds the unit and `state.sequence` is past its commit.
         // A lease that lapsed since is a failed apply.
         let mut applied_ops = 0_usize;
@@ -399,8 +407,8 @@ impl WalActor {
         assertions: &[crate::runtime::KeyAssertion],
         start_sequence: u64,
         conflict_policy: crate::runtime::ConflictPolicy,
-        memory: Option<&crate::common::resource_budget::ResourceBudget>,
-    ) -> MidgeResult<crate::types::ColumnFamilyId> {
+        memory: Option<&cntryl_midge_core::common::resource_budget::ResourceBudget>,
+    ) -> MidgeResult<cntryl_midge_core::types::ColumnFamilyId> {
         // A transaction writes one family; check before anything is read.
         let mut families = Vec::new();
         source.for_each_bounded(memory, |_, op| {
@@ -486,7 +494,7 @@ impl WalActor {
                 {
                     state
                         .diagnostics
-                        .record(crate::telemetry::Metrics::record_write_conflict_point);
+                        .record(cntryl_midge_core::telemetry::Metrics::record_write_conflict_point);
                     return Err(MidgeError::WriteConflict(format!(
                         "key conflict on cf {cf_id} for key {key:?} after tx start {start_sequence}"
                     )));
@@ -511,7 +519,7 @@ impl WalActor {
                 {
                     state
                         .diagnostics
-                        .record(crate::telemetry::Metrics::record_write_conflict_range);
+                        .record(cntryl_midge_core::telemetry::Metrics::record_write_conflict_range);
                     return Err(MidgeError::WriteConflict(format!(
                         "range conflict on cf {cf_id} for [{start_key:?}, {end_key:?}) after tx start {start_sequence}"
                     )));
@@ -529,7 +537,7 @@ impl WalActor {
         plan: &TxnSequencePlan,
         durability: DurabilityPolicy,
         commit_time_millis: u64,
-        memory: Option<&crate::common::resource_budget::ResourceBudget>,
+        memory: Option<&cntryl_midge_core::common::resource_budget::ResourceBudget>,
     ) -> MidgeResult<u64> {
         let Some(storage) = self.storage_budget.as_ref().filter(|storage| {
             self.writer().is_some()
@@ -540,7 +548,7 @@ impl WalActor {
         };
         let mut bytes = 0_u64;
         let mut add = |record: &WalRecord| -> MidgeResult<()> {
-            let frame = crate::wal::encoding::record_frame_size_bound(record)?;
+            let frame = cntryl_midge_durability::wal::encoding::record_frame_size_bound(record)?;
             bytes = bytes
                 .checked_add(u64::try_from(frame).unwrap_or(u64::MAX))
                 .ok_or_else(|| MidgeError::ResourceLimit("WAL transaction size overflow".into()))?;
@@ -571,7 +579,7 @@ impl WalActor {
         request_id: u64,
         context: &SpilledTransactionContext<'_>,
         wal_may_have_changed: &mut bool,
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
     ) -> MidgeResult<(usize, usize)> {
         if matches!(context.effective_durability, DurabilityPolicy::BestEffort) {
             return Ok((0, 0));
@@ -608,8 +616,10 @@ impl WalActor {
                 self.append_spilled_record(&record, wal_may_have_changed, group)
             })?;
 
-        crate::failpoints::fail_point!("midge::wal::spilled_txn_after_ops_append_before_commit");
-        crate::failpoints::fail_point!(
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::spilled_txn_after_ops_append_before_commit"
+        );
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::wal::inject_no_space_on_txn_commit_append",
             |_| Err(MidgeError::NoSpace(
                 "failpoint: no space on transaction commit append".to_string()
@@ -629,7 +639,9 @@ impl WalActor {
         if let Err(error) = WalTransitionBoundary::AfterAppendBeforeAccounting.check() {
             return Err(Self::appended_unit_error(error));
         }
-        crate::failpoints::fail_point!("midge::wal::spilled_after_append_batch_before_sync");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::spilled_after_append_batch_before_sync"
+        );
         tracing::trace!(request_id, "appended split transaction WAL frames");
         Ok((total_bytes, context.source.len().saturating_add(2)))
     }
@@ -638,7 +650,7 @@ impl WalActor {
         &mut self,
         record: &WalRecord,
         wal_may_have_changed: &mut bool,
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
         self.ensure_lease_validity()?;
         let Some(writer) = self.writer_mut() else {
@@ -651,9 +663,13 @@ impl WalActor {
                 Some(capability) => {
                     capability.append_batch_in_group(std::slice::from_ref(record), group)
                 }
-                None => Err(crate::wal::traits::WalAppendError::unchanged(
-                    MidgeError::Internal("strict spill lost its writer group capability".into()),
-                )),
+                None => Err(
+                    cntryl_midge_durability::wal::traits::WalAppendError::unchanged(
+                        MidgeError::Internal(
+                            "strict spill lost its writer group capability".into(),
+                        ),
+                    ),
+                ),
             },
             None => writer.append_record_accounted(record),
         };
@@ -677,7 +693,7 @@ impl WalActor {
         // workspace reservation alive with each Bytes value and could exhaust
         // it after the transaction is already durable.
         context.source.for_each(|ordinal, op| {
-            crate::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
+            cntryl_midge_core::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
                 MidgeError::Io(std::io::Error::other(
                     "failpoint: spilled transaction apply read failed"
                 ))

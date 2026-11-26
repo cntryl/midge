@@ -1,7 +1,8 @@
 # Benchmarks
 
-Midge benchmark suites live in `benches/` and use `cntryl-stress` across every
-tier. Criterion-era guidance is obsolete here.
+Midge benchmarks use `cntryl-stress` across every tier. Engine and composition
+suites live in the root `benches/` directory. Compression, table, and WAL
+benchmarks live with their owning packages under `crates/`.
 
 For regression thresholds, cloud and hybrid guardrails, and external LSM
 comparison rules, see [Performance Targets](performance-targets.md).
@@ -11,9 +12,17 @@ comparison rules, see [Performance Targets](performance-targets.md).
 Run one suite:
 
 ```bash
-cargo bench --bench tier1_hotpath_bloom
-cargo bench --bench tier2_subsystem_event_loop
-cargo bench --bench tier4_ycsb_workload_a
+cargo bench --locked -p cntryl-midge-core --bench tier1_hotpath_compression
+cargo bench --locked -p cntryl-midge-table --bench tier1_hotpath_bloom
+cargo bench --locked -p cntryl-midge-durability --bench tier1_hotpath_wal
+cargo bench --locked -p cntryl-midge --bench tier2_subsystem_event_loop
+cargo bench --locked -p cntryl-midge --bench tier4_ycsb_workload_a
+```
+
+Build every registered target without running its workload:
+
+```bash
+cargo bench --locked --workspace --all-features --no-run
 ```
 
 Filter rows inside a suite:
@@ -31,7 +40,7 @@ cargo bench --bench tier4_ycsb_workload_a -- --list
 Choose a harness profile explicitly:
 
 ```bash
-cargo bench --bench tier1_hotpath_bloom -- --profile smoke
+cargo bench --locked -p cntryl-midge-table --bench tier1_hotpath_bloom -- --profile smoke
 cargo bench --bench tier4_ycsb_workload_a -- --profile default
 cargo bench --bench tier4_ycsb_workload_a -- --profile release
 ```

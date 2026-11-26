@@ -1,15 +1,15 @@
 //! Corrupt streaming uploads must fail before compaction reaches manifest authority.
 
 use super::EventLoop;
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{ResponseRouter, RuntimeConfig, RuntimeState};
-use crate::sst::{FsSstFactoryIo, SstFactory as _};
-use crate::storage::cloud::{
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::types::EntryType;
+use cntryl_midge_storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudHeadCapability, CloudReadCapability,
     CloudStorage, CloudWriteCapability, MockCloudBackend,
 };
-use crate::storage::{StorageFileUpload, StorageWriteReceipt};
-use crate::types::EntryType;
+use cntryl_midge_storage::{StorageFileUpload, StorageWriteReceipt};
+use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory as _};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -74,7 +74,7 @@ impl CorruptingMultipartBackend {
 }
 
 struct CompactionOutputReadCountingFs {
-    inner: Arc<dyn crate::io::Fs>,
+    inner: Arc<dyn cntryl_midge_core::io::Fs>,
     output_paths: parking_lot::Mutex<HashSet<String>>,
     read_opens: Arc<AtomicUsize>,
 }
@@ -85,30 +85,32 @@ impl CompactionOutputReadCountingFs {
         self.read_opens.store(0, Ordering::Release);
     }
 
-    fn record_read_open(&self, path: &crate::io::FsPath) {
+    fn record_read_open(&self, path: &cntryl_midge_core::io::FsPath) {
         if self.output_paths.lock().contains(&path.0) {
             self.read_opens.fetch_add(1, Ordering::AcqRel);
         }
     }
 
-    fn is_sst_path(path: &crate::io::FsPath) -> bool {
+    fn is_sst_path(path: &cntryl_midge_core::io::FsPath) -> bool {
         Path::new(&path.0)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
     }
 
-    fn mutate_latest_output(&self) -> crate::io::FsResult<()> {
+    fn mutate_latest_output(&self) -> cntryl_midge_core::io::FsResult<()> {
         let output_path = self
             .output_paths
             .lock()
             .iter()
             .next()
             .cloned()
-            .ok_or_else(|| crate::io::FsError::Io("no finalized compaction output".into()))?;
+            .ok_or_else(|| {
+                cntryl_midge_core::io::FsError::Io("no finalized compaction output".into())
+            })?;
         let mut file = self.inner.open(
-            &crate::io::FsPath::new(output_path),
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadWrite,
+            &cntryl_midge_core::io::FsPath::new(output_path),
+            cntryl_midge_core::io::OpenOptions {
+                mode: cntryl_midge_core::io::OpenMode::ReadWrite,
                 create: false,
                 create_new: false,
                 truncate: false,
@@ -116,53 +118,58 @@ impl CompactionOutputReadCountingFs {
         )?;
         let first_byte = file.read_at(0, 1)?[0] ^ 1;
         file.write_at(0, crate::Bytes::from(vec![first_byte]))?;
-        file.sync(crate::io::Durability::Durable)
+        file.sync(cntryl_midge_core::io::Durability::Durable)
     }
 }
 
-impl crate::io::ReadFs for CompactionOutputReadCountingFs {
+impl cntryl_midge_core::io::ReadFs for CompactionOutputReadCountingFs {
     fn open_read(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.record_read_open(path);
         self.inner.open_read(path)
     }
 
-    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
     fn metadata(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<cntryl_midge_core::io::traits::Metadata> {
         self.inner.metadata(path)
     }
 
     fn list_dir(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Vec<cntryl_midge_core::io::traits::DirEntry>> {
         self.inner.list_dir(path)
     }
 }
 
-impl crate::io::Fs for CompactionOutputReadCountingFs {
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+impl cntryl_midge_core::io::Fs for CompactionOutputReadCountingFs {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         Some(self)
     }
 
-    fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+    fn host_addressing(&self) -> Option<cntryl_midge_core::io::HostAddressing<'_>> {
         self.inner.host_addressing()
     }
 
     fn open(
         &self,
-        path: &crate::io::FsPath,
-        options: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
-        if options.mode == crate::io::OpenMode::ReadOnly {
+        path: &cntryl_midge_core::io::FsPath,
+        options: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
+        if options.mode == cntryl_midge_core::io::OpenMode::ReadOnly {
             self.record_read_open(path);
         } else if Self::is_sst_path(path) && (options.create || options.create_new) {
             self.output_paths.lock().insert(path.0.clone());
@@ -170,31 +177,40 @@ impl crate::io::Fs for CompactionOutputReadCountingFs {
         self.inner.open(path, options)
     }
 
-    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 
     fn sync_dir(
         &self,
-        path: &crate::io::FsPath,
-        durability: crate::io::Durability,
-    ) -> crate::io::FsResult<()> {
+        path: &cntryl_midge_core::io::FsPath,
+        durability: cntryl_midge_core::io::Durability,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.sync_dir(path, durability)
     }
 
     fn rename_atomic(
         &self,
-        from: &crate::io::FsPath,
-        to: &crate::io::FsPath,
-    ) -> crate::io::FsResult<()> {
+        from: &cntryl_midge_core::io::FsPath,
+        to: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.rename_atomic(from, to)?;
         if Self::is_sst_path(to) {
             self.output_paths.lock().insert(to.0.clone());
@@ -203,28 +219,28 @@ impl crate::io::Fs for CompactionOutputReadCountingFs {
     }
 }
 
-impl crate::io::PersistentHandleFs for CompactionOutputReadCountingFs {
+impl cntryl_midge_core::io::PersistentHandleFs for CompactionOutputReadCountingFs {
     fn open_persistent(
         &self,
-        path: &crate::io::FsPath,
-        options: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-        if options.mode == crate::io::OpenMode::ReadOnly {
+        path: &cntryl_midge_core::io::FsPath,
+        options: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File>> {
+        if options.mode == cntryl_midge_core::io::OpenMode::ReadOnly {
             self.record_read_open(path);
         } else if Self::is_sst_path(path) && (options.create || options.create_new) {
             self.output_paths.lock().insert(path.0.clone());
         }
-        crate::io::open_persistent_handle(self.inner.as_ref(), path, options)
+        cntryl_midge_core::io::open_persistent_handle(self.inner.as_ref(), path, options)
     }
 }
 
 impl CloudReadCapability for CorruptingMultipartBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner;
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner;
         submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
 }
 
 impl CloudWriteCapability for CorruptingMultipartBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_put);
 
     fn supports_file_upload(&self) -> bool {
         true
@@ -234,10 +250,10 @@ impl CloudWriteCapability for CorruptingMultipartBackend {
         &self,
         key: &str,
         source: StorageFileUpload,
-        options: crate::storage::cloud::CloudRequestOptions,
+        options: cntryl_midge_storage::cloud::CloudRequestOptions,
         callback: CloudCallback,
     ) {
-        use crate::storage::cloud::CloudError;
+        use cntryl_midge_storage::cloud::CloudError;
         self.mutate_local_output_if_requested();
 
         self.output_read_opens_before_upload.store(
@@ -338,16 +354,16 @@ impl CloudWriteCapability for CorruptingMultipartBackend {
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for CorruptingMultipartBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for CorruptingMultipartBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_delete);
 }
 
-impl crate::storage::cloud::CloudListCapability for CorruptingMultipartBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+impl cntryl_midge_storage::cloud::CloudListCapability for CorruptingMultipartBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_list);
 }
 
 impl CloudHeadCapability for CorruptingMultipartBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_head);
 }
 
 impl CloudBackend for CorruptingMultipartBackend {}
@@ -359,8 +375,8 @@ fn add_l0_input(
     start: usize,
     count: usize,
     value: &[u8],
-) -> MidgeResult<crate::metadata::FileMeta> {
-    let name = crate::cloud_layout::file_name(0, 0, generation);
+) -> MidgeResult<cntryl_midge_durability::metadata::FileMeta> {
+    let name = cntryl_midge_core::cloud_layout::file_name(0, 0, generation);
     let mut writer = factory.create()?;
     for ordinal in start..start + count {
         let key = format!("part-{ordinal:04}");
@@ -376,7 +392,7 @@ fn add_l0_input(
         .finish_to_path_with_summary(Path::new(&name))?
         .expect("sorted SST finalization summary");
     let summary = finalized.summary.expect("SST key and sequence summary");
-    let metadata = crate::metadata::FileMeta {
+    let metadata = cntryl_midge_durability::metadata::FileMeta {
         name,
         cf_id: 0,
         level: 0,
@@ -399,7 +415,7 @@ fn add_l0_input(
     Ok(metadata)
 }
 
-fn manifest_names(manifest: &crate::metadata::Manifest) -> Vec<String> {
+fn manifest_names(manifest: &cntryl_midge_durability::metadata::Manifest) -> Vec<String> {
     let mut names = manifest
         .files
         .iter()
@@ -413,11 +429,11 @@ fn event_loop_with_corrupting_storage(
     path: &Path,
     backend: &Arc<CorruptingMultipartBackend>,
 ) -> MidgeResult<(EventLoop, Arc<CompactionOutputReadCountingFs>)> {
-    let cloud_backend: Arc<dyn crate::storage::cloud::CloudBackend> = backend.clone();
+    let cloud_backend: Arc<dyn cntryl_midge_storage::cloud::CloudBackend> = backend.clone();
     let cloud = Arc::new(CloudStorage::new(cloud_backend, String::new()));
-    let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::new(128 * 1024 * 1024),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::new(128 * 1024 * 1024),
     ));
     let mut state = RuntimeState::new(path.to_path_buf(), false);
     let counting_fs = Arc::new(CompactionOutputReadCountingFs {
@@ -427,9 +443,12 @@ fn event_loop_with_corrupting_storage(
     });
     *backend.output_fs.lock() = Some(Arc::clone(&counting_fs));
     state.fs = counting_fs.clone();
-    crate::metadata::ensure_or_create_format_marker(&state.fs, path)?;
-    crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
-        .map_err(MidgeError::Internal)?;
+    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&state.fs, path)?;
+    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
+        &state.fs,
+        &state.manifest,
+    )
+    .map_err(MidgeError::Internal)?;
     let (wake_tx, _wake_rx) = crossbeam::channel::unbounded();
     let event_loop = EventLoop::new(
         state,
@@ -450,14 +469,14 @@ fn event_loop_with_corrupting_storage(
 
 fn add_large_inputs_and_plan(
     event_loop: &mut EventLoop,
-    hybrid: &crate::storage::HybridStorage,
+    hybrid: &cntryl_midge_storage::HybridStorage,
 ) -> MidgeResult<(Vec<String>, crate::compaction::CompactionPlan)> {
     let factory = FsSstFactoryIo::new(
-        crate::io::subdirectory(Arc::clone(&event_loop.state.fs), "sst"),
+        cntryl_midge_core::io::subdirectory(Arc::clone(&event_loop.state.fs), "sst"),
         64 * 1024,
     )
-    .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
-        crate::codec::CompressionAlgo::None,
+    .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::Fixed(
+        cntryl_midge_core::codec::CompressionAlgo::None,
     ));
     let value = vec![0x5a; LARGE_VALUE_BYTES];
     let first = add_l0_input(event_loop, &factory, 1, 0, LARGE_ROW_COUNT, &value)?;
@@ -465,7 +484,7 @@ fn add_large_inputs_and_plan(
     event_loop.state.sequence = 2;
     event_loop.state.applied_sequence = 2;
     let initial_names = manifest_names(&event_loop.state.manifest);
-    crate::metadata::ManifestPersistence::save_with_fs(
+    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
         &event_loop.state.fs,
         &event_loop.state.manifest,
     )
@@ -543,12 +562,13 @@ fn should_keep_compaction_manifest_unchanged_when_streaming_upload_corrupts_a_pa
     );
     let uploaded = backend.uploaded.lock();
     assert_eq!(uploaded.len(), 1);
-    assert!(uploaded[0].1 > 2 * crate::storage::FILE_UPLOAD_PART_BYTES);
+    assert!(uploaded[0].1 > 2 * cntryl_midge_storage::FILE_UPLOAD_PART_BYTES);
     drop(uploaded);
     assert_eq!(manifest_names(&event_loop.state.manifest), initial_names);
     assert!(event_loop.state.intent_log.is_empty());
-    let persisted = crate::metadata::ManifestPersistence::load(&event_loop.state.db_path)
-        .map_err(MidgeError::Internal)?;
+    let persisted =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(&event_loop.state.db_path)
+            .map_err(MidgeError::Internal)?;
     assert_eq!(manifest_names(&persisted), initial_names);
     assert!(event_loop
         .state
@@ -601,11 +621,12 @@ fn should_reject_completed_sst_mutated_before_streaming_upload() -> MidgeResult<
     assert_eq!(backend.corrupted_parts.load(Ordering::Acquire), 0);
     let uploaded = backend.uploaded.lock();
     assert_eq!(uploaded.len(), 1);
-    assert!(uploaded[0].1 > 2 * crate::storage::FILE_UPLOAD_PART_BYTES);
+    assert!(uploaded[0].1 > 2 * cntryl_midge_storage::FILE_UPLOAD_PART_BYTES);
     drop(uploaded);
     assert_eq!(manifest_names(&event_loop.state.manifest), initial_names);
-    let persisted = crate::metadata::ManifestPersistence::load(&event_loop.state.db_path)
-        .map_err(MidgeError::Internal)?;
+    let persisted =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(&event_loop.state.db_path)
+            .map_err(MidgeError::Internal)?;
     assert_eq!(manifest_names(&persisted), initial_names);
     assert!(event_loop.state.intent_log.is_empty());
     Ok(())

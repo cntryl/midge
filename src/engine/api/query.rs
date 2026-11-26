@@ -3,8 +3,8 @@
 //! Provides a fluent API for specifying range scans with optional filters.
 
 use super::iterator::Direction;
-use crate::sst::cache::CacheFill;
 use bytes::Bytes;
+use cntryl_midge_table::sst::cache::CacheFill;
 
 /// Lightweight scan query builder for range operations.
 #[derive(Debug, Clone)]

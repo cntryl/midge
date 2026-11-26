@@ -858,6 +858,4 @@ fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
     )
 }
 
-#[path = "support/sqrzl.rs"]
-mod sqrzl;
-use sqrzl::*;
+use cntryl_midge_storage::test_support::sqrzl::{self, *};

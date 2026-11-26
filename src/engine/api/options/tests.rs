@@ -305,18 +305,18 @@ fn should_create_gcs_configs_with_matching_api_styles() {
 #[test]
 fn should_resolve_three_cloud_storage_locations() {
     // Arrange
-    let wal = crate::config::CloudStorageLocation::new(
+    let wal = cntryl_midge_storage::config::CloudStorageLocation::new(
         CloudProviderConfig::aws_s3("wal-bucket", "us-east-1"),
         "database-a",
     );
-    let sst = crate::config::CloudStorageLocation::new(
+    let sst = cntryl_midge_storage::config::CloudStorageLocation::new(
         CloudProviderConfig::aws_s3("sst-bucket", "us-east-1"),
         "database-a",
     );
     let control = CloudProviderConfig::aws_s3("control-bucket", "us-east-1");
-    let topology = crate::config::CloudStorageTopology::new(wal.clone())
+    let topology = cntryl_midge_storage::config::CloudStorageTopology::new(wal.clone())
         .with_sst(sst.clone())
-        .with_control(crate::config::CloudStorageLocation::new(
+        .with_control(cntryl_midge_storage::config::CloudStorageLocation::new(
             control.clone(),
             "database-a",
         ));
@@ -339,7 +339,7 @@ fn should_resolve_three_cloud_storage_locations() {
 #[test]
 fn should_resolve_shared_cloud_topology() {
     // Arrange
-    let shared = crate::config::CloudStorageLocation::new(
+    let shared = cntryl_midge_storage::config::CloudStorageLocation::new(
         CloudProviderConfig::aws_s3("shared-bucket", "us-east-1"),
         "database-a",
     );
@@ -360,11 +360,11 @@ fn should_resolve_shared_cloud_topology() {
 #[test]
 fn should_resolve_two_location_cloud_topology() {
     // Arrange
-    let shared = crate::config::CloudStorageLocation::new(
+    let shared = cntryl_midge_storage::config::CloudStorageLocation::new(
         CloudProviderConfig::aws_s3("shared-bucket", "us-east-1"),
         "database-a",
     );
-    let control = crate::config::CloudStorageLocation::new(
+    let control = cntryl_midge_storage::config::CloudStorageLocation::new(
         CloudProviderConfig::aws_s3("control-bucket", "us-east-1"),
         "database-a",
     );
@@ -372,7 +372,8 @@ fn should_resolve_two_location_cloud_topology() {
     // Act
     let two_location_options = OpenOptions::cloud_multi(
         "/tmp/midge-two-location-options",
-        crate::config::CloudStorageTopology::new(shared.clone()).with_control(control.clone()),
+        cntryl_midge_storage::config::CloudStorageTopology::new(shared.clone())
+            .with_control(control.clone()),
     )
     .build()
     .expect("build two-location cloud options");
@@ -448,9 +449,10 @@ fn should_parse_azure_account_from_connection_string_config() {
 #[test]
 fn should_reject_connection_string_credential_override_without_account() {
     // Arrange
-    let provider: CloudProviderConfig = crate::config::AzureBlobConfig::new("", "container")
-        .with_credentials(AzureCredentialSource::connection_string("AccountKey=key"))
-        .into();
+    let provider: CloudProviderConfig =
+        cntryl_midge_storage::config::AzureBlobConfig::new("", "container")
+            .with_credentials(AzureCredentialSource::connection_string("AccountKey=key"))
+            .into();
 
     let result = provider.with_azure_credentials(AzureCredentialSource::shared_key("key"));
 
@@ -983,7 +985,7 @@ fn should_reject_cloud_lease_ttl_too_short_to_ever_renew() {
     let ttl = Duration::from_secs(12);
 
     // Act
-    let location = crate::config::CloudStorageLocation::new(
+    let location = cntryl_midge_storage::config::CloudStorageLocation::new(
         CloudProviderConfig::aws_s3("ttl-bucket", "us-east-1"),
         "database-a",
     );
@@ -1038,15 +1040,14 @@ fn should_reject_explicit_skew_tolerance_when_it_exceeds_ttl() {
 #[test]
 fn should_accept_dotted_native_aws_bucket_when_building_cloud_options() {
     // Arrange
-    let provider = crate::config::CloudProviderConfig::from(crate::config::AwsS3Config::new(
-        "database.example",
-        "us-east-1",
-    ));
+    let provider = cntryl_midge_storage::config::CloudProviderConfig::from(
+        cntryl_midge_storage::config::AwsS3Config::new("database.example", "us-east-1"),
+    );
 
     // Act
     let options = OpenOptions::cloud(
         "/tmp/midge-dotted-aws-validation",
-        crate::config::CloudStorageLocation::new(provider, "database"),
+        cntryl_midge_storage::config::CloudStorageLocation::new(provider, "database"),
     )
     .build();
 
@@ -1061,7 +1062,7 @@ fn should_accept_dotted_native_aws_bucket_when_building_cloud_options() {
 fn should_accept_accountless_sas_connection_string_when_building_cloud_options() {
     // Arrange
     let connection_string = "BlobEndpoint=https://account.blob.core.usgovcloudapi.net;SharedAccessSignature=sv=2024-11-04&sig=sensitive";
-    let provider = crate::config::CloudProviderConfig::azure_blob_connection_string(
+    let provider = cntryl_midge_storage::config::CloudProviderConfig::azure_blob_connection_string(
         "container",
         connection_string,
     );
@@ -1069,7 +1070,7 @@ fn should_accept_accountless_sas_connection_string_when_building_cloud_options()
     // Act
     let options = OpenOptions::cloud(
         "/tmp/midge-accountless-azure-sas-validation",
-        crate::config::CloudStorageLocation::new(provider, "database"),
+        cntryl_midge_storage::config::CloudStorageLocation::new(provider, "database"),
     )
     .build();
 

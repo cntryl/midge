@@ -1,5 +1,5 @@
 use super::EventLoop;
-use crate::metadata::accounting::Origin;
+use cntryl_midge_durability::metadata::accounting::Origin;
 
 /// SST names one journal append and mirror reserve at a time.
 const SST_NAME_RESERVATION_BLOCK: u64 = 16;
@@ -63,7 +63,10 @@ impl EventLoop {
 
     /// Flush and compaction share one per-family creation order. Data/WAL
     /// sequence numbers are independent from immutable filename generations.
-    pub(super) fn next_sst_name(&mut self, cf_id: u32) -> crate::common::MidgeResult<u64> {
+    pub(super) fn next_sst_name(
+        &mut self,
+        cf_id: u32,
+    ) -> cntryl_midge_core::common::MidgeResult<u64> {
         if let Some(next) = self.state.sst_names.cursor.get(&cf_id) {
             return Ok(*next);
         }
@@ -85,16 +88,16 @@ impl EventLoop {
                 .chain(self.state.manifest.retired_ssts.values())
                 .filter(|file| file.cf_id == cf_id)
             {
-                let generation = crate::cloud_layout::parse_file_name(&file.name)
+                let generation = cntryl_midge_core::cloud_layout::parse_file_name(&file.name)
                     .map(|(_, _, generation)| generation)
                     .or_else(|| {
-                        crate::cloud_layout::parse_compaction_file_name(&file.name)
+                        cntryl_midge_core::cloud_layout::parse_compaction_file_name(&file.name)
                             .map(|(_, _, generation, _)| generation)
                     })
                     .unwrap_or(0)
                     .max(file.sst_seq);
                 next = next.max(generation.checked_add(1).ok_or_else(|| {
-                    crate::common::MidgeError::ResourceLimit(
+                    cntryl_midge_core::common::MidgeError::ResourceLimit(
                         "SST filename allocation exhausted".into(),
                     )
                 })?);
@@ -108,14 +111,16 @@ impl EventLoop {
         &mut self,
         cf_id: u32,
         name: u64,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.next_sst_name(cf_id)? != name {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "SST name cursor changed before admission".into(),
             ));
         }
         let next = name.checked_add(1).ok_or_else(|| {
-            crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
+            cntryl_midge_core::common::MidgeError::ResourceLimit(
+                "SST filename allocation exhausted".into(),
+            )
         })?;
         self.state.sst_names.cursor.insert(cf_id, next);
         if self.actors.cloud_coordinator.hybrid_storage.is_none() {
@@ -128,7 +133,7 @@ impl EventLoop {
     pub(super) fn allocate_compaction_sst_name(
         &mut self,
         cf_id: u32,
-    ) -> crate::common::MidgeResult<u64> {
+    ) -> cntryl_midge_core::common::MidgeResult<u64> {
         let name = self.next_sst_name(cf_id)?;
         self.consume_sst_name(cf_id, name)?;
         Ok(name)
@@ -177,8 +182,8 @@ impl EventLoop {
 
     fn flush_name_prefetch_candidate(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
-    ) -> Option<(crate::types::ColumnFamilyId, u64, u64)> {
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> Option<(cntryl_midge_core::types::ColumnFamilyId, u64, u64)> {
         let cursor = self
             .state
             .sst_names
@@ -218,18 +223,18 @@ impl EventLoop {
     /// needed (#491).
     pub(super) fn reserve_sst_name_durably(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sst_seq: u64,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.reserve_sst_name_with_origin(cf_id, sst_seq, None, Origin::CompactionBeforeGc)
     }
 
     pub(super) fn reserve_sst_name_durably_within(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sst_seq: u64,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.reserve_sst_name_with_origin(
             cf_id,
             sst_seq,
@@ -240,22 +245,22 @@ impl EventLoop {
 
     pub(super) fn reserve_sst_name_durably_for(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sst_seq: u64,
         origin: Origin,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.reserve_sst_name_with_origin(cf_id, sst_seq, None, origin)
     }
 
     fn reserve_sst_name_with_origin(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sst_seq: u64,
-        deadline: Option<&crate::common::OperationDeadline>,
+        deadline: Option<&cntryl_midge_core::common::OperationDeadline>,
         origin: Origin,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.begin_sst_name_reservation(cf_id, sst_seq, deadline, origin)? {
-            return Err(crate::common::MidgeError::Busy(
+            return Err(cntryl_midge_core::common::MidgeError::Busy(
                 "SST filename reservation publication pending".into(),
             ));
         }
@@ -265,11 +270,11 @@ impl EventLoop {
     /// Retains a pending mirror before any output is admitted remotely.
     pub(super) fn begin_sst_name_reservation(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sst_seq: u64,
-        deadline: Option<&crate::common::OperationDeadline>,
+        deadline: Option<&cntryl_midge_core::common::OperationDeadline>,
         origin: Origin,
-    ) -> crate::common::MidgeResult<bool> {
+    ) -> cntryl_midge_core::common::MidgeResult<bool> {
         check_reservation_deadline(deadline)?;
         let reserved_through = self
             .state
@@ -298,12 +303,14 @@ impl EventLoop {
         let next_seq = sst_seq
             .checked_add(SST_NAME_RESERVATION_BLOCK)
             .ok_or_else(|| {
-                crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
+                cntryl_midge_core::common::MidgeError::ResourceLimit(
+                    "SST filename allocation exhausted".into(),
+                )
             })?
             .max(durable_next);
         let edit_id = self.state.manifest_store.append_for(
             origin,
-            &crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq },
+            &cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq },
         )?;
         self.state.manifest.set_next_sst_seq(cf_id, next_seq);
         self.state.manifest.note_applied_journal_edit(edit_id);
@@ -329,10 +336,10 @@ impl EventLoop {
 mod tests;
 
 fn check_reservation_deadline(
-    deadline: Option<&crate::common::OperationDeadline>,
-) -> crate::common::MidgeResult<()> {
-    if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
-        return Err(crate::common::MidgeError::Timeout(
+    deadline: Option<&cntryl_midge_core::common::OperationDeadline>,
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    if deadline.is_some_and(cntryl_midge_core::common::OperationDeadline::is_expired) {
+        return Err(cntryl_midge_core::common::MidgeError::Timeout(
             "SST filename reservation exceeded the caller deadline".into(),
         ));
     }

@@ -1,0 +1,57 @@
+[package]
+name = "cntryl-midge-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Foundational filesystem, codec, clock, deadline, and instrumentation types for Midge"
+license.workspace = true
+repository.workspace = true
+autobenches = false
+
+[lib]
+bench = false
+
+[features]
+default = []
+failpoints = ["dep:fail"]
+internal-testing = []
+telemetry = ["dep:tracing-subscriber", "dep:opentelemetry", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
+telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
+
+[dependencies]
+bytes.workspace = true
+crc32c.workspace = true
+fail = { workspace = true, optional = true }
+lz4_flex = "0.14"
+parking_lot.workspace = true
+serde.workspace = true
+thiserror = "2.0"
+tracing.workspace = true
+zstd = "0.14"
+tracing-subscriber = { workspace = true, optional = true }
+opentelemetry = { version = "0.33", optional = true }
+opentelemetry-otlp = { version = "0.33", optional = true, features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.33", optional = true, features = ["rt-tokio"] }
+tracing-opentelemetry = { version = "0.34", optional = true }
+
+[dev-dependencies]
+cntryl-stress.workspace = true
+tempfile.workspace = true
+xxhash-rust.workspace = true
+
+[[bench]]
+name = "tier1_hotpath_compression"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_compression"
+harness = false
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winapi.workspace = true
+
+[lints]
+workspace = true

@@ -1,9 +1,9 @@
 use super::{ensure_compaction_not_aborted, CompactionVersion};
-use crate::common::MidgeResult;
-use crate::sst::traits::{RawSstVersionCursor, SstFactory};
+use cntryl_midge_core::common::MidgeResult;
 #[cfg(test)]
-use crate::types::KeyState;
-use crate::types::{EntryType, RangeTombstone};
+use cntryl_midge_core::types::KeyState;
+use cntryl_midge_core::types::{EntryType, RangeTombstone};
+use cntryl_midge_table::sst::traits::{RawSstVersionCursor, SstFactory};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
@@ -81,13 +81,13 @@ struct EventMergeInput<'a> {
 
 struct RetainedEvent {
     event: CompactionEvent,
-    _reservation: crate::common::resource_budget::ResourceReservation,
+    _reservation: cntryl_midge_core::common::resource_budget::ResourceReservation,
 }
 
 impl RetainedEvent {
     fn new(
         event: CompactionEvent,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Self> {
         // The filesystem cursor keeps a yielded-version reservation until its
         // next advance. This deliberately overlaps the merge reservation: the
@@ -151,15 +151,15 @@ impl Ord for VersionHeapItem {
 pub(super) struct EventMergeIterator<'a> {
     inputs: Vec<EventMergeInput<'a>>,
     heap: BinaryHeap<VersionHeapItem>,
-    budget: crate::common::resource_budget::ResourceBudget,
-    _container_reservation: crate::common::resource_budget::ResourceReservation,
+    budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
+    _container_reservation: cntryl_midge_core::common::resource_budget::ResourceReservation,
     abort_check: Option<&'a dyn Fn() -> bool>,
 }
 
 impl<'a> EventMergeIterator<'a> {
     pub(super) fn new(
         mut cursors: Vec<CompactionEventCursor<'a>>,
-        budget: crate::common::resource_budget::ResourceBudget,
+        budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
         abort_check: Option<&'a dyn Fn() -> bool>,
     ) -> MidgeResult<Self> {
         let container_bytes = cursors.len().saturating_mul(
@@ -201,7 +201,9 @@ impl<'a> EventMergeIterator<'a> {
             return Ok(None);
         };
         let input = self.inputs.get_mut(head.input_idx).ok_or_else(|| {
-            crate::common::MidgeError::Internal("compaction merge input is missing".to_string())
+            cntryl_midge_core::common::MidgeError::Internal(
+                "compaction merge input is missing".to_string(),
+            )
         })?;
         ensure_compaction_not_aborted(self.abort_check)?;
         let current = if let Some(next) = input.cursor.next().transpose()? {
@@ -223,7 +225,7 @@ impl<'a> EventMergeIterator<'a> {
 
 #[cfg(test)]
 pub(super) fn collect_reader_input(
-    reader: &dyn crate::sst::traits::SstReaderExt,
+    reader: &dyn cntryl_midge_table::sst::traits::SstReaderExt,
 ) -> MidgeResult<SstCompactionInput> {
     let versions = reader
         .scan_range_raw_state(None, None)?
@@ -256,14 +258,14 @@ pub(super) fn collect_reader_input(
 struct SstEventCursor {
     versions: std::iter::Peekable<RawSstVersionCursor>,
     range_events: std::iter::Peekable<std::vec::IntoIter<CompactionEvent>>,
-    _range_event_reservation: crate::common::resource_budget::ResourceReservation,
+    _range_event_reservation: cntryl_midge_core::common::resource_budget::ResourceReservation,
 }
 
 impl SstEventCursor {
     fn open(
         sst_factory: &dyn SstFactory,
         filename: &str,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Self> {
         let reader = sst_factory.open_for_compaction(Path::new(filename), budget.clone())?;
         let tombstone_bytes = reader.range_tombstone_memory_usage();
@@ -326,16 +328,19 @@ struct ChainedSstEventCursor<'a> {
     sst_factory: &'a dyn SstFactory,
     files: std::slice::Iter<'a, String>,
     current: Option<SstEventCursor>,
-    budget: crate::common::resource_budget::ResourceBudget,
+    budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
     abort_check: Option<&'a dyn Fn() -> bool>,
-    last_key: Option<(Vec<u8>, crate::common::resource_budget::ResourceReservation)>,
+    last_key: Option<(
+        Vec<u8>,
+        cntryl_midge_core::common::resource_budget::ResourceReservation,
+    )>,
 }
 
 impl<'a> ChainedSstEventCursor<'a> {
     fn new(
         sst_factory: &'a dyn SstFactory,
         files: &'a [String],
-        budget: crate::common::resource_budget::ResourceBudget,
+        budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
         abort_check: Option<&'a dyn Fn() -> bool>,
     ) -> Self {
         Self {
@@ -362,7 +367,7 @@ impl Iterator for ChainedSstEventCursor<'_> {
                             .as_ref()
                             .is_some_and(|(last, _reservation)| last.as_slice() > event.key())
                         {
-                            return Err(crate::common::MidgeError::Corruption(
+                            return Err(cntryl_midge_core::common::MidgeError::Corruption(
                                 "chained compaction level is not key ordered".to_string(),
                             ));
                         }
@@ -377,7 +382,7 @@ impl Iterator for ChainedSstEventCursor<'_> {
             }
             let filename = self.files.next()?;
             if self.abort_check.is_some_and(|check| check()) {
-                return Some(Err(crate::common::MidgeError::Aborted(
+                return Some(Err(cntryl_midge_core::common::MidgeError::Aborted(
                     "compaction aborted while transitioning target files".to_string(),
                 )));
             }
@@ -391,7 +396,7 @@ impl Iterator for ChainedSstEventCursor<'_> {
 
 pub(crate) struct CompactionStreamInputs<'a> {
     pub(super) cursors: Vec<CompactionEventCursor<'a>>,
-    pub(super) _cursor_reservation: crate::common::resource_budget::ResourceReservation,
+    pub(super) _cursor_reservation: cntryl_midge_core::common::resource_budget::ResourceReservation,
 }
 
 #[cfg(test)]
@@ -409,7 +414,7 @@ pub(crate) fn collect_compaction_stream_inputs<'a>(
     target_files: &'a [String],
     source_level: u32,
     same_level_repair: bool,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     abort_check: Option<&'a dyn Fn() -> bool>,
 ) -> MidgeResult<CompactionStreamInputs<'a>> {
     let source_streams = if source_level == 0 || same_level_repair {
@@ -420,7 +425,7 @@ pub(crate) fn collect_compaction_stream_inputs<'a>(
     let cursor_count = source_streams.saturating_add(usize::from(!target_files.is_empty()));
     let cursor_bytes = cursor_count.saturating_mul(
         std::mem::size_of::<CompactionEventCursor<'a>>().saturating_add(std::mem::size_of::<
-            crate::common::resource_budget::ResourceReservation,
+            cntryl_midge_core::common::resource_budget::ResourceReservation,
         >()),
     );
     let cursor_reservation = budget.reserve(cursor_bytes, "raw cursor containers")?;
@@ -465,7 +470,7 @@ pub(crate) fn merge_repair_inputs_to_run(
     sst_factory: &dyn SstFactory,
     sources: &[String],
     path: &Path,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     byte_limit: usize,
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<()> {
@@ -506,13 +511,13 @@ pub(crate) fn merge_repair_inputs_to_run(
             .encoded_size_upper_bound()
             .is_none_or(|bytes| bytes > byte_limit)
         {
-            return Err(crate::common::MidgeError::ResourceLimit(
+            return Err(cntryl_midge_core::common::MidgeError::ResourceLimit(
                 "repair scratch run exceeds admitted local capacity".into(),
             ));
         }
     }
     if seen == 0 {
-        return Err(crate::common::MidgeError::Corruption(
+        return Err(cntryl_midge_core::common::MidgeError::Corruption(
             "overlap repair input has no versions or tombstones".into(),
         ));
     }

@@ -2,7 +2,8 @@
 
 use super::verification::VerificationBarrierGuard;
 use super::{Engine, OpenOptions, Storage};
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_storage::filesystem::is_publication_staging_file;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -112,13 +113,19 @@ impl Engine {
 
         let mut barrier =
             VerificationBarrierGuard::acquire_for_backup(&self.runtime_handle, timeout)?;
-        if !matches!(barrier.health(), crate::config::EngineHealth::Healthy) {
+        if !matches!(
+            barrier.health(),
+            cntryl_midge_core::types::EngineHealth::Healthy
+        ) {
             return Err(MidgeError::Fenced(
                 "backup capture barrier reports an unhealthy engine".to_string(),
             ));
         }
         let database_format_version =
-            crate::metadata::format::validate_format_marker(self.root.as_ref(), &source)?;
+            cntryl_midge_durability::metadata::format::validate_format_marker(
+                self.root.as_ref(),
+                &source,
+            )?;
         let pinned = self.pin_backup_source(&source, parent, timeout, database_format_version)?;
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
@@ -165,7 +172,7 @@ impl Engine {
         });
         let manifest = result?;
         sync_directory(staging)?;
-        crate::failpoints::fail_point!("midge::backup::before_backup_publish");
+        cntryl_midge_core::failpoints::fail_point!("midge::backup::before_backup_publish");
         paths::publish(staging, &destination)?;
         sync_directory(parent)?;
         Ok(manifest)
@@ -179,7 +186,8 @@ impl Engine {
         database_format_version: u32,
     ) -> MidgeResult<Vec<PinnedFile>> {
         if self.simulated_cloud_mode
-            && database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1
+            && database_format_version
+                == cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1
         {
             let lease = self.lease_state.lease.as_ref().ok_or_else(|| {
                 MidgeError::Fenced("CloudSim backup has no acquired primary lease".into())
@@ -225,7 +233,9 @@ impl Engine {
         }
         let artifact = fs::canonicalize(artifact.as_ref())?;
         let manifest = validate_backup(&artifact)?;
-        if manifest.database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+        if manifest.database_format_version
+            > cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1
+        {
             return Err(MidgeError::NotSupported(
                 "backup restore does not support this database format".into(),
             ));
@@ -273,10 +283,11 @@ impl Engine {
                 }
             }?;
             let _ = verification;
-            let restored_format = crate::metadata::format::validate_format_marker(
-                super::startup::existing_host_root(staging)?.as_ref(),
-                staging,
-            )?;
+            let restored_format =
+                cntryl_midge_durability::metadata::format::validate_format_marker(
+                    super::startup::existing_host_root(staging)?.as_ref(),
+                    staging,
+                )?;
             if restored_format != manifest.database_format_version {
                 return Err(MidgeError::Corruption(format!(
                     "backup inventory format {} does not match restored database format {}",
@@ -287,7 +298,7 @@ impl Engine {
         });
         restore_result?;
 
-        crate::failpoints::fail_point!("midge::backup::before_restore_publish");
+        cntryl_midge_core::failpoints::fail_point!("midge::backup::before_restore_publish");
         paths::publish(staging, &target)?;
         sync_directory(parent)?;
         Ok(manifest)
@@ -300,12 +311,16 @@ fn pin_files_for_format(
     scratch_dir: &Path,
     database_format_version: u32,
 ) -> MidgeResult<Vec<PinnedFile>> {
-    if database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+    if database_format_version
+        > cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1
+    {
         return Err(MidgeError::NotSupported(
             "backup capture does not support this database format".into(),
         ));
     }
-    if database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+    if database_format_version
+        == cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1
+    {
         pin_format_10_files(source, simulated_cloud, scratch_dir)
     } else {
         pin_durable_files(source, simulated_cloud, scratch_dir)
@@ -318,9 +333,11 @@ fn pin_format_10_files(
     scratch_dir: &Path,
 ) -> MidgeResult<Vec<PinnedFile>> {
     let fs_root = std::sync::Arc::new(
-        crate::io::RealFs::open_existing(root).map_err(crate::io::FsError::into_midge)?,
+        cntryl_midge_core::io::RealFs::open_existing(root)
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?,
     );
-    let authority = crate::metadata::local_authority::LocalMetadataAuthority::open(fs_root)?;
+    let authority =
+        cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::open(fs_root)?;
     let mut relative_paths = vec![PathBuf::from("FORMAT")];
     relative_paths.extend(
         authority
@@ -343,9 +360,9 @@ fn pin_format_10_files(
         })
         .collect::<MidgeResult<Vec<_>>>()?;
     paths.extend(ledger_wal_paths(root)?);
-    collect_files(&root.join("sst"), root, &mut paths)?;
+    collect_files(&root.join("sst"), false, &mut paths)?;
     if simulated_cloud {
-        collect_files(&root.join("cloud_store"), root, &mut paths)?;
+        collect_files(&root.join("cloud_store"), true, &mut paths)?;
     }
     pin_paths(root, paths, scratch_dir)
 }
@@ -358,49 +375,52 @@ fn pin_cloud_simulated_format_10_files(
     epoch: u64,
 ) -> MidgeResult<Vec<PinnedFile>> {
     let fs_root = std::sync::Arc::new(
-        crate::io::RealFs::open_existing(root).map_err(crate::io::FsError::into_midge)?,
+        cntryl_midge_core::io::RealFs::open_existing(root)
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?,
     );
     let location =
-        crate::storage::simulated::SimulatedCloud::locate(fs_root.as_ref(), None, timeout)?;
+        cntryl_midge_storage::simulated::SimulatedCloud::locate(fs_root.as_ref(), None, timeout)?;
     let store = location.open_existing()?.ok_or_else(|| {
         MidgeError::Corruption("simulated cloud FORMAT 10 object store is missing".into())
     })?;
-    let cloud = crate::storage::cloud::CloudStorage::from_object_store(store, timeout);
-    let deadline = crate::common::OperationDeadline::from_budget(timeout);
+    let cloud = cntryl_midge_storage::cloud::CloudStorage::from_object_store(store, timeout);
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(timeout);
     let owner = Some((holder_id, epoch));
-    let selected = crate::lease::cloud::read_active_format_10_backup_generation_for_owner(
-        &cloud, &deadline, owner,
-    )
-    .map_err(|error| {
-        MidgeError::Corruption(format!(
-            "cannot prove active CloudSim FORMAT 10 selection: {error}"
-        ))
-    })?;
+    let selected =
+        cntryl_midge_durability::lease::cloud::read_active_format_10_backup_generation_for_owner(
+            &cloud, &deadline, owner,
+        )
+        .map_err(|error| {
+            MidgeError::Corruption(format!(
+                "cannot prove active CloudSim FORMAT 10 selection: {error}"
+            ))
+        })?;
     let bodies = crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
         &cloud, &selected, &deadline,
     )?;
     crate::runtime::hybrid_persistence::decode_generation_manifest(&selected, &bodies, &deadline)?;
-    crate::runtime::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
 
     let mut pinned = bodies
         .iter()
         .map(|(relative, body)| pin_bytes(relative, body, scratch_dir))
         .collect::<MidgeResult<Vec<_>>>()?;
     let mut paths = ledger_wal_paths(root)?;
-    collect_files(&root.join("sst"), root, &mut paths)?;
-    collect_files(&root.join("cloud_store"), root, &mut paths)?;
+    collect_files(&root.join("sst"), false, &mut paths)?;
+    collect_files(&root.join("cloud_store"), true, &mut paths)?;
     pinned.extend(pin_paths(root, paths, scratch_dir)?);
 
     // Recheck after pinning the provider pointer file so the capture cannot
     // combine an earlier selected closure with a later pointer.
-    let rechecked = crate::lease::cloud::read_active_format_10_backup_generation_for_owner(
-        &cloud, &deadline, owner,
-    )
-    .map_err(|error| {
-        MidgeError::Corruption(format!(
-            "CloudSim FORMAT 10 selection changed during backup: {error}"
-        ))
-    })?;
+    let rechecked =
+        cntryl_midge_durability::lease::cloud::read_active_format_10_backup_generation_for_owner(
+            &cloud, &deadline, owner,
+        )
+        .map_err(|error| {
+            MidgeError::Corruption(format!(
+                "CloudSim FORMAT 10 selection changed during backup: {error}"
+            ))
+        })?;
     if rechecked != selected {
         return Err(MidgeError::Corruption(
             "CloudSim selected metadata pointer changed during backup capture".into(),
@@ -449,9 +469,9 @@ fn pin_durable_files(
         }
     }
     paths.extend(ledger_wal_paths(root)?);
-    collect_files(&root.join("sst"), root, &mut paths)?;
+    collect_files(&root.join("sst"), false, &mut paths)?;
     if simulated_cloud {
-        collect_files(&root.join("cloud_store"), root, &mut paths)?;
+        collect_files(&root.join("cloud_store"), true, &mut paths)?;
     }
     pin_paths(root, paths, scratch_dir)
 }
@@ -481,9 +501,11 @@ fn pin_paths(
             let mut size = metadata.len();
             if relative
                 == Path::new("cloud_store")
-                    .join(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+                    .join(cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
             {
-                if metadata.len() > crate::lease::cloud::MAX_LEASE_DOCUMENT_BYTES as u64 {
+                if metadata.len()
+                    > cntryl_midge_durability::lease::cloud::MAX_LEASE_DOCUMENT_BYTES as u64
+                {
                     return Err(MidgeError::Corruption(
                         "cloud lease document exceeds its backup size limit".to_string(),
                     ));
@@ -500,7 +522,8 @@ fn pin_paths(
                         "cloud lease document changed during backup capture".to_string(),
                     ));
                 }
-                let expired = crate::lease::cloud::expired_backup_lease_document(&content)?;
+                let expired =
+                    cntryl_midge_durability::lease::cloud::expired_backup_lease_document(&content)?;
                 let mut frozen = tempfile::tempfile_in(scratch_dir)?;
                 frozen.write_all(&expired)?;
                 frozen.sync_all()?;
@@ -535,18 +558,23 @@ fn pin_paths(
 /// Orphans, set-aside directories and retained salvage copies are not
 /// history. A ledger that cannot be read fails the backup closed.
 fn ledger_wal_paths(root: &Path) -> MidgeResult<Vec<PathBuf>> {
-    let wal_dir = root.join(crate::wal::WAL_DIR);
+    let wal_dir = root.join(cntryl_midge_durability::wal::WAL_DIR);
     if !wal_dir.exists() {
         return Ok(Vec::new());
     }
-    let wal: std::sync::Arc<dyn crate::io::ReadFs> = std::sync::Arc::new(
-        crate::io::RealFs::open_existing(&wal_dir).map_err(crate::io::FsError::into_midge)?,
+    let wal: std::sync::Arc<dyn cntryl_midge_core::io::ReadFs> = std::sync::Arc::new(
+        cntryl_midge_core::io::RealFs::open_existing(&wal_dir)
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?,
     );
     let Some(ledger) = crate::runtime::wal_history::WalHistory::read(&wal)? else {
         return Ok(Vec::new());
     };
-    let names = std::iter::once(crate::wal::ledger_store::LEDGER_FILE.to_string())
-        .chain(ledger.members().map(crate::wal::segment_file_name));
+    let names =
+        std::iter::once(cntryl_midge_durability::wal::ledger_store::LEDGER_FILE.to_string()).chain(
+            ledger
+                .members()
+                .map(cntryl_midge_durability::wal::segment_file_name),
+        );
     let mut paths = Vec::new();
     for name in names {
         let path = wal_dir.join(name);
@@ -561,8 +589,10 @@ fn ledger_wal_paths(root: &Path) -> MidgeResult<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn collect_files(path: &Path, root: &Path, files: &mut Vec<PathBuf>) -> MidgeResult<()> {
-    if !path.exists() {
+fn collect_files(path: &Path, simulated_cloud: bool, files: &mut Vec<PathBuf>) -> MidgeResult<()> {
+    if (simulated_cloud && path.file_name().is_some_and(is_publication_staging_file))
+        || !path.exists()
+    {
         return Ok(());
     }
     let metadata = fs::symlink_metadata(path)?;
@@ -584,9 +614,8 @@ fn collect_files(path: &Path, root: &Path, files: &mut Vec<PathBuf>) -> MidgeRes
     }
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        collect_files(&entry.path(), root, files)?;
+        collect_files(&entry.path(), simulated_cloud, files)?;
     }
-    let _ = root;
     Ok(())
 }
 
@@ -627,7 +656,7 @@ fn materialize_backup(
             remaining -= read as u64;
         }
         output.sync_all()?;
-        crate::failpoints::fail_point!("midge::backup::after_object_copy", |_| Err(
+        cntryl_midge_core::failpoints::fail_point!("midge::backup::after_object_copy", |_| Err(
             MidgeError::Internal("failpoint: backup interrupted during object copy".to_string())
         ));
         objects.push(BackupObject {
@@ -680,11 +709,13 @@ fn validate_backup(artifact: &Path) -> MidgeResult<BackupManifest> {
             manifest.backup_version
         )));
     }
-    if manifest.database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+    if manifest.database_format_version
+        > cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1
+    {
         return Err(MidgeError::CompatibilityError(format!(
             "backup database format {} is newer than supported format {}",
             manifest.database_format_version,
-            crate::metadata::format::CURRENT_FORMAT_VERSION + 1
+            cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1
         )));
     }
     uuid::Uuid::parse_str(&manifest.backup_id).map_err(|_| {
@@ -766,9 +797,12 @@ fn copy_verified_objects(
             )));
         }
         output.sync_all()?;
-        crate::failpoints::fail_point!("midge::backup::after_restore_object_copy", |_| Err(
-            MidgeError::Internal("failpoint: restore interrupted during object copy".to_string())
-        ));
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::backup::after_restore_object_copy",
+            |_| Err(MidgeError::Internal(
+                "failpoint: restore interrupted during object copy".to_string()
+            ))
+        );
     }
     sync_tree_directories(staging)?;
     Ok(())
@@ -882,7 +916,7 @@ fn sync_directory(path: &Path) -> MidgeResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lease::PrimaryLease;
+    use cntryl_midge_durability::lease::PrimaryLease;
     use std::sync::Arc;
 
     #[test]
@@ -909,7 +943,7 @@ mod tests {
         let pinned = pin_durable_files(&source, false, directory.path()).expect("pin WAL");
 
         // Assert
-        let segment = Path::new("wal").join(crate::wal::segment_file_name(1));
+        let segment = Path::new("wal").join(cntryl_midge_durability::wal::segment_file_name(1));
         assert!(pinned.iter().any(|file| file.relative == segment));
     }
 
@@ -919,25 +953,29 @@ mod tests {
         let directory = tempfile::tempdir().expect("test directory");
         let source = directory.path().join("source");
         fs::create_dir(&source).expect("create source");
-        let fs_root: std::sync::Arc<dyn crate::io::Fs> =
-            std::sync::Arc::new(crate::io::RealFs::new(&source).expect("create source filesystem"));
-        let manifest = crate::metadata::codec::encode(
-            crate::metadata::codec::MANIFEST,
-            &crate::metadata::Manifest::default(),
+        let fs_root: std::sync::Arc<dyn cntryl_midge_core::io::Fs> = std::sync::Arc::new(
+            cntryl_midge_core::io::RealFs::new(&source).expect("create source filesystem"),
+        );
+        let manifest = cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &cntryl_midge_durability::metadata::Manifest::default(),
         )
         .expect("encode empty manifest");
-        let intents = serde_json::to_vec(&Vec::<crate::runtime::IntentLogEntry>::new())
-            .expect("encode empty intents");
-        let mut authority = crate::metadata::local_authority::LocalMetadataAuthority::initialize(
-            std::sync::Arc::clone(&fs_root),
-            "backup-generation",
-            &manifest,
-            &intents,
-        )
-        .expect("initialize FORMAT 10 metadata");
+        let intents = serde_json::to_vec(&Vec::<
+            cntryl_midge_durability::metadata::intent::IntentLogEntry,
+        >::new())
+        .expect("encode empty intents");
+        let mut authority =
+            cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::initialize(
+                std::sync::Arc::clone(&fs_root),
+                "backup-generation",
+                &manifest,
+                &intents,
+            )
+            .expect("initialize FORMAT 10 metadata");
         fs::write(source.join("FORMAT"), b"midge-format-version=10\n")
             .expect("write FORMAT marker");
-        let first = crate::metadata::ManifestEdit::CreateColumnFamily {
+        let first = cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily {
             id: 2,
             name: "captured".into(),
             created_at: 1,
@@ -945,7 +983,7 @@ mod tests {
         let first_payload = serde_json::to_vec(&first).expect("encode first edit");
         authority
             .append(
-                crate::metadata::local_authority::Stream::Manifest,
+                cntryl_midge_durability::metadata::local_authority::Stream::Manifest,
                 1,
                 1,
                 &first_payload,
@@ -963,12 +1001,12 @@ mod tests {
             uuid::Uuid::new_v4().to_string(),
             chrono::Utc::now().to_rfc3339(),
             1,
-            crate::metadata::format::CURRENT_FORMAT_VERSION + 1,
+            cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1,
             BackupStorageKind::Local,
         )
         .expect("materialize selected FORMAT 10 closure");
         validate_backup(&artifact).expect("validate captured artifact");
-        let second = crate::metadata::ManifestEdit::CreateColumnFamily {
+        let second = cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily {
             id: 3,
             name: "later".into(),
             created_at: 2,
@@ -976,7 +1014,7 @@ mod tests {
         let second_payload = serde_json::to_vec(&second).expect("encode second edit");
         authority
             .append(
-                crate::metadata::local_authority::Stream::Manifest,
+                cntryl_midge_durability::metadata::local_authority::Stream::Manifest,
                 2,
                 2,
                 &second_payload,
@@ -987,14 +1025,16 @@ mod tests {
         copy_verified_objects(&artifact, &restored, &captured).expect("restore captured objects");
         crate::engine::StorageVerifier::verify_path(&restored)
             .expect("verify restored FORMAT 10 database");
-        let restored_fs: std::sync::Arc<dyn crate::io::Fs> = std::sync::Arc::new(
-            crate::io::RealFs::open_existing(&restored).expect("open restored filesystem"),
+        let restored_fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> = std::sync::Arc::new(
+            cntryl_midge_core::io::RealFs::open_existing(&restored)
+                .expect("open restored filesystem"),
         );
-        let recovered = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
-            &restored_fs,
-            crate::config::RecoveryPolicy::Strict,
-        )
-        .expect("load restored selected manifest");
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+                &restored_fs,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
+            )
+            .expect("load restored selected manifest");
 
         // Assert
         assert!(recovered
@@ -1016,18 +1056,22 @@ mod tests {
         let wal = source.join("wal");
         fs::create_dir_all(&wal).expect("create WAL directory");
         crate::runtime::wal_history::fixture::record_at(&source, &[1], 2).expect("record ledger");
-        fs::write(wal.join(crate::wal::segment_file_name(9)), b"orphan").expect("seed orphan");
+        fs::write(
+            wal.join(cntryl_midge_durability::wal::segment_file_name(9)),
+            b"orphan",
+        )
+        .expect("seed orphan");
         fs::create_dir(wal.join("salvaged-1")).expect("create salvage directory");
         fs::write(
             wal.join("salvaged-1")
-                .join(crate::wal::segment_file_name(1)),
+                .join(cntryl_midge_durability::wal::segment_file_name(1)),
             b"set aside",
         )
         .expect("seed set-aside segment");
         fs::write(
             wal.join(format!(
                 "{}.salvage-retained",
-                crate::wal::segment_file_name(2)
+                cntryl_midge_durability::wal::segment_file_name(2)
             )),
             b"retained",
         )
@@ -1041,9 +1085,9 @@ mod tests {
         assert_eq!(
             captured,
             [
-                crate::wal::ledger_store::LEDGER_FILE.to_string(),
-                crate::wal::segment_file_name(1),
-                crate::wal::segment_file_name(2),
+                cntryl_midge_durability::wal::ledger_store::LEDGER_FILE.to_string(),
+                cntryl_midge_durability::wal::segment_file_name(1),
+                cntryl_midge_durability::wal::segment_file_name(2),
             ]
             .map(|name| Path::new("wal").join(name))
             .into_iter()
@@ -1089,7 +1133,7 @@ mod tests {
             uuid::Uuid::new_v4().to_string(),
             chrono::Utc::now().to_rfc3339(),
             0,
-            crate::metadata::format::CURRENT_FORMAT_VERSION,
+            cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION,
             BackupStorageKind::Local,
         );
 
@@ -1102,15 +1146,15 @@ mod tests {
     }
 
     struct CloudSimMigrationOwner {
-        cloud: Arc<crate::storage::cloud::CloudStorage>,
-        lease: Arc<crate::lease::CloudStorageLease>,
-        _guard: crate::lease::LeaseGuard,
-        store: Arc<dyn crate::lease::LeaderStore>,
+        cloud: Arc<cntryl_midge_storage::cloud::CloudStorage>,
+        lease: Arc<cntryl_midge_durability::lease::CloudStorageLease>,
+        _guard: cntryl_midge_durability::lease::LeaseGuard,
+        store: Arc<dyn cntryl_midge_durability::lease::LeaderStore>,
         holder: String,
         epoch: u64,
-        source: crate::lease::CloudMetadataGeneration,
-        deadline: crate::common::OperationDeadline,
-        local_root: Arc<dyn crate::io::Fs>,
+        source: cntryl_midge_durability::lease::CloudMetadataGeneration,
+        deadline: cntryl_midge_core::common::OperationDeadline,
+        local_root: Arc<dyn cntryl_midge_core::io::Fs>,
     }
 
     fn create_cloudsim_source(
@@ -1158,7 +1202,7 @@ mod tests {
     fn expire_released_test_lease(source: &Path) -> MidgeResult<()> {
         let lease_path = source
             .join("cloud_store")
-            .join(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY);
+            .join(cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY);
         let mut lease_wire = fs::read_to_string(&lease_path)?;
         if let Some(line) = lease_wire
             .lines()
@@ -1174,26 +1218,30 @@ mod tests {
         source: &Path,
         timeout: Duration,
     ) -> MidgeResult<CloudSimMigrationOwner> {
-        use crate::lease::PrimaryLease;
-        use crate::storage::cloud::CloudStorage;
+        use cntryl_midge_durability::lease::PrimaryLease;
+        use cntryl_midge_storage::cloud::CloudStorage;
 
         // Arrange: take over the v4 CloudSim lease and select a proper local
         // candidate closure before publishing its exact remote counterpart.
         let cloud_root = source.join("cloud_store");
-        let object_store = Arc::new(crate::storage::filesystem::FileSystem::new(&cloud_root)?);
-        let object_store: Arc<dyn crate::storage::inventory::ObjectStore> = object_store;
+        let object_store = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
+            &cloud_root,
+        )?);
+        let object_store: Arc<dyn cntryl_midge_storage::inventory::ObjectStore> = object_store;
         let cloud = Arc::new(CloudStorage::from_object_store(
             Arc::clone(&object_store),
             timeout,
         ));
-        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
-                bucket: "backup-test".into(),
-                prefix: "format10".into(),
-            },
-            source.join("lease-cache"),
-            Arc::clone(&cloud),
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "backup-test".into(),
+                    prefix: "format10".into(),
+                },
+                source.join("lease-cache"),
+                Arc::clone(&cloud),
+            ),
+        );
         let lease_guard = Arc::clone(&lease)
             .try_acquire()
             .unwrap_or_else(|error| panic!("direct CloudSim lease acquisition: {error}"));
@@ -1201,18 +1249,19 @@ mod tests {
         let holder = lease.holder_id();
         let epoch = lease.epoch();
         let source_generation = match store.read_committed_metadata(timeout)? {
-            crate::lease::CloudMetadataHead::Committed(generation) => generation,
+            cntryl_midge_durability::lease::CloudMetadataHead::Committed(generation) => generation,
             other => panic!("expected selected v9 generation, got {other:?}"),
         };
-        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(timeout);
         let _source_bodies =
             crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
                 &cloud,
                 &source_generation,
                 &deadline,
             )?;
-        let local_root: Arc<dyn crate::io::Fs> = Arc::new(
-            crate::io::RealFs::open_existing(source).map_err(crate::io::FsError::into_midge)?,
+        let local_root: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(
+            cntryl_midge_core::io::RealFs::open_existing(source)
+                .map_err(cntryl_midge_core::io::FsError::into_midge)?,
         );
         Ok(CloudSimMigrationOwner {
             cloud,
@@ -1229,28 +1278,34 @@ mod tests {
 
     fn stage_cloudsim_v10_candidate(
         owner: &CloudSimMigrationOwner,
-    ) -> MidgeResult<crate::lease::CloudMetadataGeneration> {
-        use crate::storage::cloud::BlockingCloud;
+    ) -> MidgeResult<cntryl_midge_durability::lease::CloudMetadataGeneration> {
+        use cntryl_midge_storage::cloud::BlockingCloud;
         let local_root = &owner.local_root;
-        let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
-            local_root,
-            crate::config::RecoveryPolicy::Strict,
-        )?;
+        let manifest =
+            cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+                local_root,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
+            )?;
         let checkpoint_id = manifest.edit_checkpoint_id;
-        let manifest = crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &manifest)
-            .map_err(|error| MidgeError::Internal(error.to_string()))?;
-        let raw_intents = crate::io::read_all(
-            local_root.as_ref(),
-            &crate::io::FsPath::new(crate::metadata::files::INTENT_LOG),
+        let manifest = cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &manifest,
         )
-        .map_err(crate::io::FsError::into_midge)?;
-        let intent_state = crate::runtime::IntentPersistence::decode_for_upgrade(
+        .map_err(|error| MidgeError::Internal(error.to_string()))?;
+        let raw_intents = cntryl_midge_core::io::read_all(
+            local_root.as_ref(),
+            &cntryl_midge_core::io::FsPath::new(
+                cntryl_midge_durability::metadata::files::INTENT_LOG,
+            ),
+        )
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?;
+        let intent_state = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::decode_for_upgrade(
             bytes::Bytes::copy_from_slice(&raw_intents),
-            &crate::common::DeadlineScope::new(owner.deadline),
+            &cntryl_midge_core::common::DeadlineScope::new(owner.deadline),
         )?;
         let intent_bytes = serde_json::to_vec(&intent_state.entries)
             .map_err(|error| MidgeError::Internal(error.to_string()))?;
-        crate::metadata::local_authority::LocalMetadataAuthority::stage_upgrade_candidate(
+        cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::stage_upgrade_candidate(
             Arc::clone(local_root),
             [9; 32],
             &manifest,
@@ -1259,51 +1314,53 @@ mod tests {
             intent_state.sequence,
             intent_state.checksum,
         )?;
-        crate::io::staging::stage_bytes_typed(
+        cntryl_midge_core::io::staging::stage_bytes_typed(
             local_root,
-            &crate::io::FsPath::new("FORMAT.tmp"),
-            &crate::io::FsPath::new(crate::metadata::files::FORMAT),
+            &cntryl_midge_core::io::FsPath::new("FORMAT.tmp"),
+            &cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::FORMAT),
             b"midge-format-version=10\n",
             || Ok(()),
         )?;
 
         let mut candidate_bodies = std::collections::BTreeMap::from([(
-            crate::metadata::files::FORMAT.to_string(),
+            cntryl_midge_durability::metadata::files::FORMAT.to_string(),
             b"midge-format-version=10\n".to_vec(),
         )]);
         for path in
-            crate::metadata::local_authority::LocalMetadataAuthority::selected_relative_paths_from(
+            cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::selected_relative_paths_from(
                 local_root.as_ref(),
             )?
         {
-            let bytes = crate::io::read_all(local_root.as_ref(), &crate::io::FsPath::new(&path))
-                .map_err(crate::io::FsError::into_midge)?;
+            let bytes = cntryl_midge_core::io::read_all(local_root.as_ref(), &cntryl_midge_core::io::FsPath::new(&path))
+                .map_err(cntryl_midge_core::io::FsError::into_midge)?;
             candidate_bodies.insert(path, bytes.to_vec());
         }
         let manifest_horizon =
-            crate::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(
+            cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(
                 &candidate_bodies,
             )?;
         let generation_uuid = uuid::Uuid::new_v4().to_string();
-        let candidate_generation = crate::lease::CloudMetadataGeneration {
-            id: crate::lease::SharedGenerationId::new(owner.source.id.get() + 1)
+        let candidate_generation = cntryl_midge_durability::lease::CloudMetadataGeneration {
+            id: cntryl_midge_durability::lease::SharedGenerationId::new(owner.source.id.get() + 1)
                 .expect("next shared generation ordinal"),
             manifest_horizon,
             objects: candidate_bodies
                 .iter()
-                .map(|(file_name, body)| crate::lease::CloudMetadataObject {
-                    file_name: file_name.clone(),
-                    object_key: format!("metadata/generations/{generation_uuid}/{file_name}"),
-                    len: body.len() as u64,
-                    crc32c: crc32c::crc32c(body),
-                })
+                .map(
+                    |(file_name, body)| cntryl_midge_durability::lease::CloudMetadataObject {
+                        file_name: file_name.clone(),
+                        object_key: format!("metadata/generations/{generation_uuid}/{file_name}"),
+                        len: body.len() as u64,
+                        crc32c: crc32c::crc32c(body),
+                    },
+                )
                 .collect(),
         };
         for object in &candidate_generation.objects {
             BlockingCloud::new(&owner.cloud, &owner.deadline).put_with_precondition(
                 &object.object_key,
                 candidate_bodies[&object.file_name].clone(),
-                &crate::storage::StoragePrecondition::IfAbsent,
+                &cntryl_midge_storage::StoragePrecondition::IfAbsent,
             )?;
         }
         Ok(candidate_generation)
@@ -1311,19 +1368,25 @@ mod tests {
 
     fn activate_cloudsim_v10_candidate(
         owner: &CloudSimMigrationOwner,
-        candidate: &crate::lease::CloudMetadataGeneration,
+        candidate: &cntryl_midge_durability::lease::CloudMetadataGeneration,
         timeout: Duration,
     ) -> MidgeResult<()> {
-        use crate::lease::{CloudFormatMigrationGate, CloudFormatMigrationPending};
+        use cntryl_midge_durability::lease::{
+            CloudFormatMigrationGate, CloudFormatMigrationPending,
+        };
         let migration_id = "81900000-0000-4000-8000-000000000003";
         let pending = CloudFormatMigrationPending {
             migration_id: migration_id.to_string(),
             target_format: 10,
-            source: crate::lease::CloudMetadataGenerationIdentity::from_generation(&owner.source),
-            candidate: crate::lease::CloudFormatMigrationCandidate {
-                generation: crate::lease::CloudMetadataGenerationIdentity::from_generation(
-                    candidate,
+            source:
+                cntryl_midge_durability::lease::CloudMetadataGenerationIdentity::from_generation(
+                    &owner.source,
                 ),
+            candidate: cntryl_midge_durability::lease::CloudFormatMigrationCandidate {
+                generation:
+                    cntryl_midge_durability::lease::CloudMetadataGenerationIdentity::from_generation(
+                        candidate,
+                    ),
                 descriptor_key: CloudFormatMigrationPending::candidate_descriptor_key(migration_id),
             },
             source_sha256: "a".repeat(64),
@@ -1407,8 +1470,9 @@ mod tests {
         let lease_path = artifact.join("objects/cloud_store/midge_primary_lease.json");
         let lease_bytes = fs::read(&lease_path)?;
         assert!(lease_bytes.starts_with(b"lease_version: 5\n"));
-        let backup_lease = crate::lease::cloud::expired_backup_lease_document(&lease_bytes)
-            .expect("active gate is retained in backup");
+        let backup_lease =
+            cntryl_midge_durability::lease::cloud::expired_backup_lease_document(&lease_bytes)
+                .expect("active gate is retained in backup");
         assert!(String::from_utf8_lossy(&backup_lease).contains("\"phase\":\"active\""));
         let restored_default = restored.get_column_family("default").expect("restored CF");
         let read = restored.begin_tx(restored_default.id(), TransactionMode::ReadOnly)?;

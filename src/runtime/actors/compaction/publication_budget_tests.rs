@@ -1,9 +1,9 @@
 //! Actual early staging and missing-proof fallback share the accepted origin.
 
 use super::*;
-use crate::common::resource_budget::ResourceBudget;
-use crate::storage::cloud::CloudReadCapability;
-use crate::storage::cloud::{
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_storage::cloud::CloudReadCapability;
+use cntryl_midge_storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ impl HeldHeadBackend {
     }
 }
 
-impl crate::storage::cloud::CloudReadCapability for HeldHeadBackend {
+impl cntryl_midge_storage::cloud::CloudReadCapability for HeldHeadBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
     }
@@ -44,7 +44,7 @@ impl crate::storage::cloud::CloudReadCapability for HeldHeadBackend {
         key: &str,
         start: u64,
         end: u64,
-        expected: crate::storage::StorageObjectMetadata,
+        expected: cntryl_midge_storage::StorageObjectMetadata,
         timeout: Duration,
         callback: CloudCallback,
     ) {
@@ -53,7 +53,7 @@ impl crate::storage::cloud::CloudReadCapability for HeldHeadBackend {
     }
 }
 
-impl crate::storage::cloud::CloudWriteCapability for HeldHeadBackend {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for HeldHeadBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -65,19 +65,19 @@ impl crate::storage::cloud::CloudWriteCapability for HeldHeadBackend {
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for HeldHeadBackend {
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for HeldHeadBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
 }
 
-impl crate::storage::cloud::CloudListCapability for HeldHeadBackend {
+impl cntryl_midge_storage::cloud::CloudListCapability for HeldHeadBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
 }
 
-impl crate::storage::cloud::CloudHeadCapability for HeldHeadBackend {
+impl cntryl_midge_storage::cloud::CloudHeadCapability for HeldHeadBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         let hold = {
             let mut hold = self.hold.lock();
@@ -113,9 +113,9 @@ impl CloudBackend for HeldHeadBackend {}
 struct PublicationFixture {
     _directory: tempfile::TempDir,
     directory: PathBuf,
-    fs: Arc<dyn crate::io::Fs>,
+    fs: Arc<dyn cntryl_midge_core::io::Fs>,
     backend: Arc<HeldHeadBackend>,
-    hybrid: Arc<crate::storage::HybridStorage>,
+    hybrid: Arc<cntryl_midge_storage::HybridStorage>,
     outputs: Vec<PreparedCompactionOutput>,
     originals: Vec<Vec<u8>>,
 }
@@ -123,15 +123,16 @@ struct PublicationFixture {
 impl PublicationFixture {
     fn new(count: u32) -> MidgeResult<Self> {
         let directory = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> =
-            Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
-        let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
+        let fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        );
+        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(fs.clone(), 4096);
         let backend = Arc::new(HeldHeadBackend::default());
-        let cloud: Arc<dyn crate::storage::StorageBackend> =
+        let cloud: Arc<dyn cntryl_midge_storage::StorageBackend> =
             Arc::new(CloudStorage::new(backend.clone(), String::new()));
         let (tx, _rx) = crossbeam::channel::unbounded();
         let hybrid = Arc::new(
-            crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+            cntryl_midge_storage::HybridStorage::new_with_class_stores_and_event_sender(
                 cloud.clone(),
                 cloud.clone(),
                 cloud,
@@ -144,11 +145,13 @@ impl PublicationFixture {
         let mut outputs = Vec::new();
         let mut originals = Vec::new();
         for ordinal in 0..count {
-            let name = crate::cloud_layout::compaction_file_name(0, 1, 3, ordinal);
-            let path = directory.path().join(crate::sst::fs::sst_location(&name));
+            let name = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 3, ordinal);
+            let path = directory
+                .path()
+                .join(cntryl_midge_table::sst::fs::sst_location(&name));
             let mut writer = factory.create()?;
             writer.add_with_meta(b"key", Some(b"exact value"), 9, EntryType::Put, None)?;
-            crate::sst::fs::finish_writer_to_path(writer, &path)?;
+            cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &path)?;
             originals.push(std::fs::read(&path)?);
             outputs.push(stage_local_output_partition(
                 &fs,
@@ -164,7 +167,7 @@ impl PublicationFixture {
             )?);
         }
         Ok(Self {
-            directory: directory.path().join(crate::sst::fs::SST_DIR),
+            directory: directory.path().join(cntryl_midge_table::sst::fs::SST_DIR),
             _directory: directory,
             fs,
             backend,
@@ -178,14 +181,16 @@ impl PublicationFixture {
         &self,
         manual_deadline: Option<OperationDeadline>,
     ) -> MidgeResult<publication::CompactionPublishCompletion> {
-        crate::failpoints::with_read_gate(|| self.run_fallback_in_read_scope(manual_deadline))
+        cntryl_midge_core::failpoints::with_read_gate(|| {
+            self.run_fallback_in_read_scope(manual_deadline)
+        })
     }
 
     fn run_fallback_in_read_scope(
         &self,
         manual_deadline: Option<OperationDeadline>,
     ) -> MidgeResult<publication::CompactionPublishCompletion> {
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
         validity
             .activate(7, std::time::Instant::now() + Duration::from_mins(1))
             .map_err(|error| error.into_validation_error("fixture validity"))?;
@@ -240,7 +245,7 @@ impl PublicationFixture {
     }
 
     fn assert_actual_upload(&self, index: usize) {
-        let key = crate::cloud_layout::object_key(&self.outputs[index].metadata.name);
+        let key = cntryl_midge_core::cloud_layout::object_key(&self.outputs[index].metadata.name);
         let (tx, rx) = std::sync::mpsc::channel();
         self.backend.inner.submit_get(&key, tx);
         let event = rx.recv_timeout(IO_CAP).expect("actual uploaded bytes");
@@ -253,18 +258,18 @@ impl PublicationFixture {
 
 #[test]
 fn should_stop_early_output_upload_when_original_deadline_expires_in_head() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: genuine finished SST, original deadline smaller than normal I/O cap.
         let fixture = PublicationFixture::new(1)?;
         let output = &fixture.outputs[0];
-        let key = crate::cloud_layout::object_key(&output.metadata.name);
+        let key = cntryl_midge_core::cloud_layout::object_key(&output.metadata.name);
         let deadline = OperationDeadline::from_budget(Duration::from_secs(2));
         fixture.backend.arm(key, deadline);
         let budget = ResourceBudget::new(2 * 1024 * 1024);
         let prepared = PreparedCompactionOutputs::default();
 
         // Act: actual early worker partition summarization and publication.
-        let result = crate::failpoints::with_read_gate(|| {
+        let result = cntryl_midge_core::failpoints::with_read_gate(|| {
             record_staged_output_partition(
                 Some(fixture.hybrid.as_ref()),
                 &fixture.fs,
@@ -303,12 +308,12 @@ fn should_stop_early_output_upload_when_original_deadline_expires_in_head() -> M
 #[test]
 fn should_keep_original_deadline_when_missing_proof_fallback_stages_later_output() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: two actual encoded outputs, neither already carries a cloud proof.
         let fixture = PublicationFixture::new(2)?;
         let deadline = OperationDeadline::from_budget(Duration::from_secs(2));
         fixture.backend.arm(
-            crate::cloud_layout::object_key(&fixture.outputs[1].metadata.name),
+            cntryl_midge_core::cloud_layout::object_key(&fixture.outputs[1].metadata.name),
             deadline,
         );
 
@@ -334,7 +339,7 @@ fn should_keep_original_deadline_when_missing_proof_fallback_stages_later_output
 #[test]
 fn should_stage_all_missing_proofs_when_background_origin_has_no_caller_deadline() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: same real fallback fixture, with callerless accepted origin.
         let fixture = PublicationFixture::new(2)?;
 

@@ -1,102 +1,116 @@
 //! Exercise real compaction publication, provider ownership and installation proofs.
 
 use super::*;
-use crate::common::resource_budget::ResourceBudget;
-use crate::io::FsError;
-use crate::sst::SstStateReader;
-use crate::types::EntryType;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_core::types::EntryType;
+use cntryl_midge_table::sst::SstStateReader;
 
 struct ReadCountingFs {
-    inner: crate::io::MockFs,
+    inner: cntryl_midge_core::io::MockFs,
     read_opens: std::sync::atomic::AtomicUsize,
 }
 
-impl crate::io::ReadFs for ReadCountingFs {
+impl cntryl_midge_core::io::ReadFs for ReadCountingFs {
     fn open_read(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.read_opens
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.open_read(path)
     }
 
-    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
     fn metadata(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<cntryl_midge_core::io::traits::Metadata> {
         self.inner.metadata(path)
     }
 
     fn list_dir(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Vec<cntryl_midge_core::io::traits::DirEntry>> {
         self.inner.list_dir(path)
     }
 }
 
-impl crate::io::Fs for ReadCountingFs {
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+impl cntryl_midge_core::io::Fs for ReadCountingFs {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         Some(self)
     }
 
     fn open(
         &self,
-        path: &crate::io::FsPath,
-        options: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
-        if options.mode == crate::io::OpenMode::ReadOnly {
+        path: &cntryl_midge_core::io::FsPath,
+        options: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
+        if options.mode == cntryl_midge_core::io::OpenMode::ReadOnly {
             self.read_opens
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         self.inner.open(path, options)
     }
 
-    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 
     fn sync_dir(
         &self,
-        path: &crate::io::FsPath,
-        durability: crate::io::Durability,
-    ) -> crate::io::FsResult<()> {
+        path: &cntryl_midge_core::io::FsPath,
+        durability: cntryl_midge_core::io::Durability,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.sync_dir(path, durability)
     }
 
     fn rename_atomic(
         &self,
-        from: &crate::io::FsPath,
-        to: &crate::io::FsPath,
-    ) -> crate::io::FsResult<()> {
+        from: &cntryl_midge_core::io::FsPath,
+        to: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.rename_atomic(from, to)
     }
 }
 
-impl crate::io::PersistentHandleFs for ReadCountingFs {
+impl cntryl_midge_core::io::PersistentHandleFs for ReadCountingFs {
     fn open_persistent(
         &self,
-        path: &crate::io::FsPath,
-        options: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-        if options.mode == crate::io::OpenMode::ReadOnly {
+        path: &cntryl_midge_core::io::FsPath,
+        options: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File>> {
+        if options.mode == cntryl_midge_core::io::OpenMode::ReadOnly {
             self.read_opens
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        crate::io::PersistentHandleFs::open_persistent(&self.inner, path, options)
+        cntryl_midge_core::io::PersistentHandleFs::open_persistent(&self.inner, path, options)
     }
 }
 
@@ -110,7 +124,7 @@ struct DeadlineInputFactory {
 }
 
 impl SstFactory for DeadlineInputFactory {
-    fn output_fs(&self) -> Arc<dyn crate::io::Fs> {
+    fn output_fs(&self) -> Arc<dyn cntryl_midge_core::io::Fs> {
         self.delegate.output_fs()
     }
 
@@ -118,14 +132,14 @@ impl SstFactory for DeadlineInputFactory {
         self.delegate.compaction_scratch_cleanup_verified()
     }
 
-    fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+    fn create(&self) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
         self.delegate.create()
     }
 
     fn create_for_compaction(
         &self,
         budget: ResourceBudget,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+    ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
         self.writers_created.fetch_add(1, Ordering::AcqRel);
         self.delegate.create_for_compaction(budget)
     }
@@ -133,7 +147,7 @@ impl SstFactory for DeadlineInputFactory {
     fn open(
         &self,
         path: &std::path::Path,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+    ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
         self.delegate.open(path)
     }
 
@@ -141,7 +155,7 @@ impl SstFactory for DeadlineInputFactory {
         &self,
         path: &std::path::Path,
         budget: ResourceBudget,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+    ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
         let reader = self.delegate.open_for_compaction(path, budget)?;
         if self.opened.fetch_add(1, Ordering::AcqRel) == self.hold_on_open {
             let (key, expected) = if self.hold_on_open == 0 {
@@ -151,7 +165,7 @@ impl SstFactory for DeadlineInputFactory {
             };
             self.held_valid.store(
                 matches!(reader.get_state_at(key, u64::MAX)?,
-                    crate::types::KeyState::Value(value, 10, None, EntryType::Put)
+                    cntryl_midge_core::types::KeyState::Value(value, 10, None, EntryType::Put)
                     if value.as_ref() == expected),
                 Ordering::Release,
             );
@@ -174,7 +188,9 @@ struct InputEvidence {
 }
 
 fn deadline_input_case(asynchronous: bool, hold_on_open: usize) -> MidgeResult<InputEvidence> {
-    crate::failpoints::with_read_gate(|| deadline_input_case_inner(asynchronous, hold_on_open))
+    cntryl_midge_core::failpoints::with_read_gate(|| {
+        deadline_input_case_inner(asynchronous, hold_on_open)
+    })
 }
 
 fn deadline_input_case_inner(
@@ -183,8 +199,11 @@ fn deadline_input_case_inner(
 ) -> MidgeResult<InputEvidence> {
     let directory = tempfile::tempdir()?;
     let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
-    let delegate = Arc::new(crate::sst::FsSstFactoryIo::new(
-        Arc::new(crate::io::RealFs::new(state.host_sst_dir()).map_err(FsError::into_midge)?),
+    let delegate = Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(
+            cntryl_midge_core::io::RealFs::new(state.host_sst_dir())
+                .map_err(FsError::into_midge)?,
+        ),
         4096,
     ));
     let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(3);
@@ -199,13 +218,16 @@ fn deadline_input_case_inner(
         let name = format!("input-{index}.sst");
         let mut writer = delegate.create()?;
         writer.add_with_meta(key, Some(value), 10, EntryType::Put, None)?;
-        crate::sst::fs::finish_writer_to_path(writer, &state.host_sst_dir().join(&name))?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(
+            writer,
+            &state.host_sst_dir().join(&name),
+        )?;
         let bytes = std::fs::read(state.host_sst_dir().join(&name))?;
         state
             .manifest
             .test_mut()
             .files
-            .push(crate::metadata::FileMeta {
+            .push(cntryl_midge_durability::metadata::FileMeta {
                 name: name.clone(),
                 cf_id: 0,
                 level: 0,
@@ -318,8 +340,8 @@ fn should_reject_output_writer_when_manual_deadline_expires_during_last_input() 
 #[test]
 fn should_summarize_compaction_output_through_injected_mock_fs() -> MidgeResult<()> {
     // Arrange
-    let mock = Arc::new(crate::io::MockFs::new());
-    let factory = crate::sst::FsSstFactoryIo::new(mock.clone(), 4096);
+    let mock = Arc::new(cntryl_midge_core::io::MockFs::new());
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(mock.clone(), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)?;
     let name = "mock-summary.sst";
@@ -355,18 +377,20 @@ fn should_summarize_compaction_output_through_injected_mock_fs() -> MidgeResult<
 fn should_open_finalized_compaction_output_only_for_cloud_upload() -> MidgeResult<()> {
     // Arrange
     let counting_fs = Arc::new(ReadCountingFs {
-        inner: crate::io::MockFs::new(),
+        inner: cntryl_midge_core::io::MockFs::new(),
         read_opens: std::sync::atomic::AtomicUsize::new(0),
     });
-    let mock_cloud = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let cloud: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::cloud::CloudStorage::new(mock_cloud.clone(), "compaction-test".into()),
-    );
-    let hybrid = crate::storage::HybridStorage::with_policy(
+    let mock_cloud = Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new());
+    let cloud: Arc<dyn cntryl_midge_storage::StorageBackend> =
+        Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+            mock_cloud.clone(),
+            "compaction-test".into(),
+        ));
+    let hybrid = cntryl_midge_storage::HybridStorage::with_policy(
         cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
-    let factory = crate::sst::FsSstFactoryIo::new(counting_fs.clone(), 4096);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(counting_fs.clone(), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"source", Some(b"value"), 7, EntryType::Put, None)?;
     writer.finish_to_path(std::path::Path::new("input.sst"))?;
@@ -381,7 +405,7 @@ fn should_open_finalized_compaction_output_only_for_cloud_upload() -> MidgeResul
     let sink = |name: &str,
                 path: &std::path::Path,
                 budget: &ResourceBudget,
-                finalized: Option<&crate::sst::traits::FinalizedSst>| {
+                finalized: Option<&cntryl_midge_table::sst::traits::FinalizedSst>| {
         // The writer has finalized the output at this callback boundary.
         counting_fs
             .read_opens
@@ -435,15 +459,17 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
 {
     // Arrange
     #[cfg(feature = "failpoints")]
-    let _failpoint_guard = crate::failpoints::test_failpoint_guard();
+    let _failpoint_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("partition.sst");
-    let factory = crate::sst::FsSstFactoryIo::new(
-        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        ),
         4096,
     )
-    .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
-        crate::codec::CompressionAlgo::None,
+    .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::Fixed(
+        cntryl_midge_core::codec::CompressionAlgo::None,
     ));
     let mut writer = factory.create()?;
     for key in 0_u64..64 {
@@ -455,12 +481,14 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
             None,
         )?;
     }
-    crate::sst::fs::finish_writer_to_path(writer, &path)?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &path)?;
     let original = std::fs::read(&path)?;
     let cloud_path = directory.path().join("cloud");
-    let hybrid = crate::storage::HybridStorage::with_policy(
-        Arc::new(crate::storage::filesystem::FileSystem::new(&cloud_path)?),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    let hybrid = cntryl_midge_storage::HybridStorage::with_policy(
+        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
+            &cloud_path,
+        )?),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
     hybrid.enable_ephemeral_sst_cache(1024 * 1024);
     let prepared = PreparedCompactionOutputs::default();
@@ -491,7 +519,7 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     assert_eq!(std::fs::read(path)?, original);
     assert!(prepared.lock().is_empty());
     assert!(!cloud_path
-        .join(crate::cloud_layout::object_key(name))
+        .join(cntryl_midge_core::cloud_layout::object_key(name))
         .exists());
     assert_eq!(budget.used(), 0);
     Ok(())
@@ -499,15 +527,19 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
 
 #[derive(Default)]
 struct PendingUpload {
-    inner: crate::storage::cloud::MockCloudBackend,
+    inner: cntryl_midge_storage::cloud::MockCloudBackend,
     head_delay: std::time::Duration,
-    pending: parking_lot::Mutex<Option<(Vec<u8>, crate::storage::cloud::CloudCallback)>>,
+    pending: parking_lot::Mutex<Option<(Vec<u8>, cntryl_midge_storage::cloud::CloudCallback)>>,
 }
 
-impl crate::storage::cloud::CloudReadCapability for PendingUpload {
-    crate::storage::cloud::unsupported_cloud_backend!(submit_get);
+impl cntryl_midge_storage::cloud::CloudReadCapability for PendingUpload {
+    cntryl_midge_storage::cloud::unsupported_cloud_backend!(submit_get);
 
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+    fn submit_get_with_metadata(
+        &self,
+        key: &str,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
+    ) {
         self.inner.submit_get_with_metadata(key, callback);
     }
 
@@ -516,46 +548,46 @@ impl crate::storage::cloud::CloudReadCapability for PendingUpload {
         key: &str,
         start: u64,
         end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
         self.inner.submit_get_range(key, start, end, callback);
     }
 }
 
-impl crate::storage::cloud::CloudWriteCapability for PendingUpload {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for PendingUpload {
     fn submit_put(
         &self,
         _key: &str,
         data: Vec<u8>,
         _headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
         *self.pending.lock() = Some((data, callback));
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for PendingUpload {
-    crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for PendingUpload {
+    cntryl_midge_storage::cloud::unsupported_cloud_backend!(submit_delete);
 }
 
-impl crate::storage::cloud::CloudListCapability for PendingUpload {
-    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+impl cntryl_midge_storage::cloud::CloudListCapability for PendingUpload {
+    cntryl_midge_storage::cloud::unsupported_cloud_backend!(submit_list);
 }
 
-impl crate::storage::cloud::CloudHeadCapability for PendingUpload {
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+impl cntryl_midge_storage::cloud::CloudHeadCapability for PendingUpload {
+    fn submit_head(&self, key: &str, callback: cntryl_midge_storage::cloud::CloudCallback) {
         std::thread::sleep(self.head_delay);
         self.inner.submit_head(key, callback);
     }
 }
 
-impl crate::storage::cloud::CloudBackend for PendingUpload {}
+impl cntryl_midge_storage::cloud::CloudBackend for PendingUpload {}
 
 #[test]
 fn should_retain_compaction_upload_charge_after_timeout_until_provider_releases_body(
 ) -> MidgeResult<()> {
     // Arrange: retain a shared failpoint scope before setup or either clock.
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         for manual in [false, true] {
             // Act: exercise actual provider ownership for both origin policies.
             upload_charge_case(manual)?;
@@ -568,20 +600,22 @@ fn should_retain_compaction_upload_charge_after_timeout_until_provider_releases_
 fn upload_charge_case(manual: bool) -> MidgeResult<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("partition.sst");
-    let factory = crate::sst::FsSstFactoryIo::new(
-        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        ),
         4096,
     );
     let mut writer = factory.create()?;
     writer.add_with_meta(b"key", Some(b"retained value"), 1, EntryType::Put, None)?;
-    crate::sst::fs::finish_writer_to_path(writer, &path)?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &path)?;
     let original = std::fs::read(&path)?;
     let backend = Arc::new(PendingUpload::default());
-    let cloud: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::cloud::CloudStorage::new(backend.clone(), String::new()),
+    let cloud: Arc<dyn cntryl_midge_storage::StorageBackend> = Arc::new(
+        cntryl_midge_storage::cloud::CloudStorage::new(backend.clone(), String::new()),
     );
     let (tx, _rx) = crossbeam::channel::unbounded();
-    let hybrid = crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+    let hybrid = cntryl_midge_storage::HybridStorage::new_with_class_stores_and_event_sender(
         cloud.clone(),
         cloud.clone(),
         cloud,
@@ -642,14 +676,17 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
     for ephemeral in [true, false] {
         // Arrange
         #[cfg(feature = "failpoints")]
-        let _failpoint_guard = crate::failpoints::test_failpoint_guard();
+        let _failpoint_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let directory = tempfile::tempdir()?;
-        let factory = crate::sst::FsSstFactoryIo::new(
-            Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(directory.path())
+                    .map_err(FsError::into_midge)?,
+            ),
             4096,
         )
-        .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
-            crate::codec::CompressionAlgo::None,
+        .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::Fixed(
+            cntryl_midge_core::codec::CompressionAlgo::None,
         ));
         let mut writer = factory.create()?;
         for key in 0_u64..64 {
@@ -661,11 +698,16 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
                 None,
             )?;
         }
-        crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("input.sst"))?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(
+            writer,
+            &directory.path().join("input.sst"),
+        )?;
         let cloud_path = directory.path().join("cloud");
-        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(&cloud_path)?),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
+            Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
+                &cloud_path,
+            )?),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         if ephemeral {
             hybrid.enable_ephemeral_sst_cache(1024 * 1024);
@@ -718,19 +760,20 @@ fn verify_rollover_partitions(
     cloud_path: &std::path::Path,
     ephemeral: bool,
     prepared: &PreparedCompactionOutputs,
-    hybrid: &crate::storage::HybridStorage,
+    hybrid: &cntryl_midge_storage::HybridStorage,
 ) -> MidgeResult<()> {
     let mut actual = Vec::new();
     for name in outputs {
         assert_eq!(directory.join(name).exists(), !ephemeral);
-        let reader = crate::sst::fs::SstFileIo::open(
-            &crate::cloud_layout::object_key(name),
-            crate::io::real::test_root(cloud_path),
+        let reader = cntryl_midge_table::sst::fs::SstFileIo::open(
+            &cntryl_midge_core::cloud_layout::object_key(name),
+            cntryl_midge_core::io::real::test_root(cloud_path),
         )?;
         actual.extend(reader.scan_range_state(None, None)?.into_iter().filter_map(
             |(key, state)| match state {
-                crate::types::KeyState::Value(value, _, _, _) => Some((key, value)),
-                crate::types::KeyState::Absent | crate::types::KeyState::Tombstone(_) => None,
+                cntryl_midge_core::types::KeyState::Value(value, _, _, _) => Some((key, value)),
+                cntryl_midge_core::types::KeyState::Absent
+                | cntryl_midge_core::types::KeyState::Tombstone(_) => None,
             },
         ));
         let proof = prepared
@@ -742,18 +785,18 @@ fn verify_rollover_partitions(
             .expect("an uploaded partition carries its proof");
         hybrid.verify_remote_object_guards_within(
             std::slice::from_ref(&proof),
-            &crate::common::OperationDeadline::unbounded(),
+            &cntryl_midge_core::common::OperationDeadline::unbounded(),
         )?;
         drop(reader);
         std::fs::write(
-            cloud_path.join(crate::cloud_layout::object_key(name)),
+            cloud_path.join(cntryl_midge_core::cloud_layout::object_key(name)),
             b"replacement",
         )?;
         assert!(
             hybrid
                 .verify_remote_object_guards_within(
                     &[proof],
-                    &crate::common::OperationDeadline::unbounded()
+                    &cntryl_midge_core::common::OperationDeadline::unbounded()
                 )
                 .is_err(),
             "replacement cannot authorize input retirement"
@@ -771,7 +814,7 @@ fn verify_rollover_partitions(
 fn should_not_start_upload_after_publication_deadline_is_spent_on_head() -> MidgeResult<()> {
     // Arrange
     #[cfg(feature = "failpoints")]
-    let _failpoint_guard = crate::failpoints::test_failpoint_guard();
+    let _failpoint_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("source");
     std::fs::write(&path, b"payload")?;
@@ -779,11 +822,11 @@ fn should_not_start_upload_after_publication_deadline_is_spent_on_head() -> Midg
         head_delay: std::time::Duration::from_millis(30),
         ..PendingUpload::default()
     });
-    let cloud: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::cloud::CloudStorage::new(backend.clone(), String::new()),
+    let cloud: Arc<dyn cntryl_midge_storage::StorageBackend> = Arc::new(
+        cntryl_midge_storage::cloud::CloudStorage::new(backend.clone(), String::new()),
     );
     let (tx, _rx) = crossbeam::channel::unbounded();
-    let hybrid = crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+    let hybrid = cntryl_midge_storage::HybridStorage::new_with_class_stores_and_event_sender(
         cloud.clone(),
         cloud.clone(),
         cloud,
@@ -792,15 +835,15 @@ fn should_not_start_upload_after_publication_deadline_is_spent_on_head() -> Midg
     );
     let budget = ResourceBudget::new(1024 * 1024);
 
-    let source =
-        crate::io::RealFs::new(directory.path()).map_err(crate::io::FsError::into_midge)?;
+    let source = cntryl_midge_core::io::RealFs::new(directory.path())
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?;
 
     // Act
     let result = hybrid.publish_immutable_file(
-        crate::storage::hybrid::backend::ImmutableFileSource {
+        cntryl_midge_storage::hybrid::backend::ImmutableFileSource {
             key: "sst/object",
             fs: &source,
-            path: &crate::io::FsPath::new("source"),
+            path: &cntryl_midge_core::io::FsPath::new("source"),
             size: 7,
             checksum: crc32c::crc32c(b"payload"),
         },
@@ -830,8 +873,10 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
     // local-only compaction shape.
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("partition.sst");
-    let factory = crate::sst::FsSstFactoryIo::new(
-        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        ),
         4096,
     );
     let mut writer = factory.create()?;
@@ -844,7 +889,7 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
             None,
         )?;
     }
-    crate::sst::fs::finish_writer_to_path(writer, &path)?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &path)?;
     let prepared = PreparedCompactionOutputs::default();
     let budget = ResourceBudget::new(1024 * 1024);
     let name = "000000_01_00000000000000000002.sst";

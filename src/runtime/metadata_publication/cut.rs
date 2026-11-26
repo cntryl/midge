@@ -1,11 +1,11 @@
 //! Immutable local control cuts and bounded, exact coalescence witnesses.
 
 use super::MetadataPublicationLock;
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
-use crate::io::{Fs, FsError, FsPath, MockFs, OpenOptions};
-use crate::metadata::{files, Manifest, ManifestPersistence};
 use crate::runtime::{IntentLogEntry, IntentPersistence, PublicationPhase};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::io::{Fs, FsError, FsPath, MockFs, OpenOptions};
+use cntryl_midge_durability::metadata::{files, Manifest, ManifestPersistence};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,14 +75,11 @@ fn deserialize_cut_witnesses<'de, D: serde::Deserializer<'de>>(
 }
 
 impl MetadataCutProof {
-    pub(crate) const CLOUD_OBJECT_NAME: &'static str = "metadata/cut-proof";
-    pub(crate) const MAX_CLOUD_OBJECT_BYTES: usize = 64 * 1024;
-
     pub(crate) fn decode_cloud_body(
         bytes: &[u8],
         bodies: &BTreeMap<String, Vec<u8>>,
     ) -> MidgeResult<Self> {
-        if bytes.len() > Self::MAX_CLOUD_OBJECT_BYTES {
+        if bytes.len() > files::MAX_CLOUD_CUT_PROOF_BYTES {
             return Err(MidgeError::ResourceLimit(
                 "cloud metadata cut proof exceeds its byte bound".into(),
             ));
@@ -98,7 +95,7 @@ impl MetadataCutProof {
         let bytes = serde_json::to_vec(self).map_err(|error| {
             MidgeError::Corruption(format!("metadata cut proof serialization failed: {error}"))
         })?;
-        if bytes.len() > Self::MAX_CLOUD_OBJECT_BYTES {
+        if bytes.len() > files::MAX_CLOUD_CUT_PROOF_BYTES {
             return Err(MidgeError::ResourceLimit(
                 "cloud metadata cut proof exceeds its byte bound".into(),
             ));
@@ -362,7 +359,7 @@ impl SelectedTerminalWitnesses {
 }
 
 struct SelectedTerminalCache {
-    generation: crate::lease::SharedGenerationId,
+    generation: cntryl_midge_durability::lease::SharedGenerationId,
     witnesses: Option<Arc<SelectedTerminalWitnesses>>,
 }
 
@@ -405,7 +402,7 @@ impl MetadataPublicationLock {
         let _local = self.lock_for(deadline.remaining()).ok_or_else(|| {
             MidgeError::Timeout("metadata cut capture waits for local turn".into())
         })?;
-        if crate::metadata::format::is_format_10(fs.as_ref())? {
+        if cntryl_midge_durability::metadata::format::is_format_10(fs.as_ref())? {
             let captured = crate::runtime::hybrid_persistence::capture_selected_format10_closure(
                 fs.as_ref(),
                 self,
@@ -418,7 +415,7 @@ impl MetadataPublicationLock {
                 deadline,
             );
         }
-        crate::metadata::journal::with_manifest_writer_lock_within(
+        cntryl_midge_durability::metadata::journal::with_manifest_writer_lock_within(
             fs,
             &DeadlineScope::new(*deadline),
             || self.capture_locked(fs, epoch, deadline),
@@ -476,7 +473,9 @@ impl MetadataPublicationLock {
             .get(files::FORMAT)
             .is_some_and(|format| format == b"midge-format-version=10\n")
         {
-            use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+            use cntryl_midge_durability::metadata::local_authority::{
+                LocalMetadataAuthority, Stream,
+            };
             let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Manifest)?;
             ManifestPersistence::decode_format_10_stream(
                 stream.base,
@@ -557,7 +556,7 @@ impl MetadataPublicationLock {
     /// another full allocation to resolve a lost pointer-CAS callback.
     pub(crate) fn staged_metadata_cache(
         &self,
-        generation: &crate::lease::CloudMetadataGeneration,
+        generation: &cntryl_midge_durability::lease::CloudMetadataGeneration,
         epoch: u64,
     ) -> Option<(
         crate::runtime::hybrid_persistence::MetadataMirrorCache,
@@ -606,7 +605,7 @@ impl MetadataPublicationLock {
         encoded: u64,
     ) -> MidgeResult<Arc<ResourceReservation>> {
         self.prune_released_cut_receipts();
-        if encoded > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+        if encoded > cntryl_midge_durability::metadata::cloud_manifest::MAX_CHAIN_BYTES {
             return Err(MidgeError::ResourceLimit(
                 "metadata capture exceeds cloud body bound".into(),
             ));
@@ -670,7 +669,7 @@ impl MetadataPublicationLock {
 impl MetadataPublicationLock {
     pub(crate) fn note_selected_terminal_witnesses(
         &self,
-        generation: crate::lease::SharedGenerationId,
+        generation: cntryl_midge_durability::lease::SharedGenerationId,
         proof: &MetadataCutProof,
         witnesses: Option<Arc<SelectedTerminalWitnesses>>,
     ) -> MidgeResult<()> {
@@ -796,9 +795,10 @@ fn prune_intent_receipts(registry: &mut CutRegistry, current: &PublicationIntent
 
 fn publication_intents(fs: &Arc<dyn Fs>) -> MidgeResult<PublicationIntentBoundary> {
     let mut boundary = PublicationIntentBoundary::default();
-    for mut intent in
-        IntentPersistence::load_with_fs_and_policy_typed(fs, crate::config::RecoveryPolicy::Strict)?
-    {
+    for mut intent in IntentPersistence::load_with_fs_and_policy_typed(
+        fs,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
+    )? {
         let published = match &mut intent {
             IntentLogEntry::FlushPublish { phase, .. }
             | IntentLogEntry::CompactionPublish { phase, .. }
@@ -809,8 +809,8 @@ fn publication_intents(fs: &Arc<dyn Fs>) -> MidgeResult<PublicationIntentBoundar
             }
             _ => continue,
         };
-        let digest = Sha256::digest(crate::metadata::codec::encode(
-            crate::metadata::codec::INTENT,
+        let digest = Sha256::digest(cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::INTENT,
             &intent,
         )?)
         .into();
@@ -836,13 +836,13 @@ fn copy_control_files(
     for name in files::CLOUD_MIRRORED {
         DeadlineScope::new(*deadline).check("metadata control cut capture")?;
         let path = FsPath::new(*name);
-        let bytes = match crate::io::read_all(source.as_ref(), &path) {
+        let bytes = match cntryl_midge_core::io::read_all(source.as_ref(), &path) {
             Ok(bytes) => bytes,
             Err(FsError::NotFound(_)) => continue,
             Err(error) => return Err(error.into_midge()),
         };
         total = total.saturating_add(bytes.len() as u64);
-        if total > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+        if total > cntryl_midge_durability::metadata::cloud_manifest::MAX_CHAIN_BYTES {
             return Err(MidgeError::ResourceLimit(
                 "captured metadata exceeds cloud body bound".into(),
             ));
@@ -851,7 +851,7 @@ fn copy_control_files(
             .open(
                 &path,
                 OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
+                    mode: cntryl_midge_core::io::OpenMode::ReadWrite,
                     create: true,
                     create_new: true,
                     truncate: false,
@@ -861,7 +861,9 @@ fn copy_control_files(
             .map_err(FsError::into_midge)?;
         bodies.insert((*name).into(), bytes.to_vec());
     }
-    if bodies.get(files::FORMAT) != Some(&crate::metadata::format::current_format_marker_bytes()) {
+    if bodies.get(files::FORMAT)
+        != Some(&cntryl_midge_durability::metadata::format::current_format_marker_bytes())
+    {
         return Err(MidgeError::Corruption(
             "metadata cut lacks current FORMAT".into(),
         ));
@@ -876,7 +878,7 @@ fn copy_bodies_to_mock_fs(bodies: &BTreeMap<String, Vec<u8>>) -> MidgeResult<Arc
             .open(
                 &FsPath::new(name),
                 OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
+                    mode: cntryl_midge_core::io::OpenMode::ReadWrite,
                     create: true,
                     create_new: true,
                     truncate: false,

@@ -1,14 +1,14 @@
 //! Preserve actual input failures and healthy callerless repair behavior.
 
 use super::*;
-use crate::common::resource_budget::ResourceBudget;
-use crate::sst::SstFactory;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_table::sst::SstFactory;
 use std::time::Duration;
 
 struct SeededInputs {
     _directory: tempfile::TempDir,
     state: RuntimeState,
-    factory: Arc<crate::sst::FsSstFactoryIo>,
+    factory: Arc<cntryl_midge_table::sst::FsSstFactoryIo>,
     plan: crate::compaction::CompactionPlan,
     originals: Vec<(String, Vec<u8>)>,
 }
@@ -17,8 +17,11 @@ impl SeededInputs {
     fn new(count: u32, source_level: u32, target_level: u32) -> MidgeResult<Self> {
         let directory = tempfile::tempdir()?;
         let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
-        let factory = Arc::new(crate::sst::FsSstFactoryIo::new(
-            Arc::new(crate::io::RealFs::new(state.host_sst_dir()).map_err(FsError::into_midge)?),
+        let factory = Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(state.host_sst_dir())
+                    .map_err(FsError::into_midge)?,
+            ),
             4096,
         ));
         let mut plan = crate::compaction::CompactionPlan::new(0, source_level, target_level)
@@ -37,10 +40,10 @@ impl SeededInputs {
                 EntryType::Put,
                 None,
             )?;
-            crate::sst::fs::finish_writer_to_path(writer, &path)?;
+            cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &path)?;
             assert!(
                 matches!(factory.open(std::path::Path::new(&name))?.get_state_at(key.as_bytes(), u64::MAX)?,
-                crate::types::KeyState::Value(bytes, 10, None, EntryType::Put)
+                cntryl_midge_core::types::KeyState::Value(bytes, 10, None, EntryType::Put)
                 if bytes.as_ref() == value.as_bytes())
             );
             let bytes = std::fs::read(path)?;
@@ -48,7 +51,7 @@ impl SeededInputs {
                 .manifest
                 .test_mut()
                 .files
-                .push(crate::metadata::FileMeta {
+                .push(cntryl_midge_durability::metadata::FileMeta {
                     name: name.clone(),
                     cf_id: 0,
                     level: source_level,
@@ -94,13 +97,13 @@ impl SeededInputs {
 }
 
 struct HeldCorruptionFactory {
-    delegate: Arc<crate::sst::FsSstFactoryIo>,
+    delegate: Arc<cntryl_midge_table::sst::FsSstFactoryIo>,
     deadline: OperationDeadline,
     observed_while_live: AtomicBool,
 }
 
 impl SstFactory for HeldCorruptionFactory {
-    fn output_fs(&self) -> Arc<dyn crate::io::Fs> {
+    fn output_fs(&self) -> Arc<dyn cntryl_midge_core::io::Fs> {
         self.delegate.output_fs()
     }
 
@@ -108,21 +111,21 @@ impl SstFactory for HeldCorruptionFactory {
         self.delegate.compaction_scratch_cleanup_verified()
     }
 
-    fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+    fn create(&self) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
         self.delegate.create()
     }
 
     fn create_for_compaction(
         &self,
         budget: ResourceBudget,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+    ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
         self.delegate.create_for_compaction(budget)
     }
 
     fn open(
         &self,
         path: &std::path::Path,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+    ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
         self.delegate.open(path)
     }
 
@@ -130,7 +133,7 @@ impl SstFactory for HeldCorruptionFactory {
         &self,
         path: &std::path::Path,
         budget: ResourceBudget,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+    ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
         let reader = self.delegate.open_for_compaction(path, budget)?;
         let error = reader
             .get_state_at(b"key-0", u64::MAX)
@@ -199,7 +202,7 @@ fn held_corruption_case(asynchronous: bool) -> MidgeResult<()> {
 fn should_preserve_actual_corruption_when_completed_input_error_returns_after_deadline(
 ) -> MidgeResult<()> {
     // Arrange: seed valid SSTs, then alter only a genuine data-block trailer.
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         for asynchronous in [false, true] {
             // Act: hold the real CRC failure across the original captured budget.
             held_corruption_case(asynchronous)?;
@@ -238,7 +241,7 @@ fn healthy_repair_case() -> MidgeResult<()> {
     for (index, (key, state)) in rows.into_iter().enumerate() {
         assert_eq!(key.as_ref(), format!("key-{index}").as_bytes());
         assert!(
-            matches!(state, crate::types::KeyState::Value(value, 10, None, EntryType::Put)
+            matches!(state, cntryl_midge_core::types::KeyState::Value(value, 10, None, EntryType::Put)
             if value.as_ref() == format!("value-{index}").as_bytes())
         );
     }
@@ -257,5 +260,5 @@ fn should_keep_exact_rows_when_healthy_background_repair_uses_no_manual_deadline
     // Arrange: three genuine L1 inputs require a real fan-in-two scratch pass.
     // Act: run the actual actor with its callerless None owner.
     // Assert: the case verifies every row, retained inputs and empty scratch.
-    crate::failpoints::with_read_gate(healthy_repair_case)
+    cntryl_midge_core::failpoints::with_read_gate(healthy_repair_case)
 }

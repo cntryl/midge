@@ -5,7 +5,7 @@ use crate::runtime::read_resources::ReadResources;
 
 /// SST dependencies assembled before the event loop starts dispatching.
 pub(super) struct SstRuntimeResources {
-    pub(super) factory: Arc<dyn crate::sst::SstFactory>,
+    pub(super) factory: Arc<dyn cntryl_midge_table::sst::SstFactory>,
     pub(super) reads: Option<Arc<ReadResources>>,
 }
 
@@ -24,18 +24,18 @@ pub(super) fn assemble_sst_resources(
         fs
     } else {
         fs.with_read_observer(
-            Arc::clone(&state.diagnostics) as Arc<dyn crate::io::traits::ReadObserver>
+            Arc::clone(&state.diagnostics) as Arc<dyn cntryl_midge_core::io::traits::ReadObserver>
         )
         .unwrap_or(fs)
     };
-    let factory: Arc<dyn crate::sst::SstFactory> = Arc::new(
+    let factory: Arc<dyn cntryl_midge_table::sst::SstFactory> = Arc::new(
         compaction_sst_factory(fs, config.compression_policy.clone())
             .with_write_limiter(state.write_pressure.admission.limiter()),
     );
     let reads = if memory_mode {
         None
     } else {
-        let sst_path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
+        let sst_path_prefix = std::path::PathBuf::from(cntryl_midge_table::sst::fs::SST_DIR);
         Some(Arc::new(ReadResources::new_with_diagnostics(
             config
                 .sst_read_fs
@@ -54,13 +54,15 @@ pub(super) fn assemble_sst_resources(
 /// view layered over it. The factory is rooted at its `sst/` directory, so
 /// compaction names inputs, outputs and build scratch relative to it.
 pub(super) fn compaction_sst_factory(
-    fs: Arc<dyn crate::io::Fs>,
-    compression_policy: crate::codec::CompressionPolicy,
-) -> crate::sst::FsSstFactoryIo {
-    crate::sst::FsSstFactoryIo::new(
-        crate::io::subdirectory(fs, crate::sst::fs::SST_DIR),
+    fs: Arc<dyn cntryl_midge_core::io::Fs>,
+    compression_policy: cntryl_midge_core::codec::CompressionPolicy,
+) -> cntryl_midge_table::sst::FsSstFactoryIo {
+    cntryl_midge_table::sst::FsSstFactoryIo::new(
+        cntryl_midge_core::io::subdirectory(fs, cntryl_midge_table::sst::fs::SST_DIR),
         64 * 1024,
     )
-    .with_compaction_scratch_directory(std::path::PathBuf::from(crate::sst::fs::STAGING_DIR_NAME))
+    .with_compaction_scratch_directory(std::path::PathBuf::from(
+        cntryl_midge_table::sst::fs::STAGING_DIR_NAME,
+    ))
     .with_compression_policy(compression_policy)
 }

@@ -1,12 +1,15 @@
 use super::{CompactionCoordinator, EventLoop, PreparedCompactionOutput};
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 
 impl CompactionCoordinator {
     pub(super) fn record_start_intent(
         event_loop: &mut EventLoop,
         token: &super::CompactionPublicationToken,
-        added: &[crate::runtime::FileMeta],
-    ) -> MidgeResult<(Vec<crate::metadata::FileMeta>, Vec<String>)> {
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
+    ) -> MidgeResult<(
+        Vec<cntryl_midge_durability::metadata::FileMeta>,
+        Vec<String>,
+    )> {
         if event_loop.actors.compaction_actor.active_trivial_move() {
             let captured = event_loop
                 .actors
@@ -36,7 +39,7 @@ impl CompactionCoordinator {
     ) -> MidgeResult<(
         u64,
         Vec<PreparedCompactionOutput>,
-        Vec<crate::runtime::FileMeta>,
+        Vec<cntryl_midge_durability::metadata::intent::FileMeta>,
     )> {
         let actor = &event_loop.actors.compaction_actor;
         let captured = actor.captured_input_metadata();
@@ -52,7 +55,7 @@ impl CompactionCoordinator {
                 "logical move completion changed its accepted sources".into(),
             ));
         }
-        if crate::metadata::manifest::validate_sst_move(
+        if cntryl_midge_durability::metadata::manifest::validate_sst_move(
             &event_loop.state.manifest.files,
             captured,
             target,
@@ -64,7 +67,7 @@ impl CompactionCoordinator {
         let added = captured
             .iter()
             .map(|file| {
-                let mut file: crate::runtime::FileMeta = file.into();
+                let mut file: cntryl_midge_durability::metadata::intent::FileMeta = file.into();
                 file.level = target;
                 file
             })

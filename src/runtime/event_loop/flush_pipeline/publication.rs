@@ -9,8 +9,8 @@ impl EventLoop {
     pub(super) fn runtime_fs_path(
         &self,
         path: &std::path::Path,
-    ) -> crate::common::MidgeResult<crate::io::FsPath> {
-        crate::sst::fs::fs_relative_sst_path(&self.state.fs, path)
+    ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_core::io::FsPath> {
+        cntryl_midge_table::sst::fs::fs_relative_sst_path(&self.state.fs, path)
     }
 
     /// Picks the SST sequence for a flush output and, when the output can
@@ -18,16 +18,16 @@ impl EventLoop {
     #[cfg(test)]
     pub(in crate::runtime::event_loop) fn reserve_flush_sst_seq(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
-    ) -> crate::common::MidgeResult<u64> {
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> cntryl_midge_core::common::MidgeResult<u64> {
         self.reserve_flush_sst_seq_for(cf_id, Origin::Unclassified)
     }
 
     pub(super) fn reserve_flush_sst_seq_for(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         origin: Origin,
-    ) -> crate::common::MidgeResult<u64> {
+    ) -> cntryl_midge_core::common::MidgeResult<u64> {
         let sst_seq = self.next_sst_name(cf_id)?;
         if self.actors.cloud_coordinator.hybrid_storage.is_some() {
             // The publish worker uploads before it journals AddSst, so the
@@ -45,12 +45,12 @@ impl EventLoop {
     pub(super) fn ensure_flush_sst_identity(
         &mut self,
         identity: FlushIdentity,
-    ) -> crate::common::MidgeResult<(String, u64)> {
+    ) -> cntryl_midge_core::common::MidgeResult<(String, u64)> {
         let (cf_id, flush) = self
             .state
             .immutable_flush_by_id(identity.flush_id)
             .ok_or_else(|| {
-                crate::common::MidgeError::Fenced(format!(
+                cntryl_midge_core::common::MidgeError::Fenced(format!(
                     "flush {} lost immutable ownership before name reservation",
                     identity.flush_id
                 ))
@@ -59,23 +59,25 @@ impl EventLoop {
             || flush.writer_epoch != identity.writer_epoch
             || flush.sequence != identity.sequence
         {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "flush identity changed before name reservation".into(),
             ));
         }
         match (&flush.sst_name, flush.sst_seq) {
-            (Some(name), Some(seq)) if *name == crate::cloud_layout::file_name(cf_id, 0, seq) => {
+            (Some(name), Some(seq))
+                if *name == cntryl_midge_core::cloud_layout::file_name(cf_id, 0, seq) =>
+            {
                 return Ok((name.clone(), seq));
             }
             (None, None) => {}
             _ => {
-                return Err(crate::common::MidgeError::Internal(
+                return Err(cntryl_midge_core::common::MidgeError::Internal(
                     "flush has an inconsistent canonical SST identity".into(),
                 ));
             }
         }
         if self.publication.publication_gate.is_active() {
-            return Err(crate::common::MidgeError::Busy(
+            return Err(cntryl_midge_core::common::MidgeError::Busy(
                 "SST name reservation waits for the publication owner".into(),
             ));
         }
@@ -84,7 +86,7 @@ impl EventLoop {
         // journal append or mirror. Retries retain this canonical identity.
         let origin = flush.accounting.origin;
         let sst_seq = self.reserve_flush_sst_seq_for(cf_id, origin)?;
-        let sst_name = crate::cloud_layout::file_name(cf_id, 0, sst_seq);
+        let sst_name = cntryl_midge_core::cloud_layout::file_name(cf_id, 0, sst_seq);
         let (_, flush) = self
             .state
             .immutable_flush_by_id_mut(identity.flush_id)
@@ -98,8 +100,8 @@ impl EventLoop {
         &mut self,
         identity: FlushIdentity,
         staging_path: std::path::PathBuf,
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
-        file_meta: crate::runtime::FileMeta,
+        reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
+        file_meta: cntryl_midge_durability::metadata::intent::FileMeta,
     ) {
         let (sst_name, sst_seq) = match self.ensure_flush_sst_identity(identity) {
             Ok(identity) => identity,
@@ -116,7 +118,7 @@ impl EventLoop {
         };
         let flush = {
             let Some((_, flush)) = self.state.immutable_flush_by_id_mut(identity.flush_id) else {
-                let error = crate::common::MidgeError::Fenced(format!(
+                let error = cntryl_midge_core::common::MidgeError::Fenced(format!(
                     "flush {} lost immutable ownership before publication",
                     identity.flush_id
                 ));
@@ -164,7 +166,8 @@ impl EventLoop {
             // is unknown, not lost.
             if matches!(
                 error,
-                crate::common::MidgeError::Busy(_) | crate::common::MidgeError::Timeout(_)
+                cntryl_midge_core::common::MidgeError::Busy(_)
+                    | cntryl_midge_core::common::MidgeError::Timeout(_)
             ) && self
                 .state
                 .immutable_flush_by_id(completion.identity.flush_id)
@@ -252,7 +255,7 @@ impl EventLoop {
     pub(super) fn commit_flush_metadata(
         &mut self,
         delta: &FlushPublicationDelta,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.validate_flush_completion(delta.identity)?;
         let origin = self
             .state
@@ -266,7 +269,9 @@ impl EventLoop {
             delta.identity.sequence,
             &delta.file_meta,
         )?;
-        crate::failpoints::fail_point!("midge::flush::after_publication_intent_before_manifest");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::flush::after_publication_intent_before_manifest"
+        );
         self.check_lease_health()?;
         let publication = FlushManifestPublication {
             origin,
@@ -288,8 +293,8 @@ impl EventLoop {
     pub(super) fn submit_flush_mirror(
         &mut self,
         delta: FlushPublicationDelta,
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
-    ) -> crate::common::MidgeResult<()> {
+        reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let deadline = self.flush_mirror_deadline(delta.identity);
         self.submit_flush_mirror_phase(
             delta,
@@ -302,10 +307,10 @@ impl EventLoop {
     fn submit_flush_mirror_phase(
         &mut self,
         delta: FlushPublicationDelta,
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+        reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
         phase: FlushMirrorPhase,
-        deadline: crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let task = FlushMirrorTask {
             phase,
             delta,
@@ -389,7 +394,7 @@ impl EventLoop {
     pub(super) fn validate_flush_completion(
         &self,
         identity: FlushIdentity,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.validate_flush_owner(identity)?;
         if let Some(store) = &self.authority.fencing.leader_store {
             store
@@ -415,16 +420,16 @@ impl EventLoop {
     pub(in crate::runtime::event_loop) fn validate_flush_owner(
         &self,
         identity: FlushIdentity,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.check_lease_health()?;
         if identity.writer_epoch != self.authority.fencing.writer_epoch {
-            return Err(crate::common::MidgeError::Fenced(format!(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(format!(
                 "flush {} epoch {} does not match runtime epoch {}",
                 identity.flush_id, identity.writer_epoch, self.authority.fencing.writer_epoch
             )));
         }
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(identity.flush_id) else {
-            return Err(crate::common::MidgeError::Fenced(format!(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(format!(
                 "flush {} is no longer owned by this runtime",
                 identity.flush_id
             )));
@@ -433,7 +438,7 @@ impl EventLoop {
             || flush.writer_epoch != identity.writer_epoch
             || flush.sequence != identity.sequence
         {
-            return Err(crate::common::MidgeError::Fenced(format!(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(format!(
                 "flush {} completion identity is stale",
                 identity.flush_id
             )));
@@ -444,7 +449,7 @@ impl EventLoop {
     pub(super) fn install_flush_publication(
         &mut self,
         delta: &FlushPublicationDelta,
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+        reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
         cloud_metadata_published: bool,
     ) {
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(delta.identity.flush_id) else {
@@ -507,7 +512,7 @@ impl EventLoop {
         self.wake_write_stall_waiters();
         self.complete_flush_waiters(cf_id);
         self.schedule_compaction_after_flush_publication(&delta.file_meta.name);
-        crate::failpoints::fail_point!("midge::flush_worker::before_wal_prune");
+        cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::before_wal_prune");
         if cloud_metadata_published {
             self.prune_cloud_wal_segments_covered_by_manifest();
         } else {

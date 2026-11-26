@@ -1,0 +1,60 @@
+[package]
+name = "cntryl-midge-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Provider-neutral object storage for Midge"
+license.workspace = true
+repository.workspace = true
+autobenches = false
+
+[lib]
+bench = false
+
+[dependencies]
+cntryl-midge-core.workspace = true
+base64 = { workspace = true, optional = true }
+bytes.workspace = true
+chrono.workspace = true
+crossbeam.workspace = true
+crc32c.workspace = true
+fail = { workspace = true, optional = true }
+hex.workspace = true
+hmac = { workspace = true, optional = true }
+libc.workspace = true
+md5 = { workspace = true, optional = true }
+parking_lot.workspace = true
+percent-encoding = { version = "2.3", optional = true }
+rand.workspace = true
+reqwest = { workspace = true, optional = true }
+ring = { version = "0.17", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha1 = { workspace = true, optional = true }
+sha2.workspace = true
+tracing.workspace = true
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros"], optional = true }
+url = "2.5"
+urlencoding = { version = "2.1", optional = true }
+uuid.workspace = true
+
+[features]
+default = ["cloud-all"]
+internal-testing = ["cntryl-midge-core/internal-testing"]
+sqrzl-tests = ["cloud-signing", "dep:sha1"]
+failpoints = ["cntryl-midge-core/failpoints", "dep:fail"]
+cloud-common = ["dep:reqwest", "dep:tokio"]
+cloud-signing = ["cloud-common", "dep:base64", "dep:hmac", "dep:percent-encoding", "dep:urlencoding"]
+cloud-aws = ["cloud-signing"]
+cloud-azure = ["cloud-signing", "dep:md5"]
+cloud-gcp = ["cloud-signing", "dep:ring", "dep:sha1"]
+cloud-oci = ["cloud-signing"]
+cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"]
+
+[dev-dependencies]
+cntryl-midge-core = { workspace = true, features = ["internal-testing"] }
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

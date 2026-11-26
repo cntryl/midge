@@ -24,14 +24,14 @@
 // open). A failed ledger write may still have become durable, so it counts
 // as sealing segment N.
 use super::{WalActor, WalRotationReceipt, WalTransitionOperation};
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::Fs;
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_history::PreparedRotation;
 use crate::runtime::wal_transition::WalSealTicket;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::wal::ledger::SegmentId;
-use crate::wal::FsWalFactoryIo;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::Fs;
+use cntryl_midge_durability::wal::ledger::SegmentId;
+use cntryl_midge_durability::wal::FsWalFactoryIo;
 use std::sync::Arc;
 
 impl WalActor {
@@ -42,10 +42,10 @@ impl WalActor {
     pub(crate) fn submit_cloud_rotation_footer(
         &mut self,
         state: &mut RuntimeState,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
         ticket: &WalSealTicket,
     ) -> MidgeResult<(
-        crate::wal::footer_completion::WalPendingFooter,
+        cntryl_midge_durability::wal::footer_completion::WalPendingFooter,
         PreparedRotation,
     )> {
         self.ensure_transition_authority(state)?;
@@ -122,19 +122,19 @@ impl WalActor {
     pub(crate) fn submit_cloud_footer_sync(
         &mut self,
         state: &mut RuntimeState,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
         ticket: &WalSealTicket,
-        footer: crate::wal::footer_completion::WalFooterPrefix,
+        footer: cntryl_midge_durability::wal::footer_completion::WalFooterPrefix,
     ) -> MidgeResult<(
-        crate::wal::traits::WalPendingSync,
-        crate::wal::traits::WalSyncPrefix,
+        cntryl_midge_durability::wal::traits::WalPendingSync,
+        cntryl_midge_durability::wal::traits::WalSyncPrefix,
     )> {
         self.ensure_transition_authority(state)?;
         let writer = self
             .writer()
             .ok_or_else(|| MidgeError::Internal("WAL rotation lost its writer".into()))?;
         let tail = writer.tail();
-        let expected = crate::wal::traits::WalSyncPrefix {
+        let expected = cntryl_midge_durability::wal::traits::WalSyncPrefix {
             barrier_id: footer.operation_id,
             writer_epoch: footer.writer_epoch,
             segment_id: footer.segment_id,
@@ -186,8 +186,8 @@ impl WalActor {
         state: &mut RuntimeState,
         ticket: &WalSealTicket,
         prepared: PreparedRotation,
-        completion: MidgeResult<crate::wal::traits::WalSyncCompletion>,
-        expected: crate::wal::traits::WalSyncPrefix,
+        completion: MidgeResult<cntryl_midge_durability::wal::traits::WalSyncCompletion>,
+        expected: cntryl_midge_durability::wal::traits::WalSyncPrefix,
     ) -> MidgeResult<WalRotationReceipt> {
         let completed = completion.and_then(|completion| {
             if completion.prefix != expected {
@@ -293,8 +293,8 @@ impl WalActor {
             // Memory mode keeps the ledger without files or records: the
             // rotation is only the ledger's.
             let open = state.wal.history.ledger().open_member().open;
-            let facts = crate::wal::format::SealedFacts {
-                link: crate::wal::format::ChainLink {
+            let facts = cntryl_midge_durability::wal::format::SealedFacts {
+                link: cntryl_midge_durability::wal::format::ChainLink {
                     id: open.id,
                     last_seq: open.prev.last_seq,
                     digest: [0; 16],
@@ -370,7 +370,7 @@ impl WalActor {
 
     /// The facts that seal the open segment: its digest and records, which
     /// the writer holds. No I/O.
-    fn seal_facts(&self) -> MidgeResult<crate::wal::format::SealedFacts> {
+    fn seal_facts(&self) -> MidgeResult<cntryl_midge_durability::wal::format::SealedFacts> {
         self.writer()
             .ok_or_else(|| MidgeError::Internal("WAL rotation lost its writer".to_string()))?
             .seal_facts(self.storage_io_timeout)
@@ -383,7 +383,7 @@ impl WalActor {
     fn prepare_next_segment(
         &self,
         state: &mut RuntimeState,
-        facts: crate::wal::format::SealedFacts,
+        facts: cntryl_midge_durability::wal::format::SealedFacts,
         first_seq: u64,
     ) -> MidgeResult<PreparedRotation> {
         WalTransitionBoundary::BeforeSegmentCreate.check()?;
@@ -399,7 +399,7 @@ impl WalActor {
     fn write_footer(
         &mut self,
         state: &mut RuntimeState,
-        facts: &crate::wal::format::SealedFacts,
+        facts: &cntryl_midge_durability::wal::format::SealedFacts,
         old_segment: SegmentId,
     ) -> MidgeResult<()> {
         self.ensure_transition_authority(state)?;
@@ -504,7 +504,7 @@ impl WalActor {
         &self,
         fs: &Arc<dyn Fs>,
         segment: SegmentId,
-    ) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
+    ) -> MidgeResult<Box<dyn cntryl_midge_durability::wal::WalWriter>> {
         FsWalFactoryIo::new(Arc::clone(fs))
             .with_io_timeout(self.storage_io_timeout)
             .with_counters(self.counters.clone())
@@ -516,11 +516,12 @@ impl WalActor {
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
     fn before_segment_create_boundary() -> MidgeResult<()> {
-        crate::failpoints::fail_point!("midge::wal::inject_fail_before_segment_create", |_| Err(
-            MidgeError::Internal(
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::inject_fail_before_segment_create",
+            |_| Err(MidgeError::Internal(
                 "failpoint: WAL rotation failed before creating the next segment".to_string(),
-            )
-        ));
+            ))
+        );
         Ok(())
     }
 
@@ -528,7 +529,7 @@ impl WalActor {
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
     fn after_ledger_rotate_boundary() -> MidgeResult<()> {
-        crate::failpoints::fail_point!(
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::wal::inject_fail_after_ledger_rotate_before_writer_create",
             |_| Err(MidgeError::Internal(
                 "failpoint: the next WAL writer failed after the ledger recorded the rotation"
@@ -542,7 +543,7 @@ impl WalActor {
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
     fn after_writer_create_boundary() -> MidgeResult<()> {
-        crate::failpoints::fail_point!(
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::wal::inject_fail_after_writer_create_before_commit",
             |_| Err(MidgeError::Internal(
                 "failpoint: replacement WAL writer created before transition commit".to_string(),

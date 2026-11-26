@@ -31,7 +31,7 @@ pub(super) struct AppliedTransaction<'a> {
     /// The append has not reached durable storage yet, so the ack runs ahead
     /// of the fsync and a confirm-only waiter has to close the gap.
     pub(super) deferred: bool,
-    pub(super) touched_cfs: &'a [crate::types::ColumnFamilyId],
+    pub(super) touched_cfs: &'a [cntryl_midge_core::types::ColumnFamilyId],
 }
 
 impl EventLoop {
@@ -104,7 +104,7 @@ impl EventLoop {
     pub(in crate::runtime::event_loop) fn fail_durability_waiters_after_generation_drift(
         &mut self,
         next_generation: u64,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         self.state.mark_persistence_anomaly();
         let waiters = self
@@ -117,7 +117,7 @@ impl EventLoop {
     pub(in crate::runtime::event_loop) fn fail_durability_waiters(
         &mut self,
         waiters: Vec<DurabilityWaiter>,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         for waiter in waiters {
             let (request_id, clears_transaction_barrier, already_acknowledged) = match waiter {
@@ -162,14 +162,14 @@ impl EventLoop {
     pub(super) fn sync_wal_generation(
         &mut self,
         source: CompletionSource,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let sealed_generation = self.pipeline.durability.current_key();
         let next_generation = self.next_wal_generation(sealed_generation)?;
         self.pipeline.wal_transition.ensure_ready()?;
         if self.actors.wal_actor.is_cloud_async()
             && sealed_generation != self.state.wal.open_segment()
         {
-            let error = crate::common::MidgeError::Internal(format!(
+            let error = cntryl_midge_core::common::MidgeError::Internal(format!(
                 "cloud WAL generation drift: coordinator {sealed_generation}, active segment {}",
                 self.state.wal.open_segment()
             ));
@@ -202,7 +202,7 @@ impl EventLoop {
         next_generation: Option<u64>,
         ticket: crate::runtime::wal_transition::WalSyncTicket,
         receipt: crate::runtime::actors::wal::WalSyncReceipt,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.actors.wal_actor.is_cloud_async() {
             if let Err(error) =
                 self.actors
@@ -268,7 +268,7 @@ impl EventLoop {
     /// coordinator at the generation the actor can still prove.
     fn fence_sync_transition(
         &mut self,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
         realigned_generation: u64,
     ) {
         self.fence_wal_transition(error, None);
@@ -283,12 +283,12 @@ impl EventLoop {
     pub(super) fn next_wal_generation(
         &self,
         current: u64,
-    ) -> crate::common::MidgeResult<Option<u64>> {
+    ) -> cntryl_midge_core::common::MidgeResult<Option<u64>> {
         if self.actors.wal_actor.is_cloud_async() {
             return Ok(None);
         }
         current.checked_add(1).map(Some).ok_or_else(|| {
-            crate::common::MidgeError::ResourceLimit(
+            cntryl_midge_core::common::MidgeError::ResourceLimit(
                 "WAL durability generation space exhausted".to_string(),
             )
         })
@@ -359,7 +359,7 @@ impl EventLoop {
     pub(super) fn force_wal_sync(
         &mut self,
         msg_rx: &Receiver<RuntimeMsg>,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         const MAX_DRAIN: usize = 4096;
 
         // 🔑 Drain any pending writes so they are included in this sync. The
@@ -368,7 +368,7 @@ impl EventLoop {
         let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN);
 
         if self.wal_group_in_flight() && !self.pipeline.wal_transition.is_fenced() {
-            return Err(crate::common::MidgeError::WriteStall(
+            return Err(cntryl_midge_core::common::MidgeError::WriteStall(
                 "WAL durability barrier is deferred while WAL work is in flight".into(),
             ));
         }
@@ -379,7 +379,7 @@ impl EventLoop {
     /// Establish a WAL barrier without consuming messages ordered after the
     /// current operation. DDL drop uses this so a later write cannot be
     /// coalesced ahead of the drop and then silently discarded by it.
-    pub(super) fn sync_current_wal(&mut self) -> crate::common::MidgeResult<()> {
+    pub(super) fn sync_current_wal(&mut self) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.actors.wal_actor.is_cloud_async() {
             return Ok(()); // CloudAsync has separate logic
         }
@@ -393,7 +393,7 @@ impl EventLoop {
     /// flush-triggered rotation can expose sealed segments to pruning.
     pub(super) fn sync_local_wal_before_prune_rotation(
         &mut self,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.actors.wal_actor.is_cloud_async() {
             return Ok(());
         }
@@ -485,28 +485,34 @@ mod tests {
     use super::super::tests::create_test_state;
     use super::*;
     use crate::runtime::{ResponseRouter, RuntimeConfig};
-    use crate::wal::policy::BatchConfig;
+    use cntryl_midge_durability::wal::policy::BatchConfig;
     use std::sync::Arc;
 
     struct PanickingSyncWriter(std::sync::atomic::AtomicBool);
 
     struct StaleWriterLeaderStore(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
-    impl crate::lease::LeaderStore for StaleWriterLeaderStore {
+    impl cntryl_midge_durability::lease::LeaderStore for StaleWriterLeaderStore {
         fn acquire_leadership(
             &self,
             _holder_id: &str,
-        ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
-            Err(crate::lease::LeaseError::Internal(
+        ) -> Result<
+            cntryl_midge_durability::lease::LeaderRecord,
+            cntryl_midge_durability::lease::LeaseError,
+        > {
+            Err(cntryl_midge_durability::lease::LeaseError::Internal(
                 "test leader store does not acquire leadership".to_string(),
             ))
         }
 
         fn read_current(
             &self,
-        ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+        ) -> Result<
+            Option<cntryl_midge_durability::lease::LeaderRecord>,
+            cntryl_midge_durability::lease::LeaseError,
+        > {
             let stale = self.0.load(std::sync::atomic::Ordering::SeqCst);
-            Ok(Some(crate::lease::LeaderRecord {
+            Ok(Some(cntryl_midge_durability::lease::LeaderRecord {
                 epoch: if stale { 2 } else { 1 },
                 holder_id: if stale { "new-writer" } else { "old-writer" }.to_string(),
                 acquired_at: "test".to_string(),
@@ -518,52 +524,58 @@ mod tests {
     /// proven either way.
     struct UnreachableLeaderStore(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
-    impl crate::lease::LeaderStore for UnreachableLeaderStore {
+    impl cntryl_midge_durability::lease::LeaderStore for UnreachableLeaderStore {
         fn acquire_leadership(
             &self,
             _holder_id: &str,
-        ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
-            Err(crate::lease::LeaseError::Internal(
+        ) -> Result<
+            cntryl_midge_durability::lease::LeaderRecord,
+            cntryl_midge_durability::lease::LeaseError,
+        > {
+            Err(cntryl_midge_durability::lease::LeaseError::Internal(
                 "test leader store does not acquire leadership".to_string(),
             ))
         }
 
         fn read_current(
             &self,
-        ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+        ) -> Result<
+            Option<cntryl_midge_durability::lease::LeaderRecord>,
+            cntryl_midge_durability::lease::LeaseError,
+        > {
             if self.0.load(std::sync::atomic::Ordering::SeqCst) {
-                Ok(Some(crate::lease::LeaderRecord {
+                Ok(Some(cntryl_midge_durability::lease::LeaderRecord {
                     epoch: 1,
                     holder_id: "writer".to_string(),
                     acquired_at: "test".to_string(),
                 }))
             } else {
-                Err(crate::lease::LeaseError::IoError(
+                Err(cntryl_midge_durability::lease::LeaseError::IoError(
                     "leader store unreachable".to_string(),
                 ))
             }
         }
     }
 
-    impl crate::wal::WalWriter for PanickingSyncWriter {
+    impl cntryl_midge_durability::wal::WalWriter for PanickingSyncWriter {
         fn append_record_accounted(
             &self,
-            _record: &crate::wal::WalRecord,
-        ) -> Result<u64, crate::wal::traits::WalAppendError> {
+            _record: &cntryl_midge_durability::wal::WalRecord,
+        ) -> Result<u64, cntryl_midge_durability::wal::traits::WalAppendError> {
             Ok(0)
         }
 
         fn append_batch_accounted(
             &self,
-            _records: &[crate::wal::WalRecord],
-        ) -> Result<u64, crate::wal::traits::WalAppendError> {
+            _records: &[cntryl_midge_durability::wal::WalRecord],
+        ) -> Result<u64, cntryl_midge_durability::wal::traits::WalAppendError> {
             Ok(0)
         }
 
         fn sync_with_timeout(
             &self,
             _timeout: std::time::Duration,
-        ) -> crate::common::MidgeResult<()> {
+        ) -> cntryl_midge_core::common::MidgeResult<()> {
             assert!(
                 !self.0.swap(false, std::sync::atomic::Ordering::SeqCst),
                 "injected sync panic"
@@ -575,29 +587,30 @@ mod tests {
             0
         }
 
-        fn tail(&self) -> crate::wal::format::SegmentTail {
-            crate::wal::traits::unsealable::tail()
+        fn tail(&self) -> cntryl_midge_durability::wal::format::SegmentTail {
+            cntryl_midge_durability::wal::traits::unsealable::tail()
         }
 
         fn seal_facts(
             &self,
             _timeout: std::time::Duration,
-        ) -> crate::common::MidgeResult<crate::wal::format::SealedFacts> {
-            crate::wal::traits::unsealable::seal()
+        ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_durability::wal::format::SealedFacts>
+        {
+            cntryl_midge_durability::wal::traits::unsealable::seal()
         }
 
         fn write_footer(
             &self,
-            _facts: &crate::wal::format::SealedFacts,
+            _facts: &cntryl_midge_durability::wal::format::SealedFacts,
             _timeout: std::time::Duration,
-        ) -> crate::common::MidgeResult<()> {
-            crate::wal::traits::unsealable::write_footer()
+        ) -> cntryl_midge_core::common::MidgeResult<()> {
+            cntryl_midge_durability::wal::traits::unsealable::write_footer()
         }
     }
 
     fn create_event_loop_with_policy(
-        policy: crate::wal::DurabilityPolicy,
-    ) -> crate::common::MidgeResult<EventLoop> {
+        policy: cntryl_midge_durability::wal::DurabilityPolicy,
+    ) -> cntryl_midge_core::common::MidgeResult<EventLoop> {
         let state = create_test_state();
         let router = Arc::new(ResponseRouter::new());
         let config = RuntimeConfig {
@@ -616,8 +629,9 @@ mod tests {
     #[test]
     fn should_produce_single_terminal_failure_when_wal_fsync_panics() {
         // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
+        let mut event_loop =
+            create_event_loop_with_policy(cntryl_midge_durability::wal::DurabilityPolicy::Batched)
+                .expect("create event loop");
         event_loop
             .actors
             .wal_actor
@@ -638,7 +652,7 @@ mod tests {
         // Assert
         assert!(matches!(
             result,
-            Err(crate::common::MidgeError::Internal(_))
+            Err(cntryl_midge_core::common::MidgeError::Internal(_))
         ));
         assert_eq!(event_loop.pipeline.durability.current_key(), generation);
         assert!(!event_loop.pipeline.durability.has_pending_waiters());
@@ -649,7 +663,7 @@ mod tests {
             response.recv_timeout(std::time::Duration::from_secs(1)),
             Ok(RuntimeResponse::Error {
                 request_id: 77,
-                error: crate::common::MidgeError::Internal(message),
+                error: cntryl_midge_core::common::MidgeError::Internal(message),
             }) if message.contains("WAL fsync panicked")
         ));
         assert!(
@@ -660,22 +674,22 @@ mod tests {
             event_loop
                 .sync_wal_generation(CompletionSource::WalSync)
                 .expect_err("fenced WAL must reject a later sync"),
-            crate::common::MidgeError::RecoveryFailed(_)
+            cntryl_midge_core::common::MidgeError::RecoveryFailed(_)
         ));
     }
 
     #[test]
     fn should_report_one_fence_cause_when_sync_cannot_prove_writer_authority(
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         // Arrange: the leader store becomes unreachable after one valid WAL
         // append. The protocol must report that same cause, not a local poison.
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let authority_available = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let leader_store: Arc<dyn crate::lease::LeaderStore> =
+        let leader_store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> =
             Arc::new(UnreachableLeaderStore(Arc::clone(&authority_available)));
         let config = RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::Batched,
             writer_epoch: 1,
             leader_store: Some(leader_store),
             leader_holder_id: Some("writer".to_string()),
@@ -718,11 +732,17 @@ mod tests {
 
         // Assert
         assert!(
-            matches!(next_write, Err(crate::common::MidgeError::Fenced(_))),
+            matches!(
+                next_write,
+                Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+            ),
             "{next_write:?}"
         );
         assert!(
-            matches!(next_sync, Err(crate::common::MidgeError::Fenced(_))),
+            matches!(
+                next_sync,
+                Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+            ),
             "{next_sync:?}"
         );
         Ok(())
@@ -730,16 +750,16 @@ mod tests {
 
     #[test]
     fn should_fence_durable_work_when_sync_detects_stale_writer_authority(
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         // Arrange
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let router = Arc::new(ResponseRouter::new());
         let stale_authority = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let leader_store: Arc<dyn crate::lease::LeaderStore> =
+        let leader_store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> =
             Arc::new(StaleWriterLeaderStore(Arc::clone(&stale_authority)));
         let config = RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::Batched,
             writer_epoch: 1,
             leader_store: Some(leader_store),
             leader_holder_id: Some("old-writer".to_string()),
@@ -764,7 +784,7 @@ mod tests {
                     insert_only: false,
                 }],
                 assertions: Vec::new(),
-                durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+                durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Batched),
                 start_sequence: None,
                 conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             },
@@ -794,27 +814,30 @@ mod tests {
                     insert_only: false,
                 }],
                 assertions: Vec::new(),
-                durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+                durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Batched),
                 start_sequence: None,
                 conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             },
         );
 
         // Assert
-        assert!(matches!(error, crate::common::MidgeError::Fenced(_)));
+        assert!(matches!(
+            error,
+            cntryl_midge_core::common::MidgeError::Fenced(_)
+        ));
         assert!(event_loop.actors.wal_actor.is_fenced());
         assert!(event_loop.pipeline.wal_transition.is_fenced());
         assert!(event_loop.state.persistence_anomaly_detected());
         assert!(matches!(
             rejected,
-            Err(crate::common::MidgeError::Fenced(_))
+            Err(cntryl_midge_core::common::MidgeError::Fenced(_))
         ));
         assert_eq!(event_loop.state.sequence, sequence_before_rejected);
         assert!(matches!(
             response.recv_timeout(std::time::Duration::from_secs(1)),
             Ok(RuntimeResponse::Error {
                 request_id: actual,
-                error: crate::common::MidgeError::Fenced(_),
+                error: cntryl_midge_core::common::MidgeError::Fenced(_),
             }) if actual == request_id
         ));
         assert!(
@@ -917,14 +940,15 @@ mod tests {
     #[test]
     fn should_resolve_every_local_sync_boundary_without_partial_operational_state() {
         // Arrange
-        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let _test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
 
         for boundary in WalTransitionBoundary::LOCAL_SYNC_BOUNDARIES {
             let expected = local_sync_expectation(boundary);
-            let mut event_loop =
-                create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-                    .expect("create event loop");
+            let mut event_loop = create_event_loop_with_policy(
+                cntryl_midge_durability::wal::DurabilityPolicy::Batched,
+            )
+            .expect("create event loop");
             event_loop
                 .actors
                 .wal_actor
@@ -952,7 +976,10 @@ mod tests {
             fail::remove(boundary.failpoint_name());
 
             // Assert
-            assert!(matches!(error, crate::common::MidgeError::Internal(_)));
+            assert!(matches!(
+                error,
+                cntryl_midge_core::common::MidgeError::Internal(_)
+            ));
             assert_local_sync_state(&event_loop, boundary, &expected);
 
             if boundary == WalTransitionBoundary::BeforeFsync {
@@ -983,7 +1010,7 @@ mod tests {
                     ));
                     assert!(matches!(
                         event_loop.sync_wal_generation(CompletionSource::WalSync),
-                        Err(crate::common::MidgeError::RecoveryFailed(_))
+                        Err(cntryl_midge_core::common::MidgeError::RecoveryFailed(_))
                     ));
                 }
             }
@@ -999,8 +1026,9 @@ mod tests {
     #[test]
     fn should_reject_exhausted_local_generation_before_fsync_or_state_change() {
         // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
+        let mut event_loop =
+            create_event_loop_with_policy(cntryl_midge_durability::wal::DurabilityPolicy::Batched)
+                .expect("create event loop");
         let _ = event_loop
             .pipeline
             .durability
@@ -1016,7 +1044,7 @@ mod tests {
         // Assert
         assert!(matches!(
             error,
-            crate::common::MidgeError::ResourceLimit(message)
+            cntryl_midge_core::common::MidgeError::ResourceLimit(message)
                 if message.contains("generation space exhausted")
         ));
         assert_eq!(event_loop.pipeline.durability.current_key(), u64::MAX);
@@ -1030,8 +1058,9 @@ mod tests {
     #[test]
     fn should_complete_sealed_waiter_before_explicit_wal_barrier_acknowledgement() {
         // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
+        let mut event_loop =
+            create_event_loop_with_policy(cntryl_midge_durability::wal::DurabilityPolicy::Batched)
+                .expect("create event loop");
         event_loop
             .pipeline
             .durability
@@ -1065,7 +1094,7 @@ mod tests {
         let state = create_test_state();
         let router = Arc::new(ResponseRouter::new());
         let config = RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::Batched,
             wal_batch_config: BatchConfig {
                 max_delay_ms: 0,
                 max_bytes: usize::MAX,
@@ -1129,7 +1158,7 @@ mod tests {
     fn should_report_recovery_required_when_cloud_wal_generation_drifts() {
         // Arrange: a local bookkeeping drift, not a lost lease (#537).
         let mut event_loop = super::super::tests::create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )
         .expect("create cloud event loop");
         crate::runtime::wal_history::fixture::rotate(&mut event_loop.state.wal.history)
@@ -1154,18 +1183,21 @@ mod tests {
 
         // Assert
         assert!(
-            matches!(drift, crate::common::MidgeError::Internal(_)),
+            matches!(drift, cntryl_midge_core::common::MidgeError::Internal(_)),
             "{drift:?}"
         );
         assert!(
             matches!(
                 next_write,
-                Err(crate::common::MidgeError::RecoveryFailed(_))
+                Err(cntryl_midge_core::common::MidgeError::RecoveryFailed(_))
             ),
             "{next_write:?}"
         );
         assert!(
-            matches!(next_sync, Err(crate::common::MidgeError::RecoveryFailed(_))),
+            matches!(
+                next_sync,
+                Err(cntryl_midge_core::common::MidgeError::RecoveryFailed(_))
+            ),
             "{next_sync:?}"
         );
     }
@@ -1173,8 +1205,9 @@ mod tests {
     #[test]
     fn should_queue_confirm_waiter_after_deferred_transaction_acknowledgement() {
         // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
+        let mut event_loop =
+            create_event_loop_with_policy(cntryl_midge_durability::wal::DurabilityPolicy::Batched)
+                .expect("create event loop");
         let response = event_loop.routing.router.register(51, "ApplyTransaction");
         event_loop
             .state
@@ -1220,8 +1253,9 @@ mod tests {
     #[test]
     fn should_ack_without_confirm_waiter_when_applied_transaction_is_already_durable() {
         // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
+        let mut event_loop =
+            create_event_loop_with_policy(cntryl_midge_durability::wal::DurabilityPolicy::Batched)
+                .expect("create event loop");
         let response = event_loop.routing.router.register(52, "ApplyTransaction");
         event_loop
             .state
@@ -1262,8 +1296,9 @@ mod tests {
     #[test]
     fn should_complete_test_wal_append_waiter_through_unconditional_boundary() {
         // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
+        let mut event_loop =
+            create_event_loop_with_policy(cntryl_midge_durability::wal::DurabilityPolicy::Batched)
+                .expect("create event loop");
         let response = event_loop.routing.router.register(73, "WalAppend");
         let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: 73,
@@ -1286,8 +1321,9 @@ mod tests {
     #[test]
     fn should_complete_test_read_waiter_through_unconditional_boundary() {
         // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
+        let mut event_loop =
+            create_event_loop_with_policy(cntryl_midge_durability::wal::DurabilityPolicy::Batched)
+                .expect("create event loop");
         let response = event_loop.routing.router.register(75, "Read");
         let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::Read {
             request_id: 75,
@@ -1312,8 +1348,9 @@ mod tests {
     #[test]
     fn should_complete_test_range_scan_waiter_through_unconditional_boundary() {
         // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
+        let mut event_loop =
+            create_event_loop_with_policy(cntryl_midge_durability::wal::DurabilityPolicy::Batched)
+                .expect("create event loop");
         let response = event_loop.routing.router.register(76, "RangeScan");
         let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::RangeScan {
             request_id: 76,
@@ -1339,15 +1376,17 @@ mod tests {
     #[test]
     fn should_preserve_transaction_barrier_when_test_waiter_fails() {
         // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
+        let mut event_loop =
+            create_event_loop_with_policy(cntryl_midge_durability::wal::DurabilityPolicy::Batched)
+                .expect("create event loop");
         event_loop.state.begin_pending_transaction();
         let response = event_loop.routing.router.register(74, "WalAppend");
         let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: 74,
             sequence: 41,
         });
-        let error = crate::common::MidgeError::Internal("injected waiter failure".to_string());
+        let error =
+            cntryl_midge_core::common::MidgeError::Internal("injected waiter failure".to_string());
 
         // Act
         event_loop.fail_durability_waiters(vec![waiter], &error);
@@ -1358,7 +1397,7 @@ mod tests {
             response.recv_timeout(std::time::Duration::from_secs(1)),
             Ok(RuntimeResponse::Error {
                 request_id: 74,
-                error: crate::common::MidgeError::Internal(message),
+                error: cntryl_midge_core::common::MidgeError::Internal(message),
             }) if message == "injected waiter failure"
         ));
     }

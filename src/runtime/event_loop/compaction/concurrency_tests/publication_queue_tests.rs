@@ -54,7 +54,7 @@ fn wait_for_publication(fixture: &mut ConcurrentFixture, held: &HeldPublication)
 fn should_retain_ready_sibling_compute_while_first_publisher_has_released_local_gate(
 ) -> MidgeResult<()> {
     // Arrange: two disjoint physical jobs, with only the first publisher held.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
     let first = fixture.file(1, 1, b"a", b"first", 1)?;

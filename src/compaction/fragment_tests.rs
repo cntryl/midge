@@ -1,15 +1,15 @@
 use super::*;
-use crate::sst::traits::{RawSstVersion, SstFactory};
-use crate::types::{EntryType, RangeTombstone};
+use cntryl_midge_core::types::{EntryType, RangeTombstone};
+use cntryl_midge_table::sst::traits::{RawSstVersion, SstFactory};
 use std::sync::Arc;
 
 fn fragment_fixture() -> (
-    Arc<crate::io::MockFs>,
-    crate::sst::FsSstFactoryIo,
+    Arc<cntryl_midge_core::io::MockFs>,
+    cntryl_midge_table::sst::FsSstFactoryIo,
     CompactionPlan,
 ) {
-    let fs = Arc::new(crate::io::MockFs::new());
-    let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
+    let fs = Arc::new(cntryl_midge_core::io::MockFs::new());
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(fs.clone(), 4096);
     let mut plan = CompactionPlan::new(0, 2, 2).with_output_seq(10);
     plan.purpose = strategy::CompactionPurpose::Fragment {
         split_key: b"m".to_vec(),
@@ -38,18 +38,18 @@ fn read_fragment_versions(
 fn fragment_metadata(
     factory: &dyn SstFactory,
     names: &[String],
-) -> MidgeResult<Vec<crate::metadata::FileMeta>> {
+) -> MidgeResult<Vec<cntryl_midge_durability::metadata::FileMeta>> {
     names
         .iter()
         .map(|name| {
-            let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
+            let summary = cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
                 name,
                 factory.output_fs(),
-                crate::common::resource_budget::ResourceBudget::new(
+                cntryl_midge_core::common::resource_budget::ResourceBudget::new(
                     DEFAULT_COMPACTION_MEMORY_LIMIT,
                 ),
             )?;
-            Ok(crate::metadata::FileMeta {
+            Ok(cntryl_midge_durability::metadata::FileMeta {
                 name: name.clone(),
                 level: 2,
                 size_bytes: summary.size_bytes,
@@ -157,22 +157,25 @@ fn should_cleanup_unpublished_fragments_when_staging_fails() -> MidgeResult<()> 
     writer.add_with_meta(b"a", Some(b"left"), 1, EntryType::Put, None)?;
     writer.add_with_meta(b"z", Some(b"right"), 2, EntryType::Put, None)?;
     writer.finish_to_path(Path::new("source.sst"))?;
-    let budget = crate::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+        plan.compaction_memory_limit,
+    );
     for fail_on in [1, 2] {
         let calls = std::cell::Cell::new(0);
-        let sink = |_name: &str,
-                    _path: &Path,
-                    _budget: &crate::common::resource_budget::ResourceBudget,
-                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
-            calls.set(calls.get() + 1);
-            if calls.get() == fail_on {
-                Err(MidgeError::Aborted(
-                    "injected fragment staging failure".into(),
-                ))
-            } else {
-                Ok(())
-            }
-        };
+        let sink =
+            |_name: &str,
+             _path: &Path,
+             _budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
+             _summary: Option<&cntryl_midge_table::sst::traits::FinalizedSst>| {
+                calls.set(calls.get() + 1);
+                if calls.get() == fail_on {
+                    Err(MidgeError::Aborted(
+                        "injected fragment staging failure".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            };
 
         // Act
         let result = execute_compaction_at_target(
@@ -196,7 +199,7 @@ fn should_cleanup_unpublished_fragments_when_staging_fails() -> MidgeResult<()> 
         assert!(fs.get_file("source.sst").is_some());
         for ordinal in 0..2 {
             assert!(fs
-                .get_file(&crate::cloud_layout::compaction_file_name(
+                .get_file(&cntryl_midge_core::cloud_layout::compaction_file_name(
                     0, 2, 10, ordinal
                 ))
                 .is_none());
@@ -275,7 +278,7 @@ fn should_retain_source_when_the_fragment_boundary_is_not_strictly_interior() ->
         assert!(fs.get_file("source.sst").is_some());
         for ordinal in 0..2 {
             assert!(fs
-                .get_file(&crate::cloud_layout::compaction_file_name(
+                .get_file(&cntryl_midge_core::cloud_layout::compaction_file_name(
                     0, 2, 10, ordinal
                 ))
                 .is_none());
@@ -307,7 +310,7 @@ fn should_reject_shadowed_conflicts_when_fragmenting_raw_history() -> MidgeResul
     assert!(fs.get_file("source.sst").is_some());
     for ordinal in 0..2 {
         assert!(fs
-            .get_file(&crate::cloud_layout::compaction_file_name(
+            .get_file(&cntryl_midge_core::cloud_layout::compaction_file_name(
                 0, 2, 10, ordinal
             ))
             .is_none());
@@ -333,7 +336,7 @@ fn should_keep_fragment_ordinals_contiguous_when_a_soft_roll_precedes_an_empty_c
     assert_eq!(
         outputs,
         (0..2)
-            .map(|ordinal| crate::cloud_layout::compaction_file_name(0, 2, 10, ordinal))
+            .map(|ordinal| cntryl_midge_core::cloud_layout::compaction_file_name(0, 2, 10, ordinal))
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -358,8 +361,8 @@ fn should_keep_fragment_ordinals_contiguous_when_a_soft_roll_precedes_an_empty_c
 #[test]
 fn should_keep_exact_finalized_identity_for_each_soft_roll_output() -> MidgeResult<()> {
     // Arrange
-    let fs = Arc::new(crate::io::MockFs::new());
-    let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
+    let fs = Arc::new(cntryl_midge_core::io::MockFs::new());
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(fs.clone(), 4096);
     let mut plan = CompactionPlan::new(0, 1, 2).with_output_seq(949);
     plan.target_sst_size = 1;
     plan.add_test_source("source.sst");
@@ -375,13 +378,13 @@ fn should_keep_exact_finalized_identity_for_each_soft_roll_output() -> MidgeResu
     let finalized_outputs = std::cell::RefCell::new(Vec::new());
     let sink = |name: &str,
                 path: &Path,
-                _budget: &crate::common::resource_budget::ResourceBudget,
-                finalized: Option<&crate::sst::traits::FinalizedSst>| {
+                _budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
+                finalized: Option<&cntryl_midge_table::sst::traits::FinalizedSst>| {
         let finalized = finalized.ok_or_else(|| {
             MidgeError::Internal("filesystem compaction omitted finalized identity".into())
         })?;
         let independent_identity =
-            crate::sst::fs::file_identity_with_fs(&factory.output_fs(), path)?;
+            cntryl_midge_table::sst::fs::file_identity_with_fs(&factory.output_fs(), path)?;
         finalized_outputs.borrow_mut().push((
             name.to_owned(),
             finalized.clone(),
@@ -425,7 +428,7 @@ fn should_retain_source_when_the_fragment_boundary_exceeds_its_memory_budget() -
     writer.add_with_meta(b"a", Some(b"left"), 1, EntryType::Put, None)?;
     writer.add_with_meta(b"z", Some(b"right"), 2, EntryType::Put, None)?;
     writer.finish_to_path(Path::new("source.sst"))?;
-    let budget = crate::common::resource_budget::ResourceBudget::new(64 * 1024);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(64 * 1024);
 
     // Act
     let result = execute_compaction_at_target(
@@ -459,7 +462,9 @@ fn should_cleanup_fragments_when_a_raw_key_group_exceeds_the_staging_limit() -> 
     writer.add_with_meta(b"a", Some(b"left"), 1, EntryType::Put, None)?;
     writer.add_with_meta(b"z", Some(&vec![7; 128 * 1024]), 2, EntryType::Put, None)?;
     writer.finish_to_path(Path::new("source.sst"))?;
-    let budget = crate::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(
+        plan.compaction_memory_limit,
+    );
 
     // Act
     let result = execute_compaction_at_target(
@@ -482,7 +487,7 @@ fn should_cleanup_fragments_when_a_raw_key_group_exceeds_the_staging_limit() -> 
     assert!(fs.get_file("source.sst").is_some());
     for ordinal in 0..2 {
         assert!(fs
-            .get_file(&crate::cloud_layout::compaction_file_name(
+            .get_file(&cntryl_midge_core::cloud_layout::compaction_file_name(
                 0, 2, 10, ordinal
             ))
             .is_none());

@@ -1,13 +1,13 @@
 use super::*;
-use crate::lease::PrimaryLease as _;
+use cntryl_midge_durability::lease::PrimaryLease as _;
 use std::sync::Arc;
 use std::time::Duration;
 
 struct MigrationFixture {
-    backend: Arc<crate::storage::cloud::MockCloudBackend>,
+    backend: Arc<cntryl_midge_storage::cloud::MockCloudBackend>,
     cloud: Arc<CloudStorage>,
-    lease: Arc<crate::lease::CloudStorageLease>,
-    _guard: crate::lease::LeaseGuard,
+    lease: Arc<cntryl_midge_durability::lease::CloudStorageLease>,
+    _guard: cntryl_midge_durability::lease::LeaseGuard,
     store: Arc<dyn LeaderStore>,
     source: CloudMetadataGeneration,
     candidate: CloudMetadataGeneration,
@@ -16,32 +16,34 @@ struct MigrationFixture {
 
 impl MigrationFixture {
     fn new(stage_descriptor: bool) -> MidgeResult<Self> {
-        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let backend = Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new());
         let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
         let temp = tempfile::tempdir()?;
-        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: String::new(),
-            },
-            temp.path().to_path_buf(),
-            Arc::clone(&cloud),
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "test".into(),
+                    prefix: String::new(),
+                },
+                temp.path().to_path_buf(),
+                Arc::clone(&cloud),
+            ),
+        );
         let guard = Arc::clone(&lease).try_acquire()?;
         let store = lease
             .get_leader_store()
             .expect("provider lease exposes its leader store");
-        let source_manifest = crate::metadata::codec::encode(
-            crate::metadata::codec::MANIFEST,
-            &crate::metadata::Manifest::default(),
+        let source_manifest = cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &cntryl_midge_durability::metadata::Manifest::default(),
         )?;
         let source_bodies = std::collections::BTreeMap::from([
             (
-                crate::metadata::files::FORMAT.to_string(),
-                crate::metadata::format::current_format_marker_bytes(),
+                cntryl_midge_durability::metadata::files::FORMAT.to_string(),
+                cntryl_midge_durability::metadata::format::current_format_marker_bytes(),
             ),
             (
-                crate::metadata::files::MANIFEST_SNAPSHOT.to_string(),
+                cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT.to_string(),
                 source_manifest,
             ),
         ]);
@@ -65,7 +67,7 @@ impl MigrationFixture {
             migration_id: migration_id.clone(),
             target_format: 10,
             source: CloudMetadataGenerationIdentity::from_generation(&source),
-            candidate: crate::lease::CloudFormatMigrationCandidate {
+            candidate: cntryl_midge_durability::lease::CloudFormatMigrationCandidate {
                 generation: CloudMetadataGenerationIdentity::from_generation(&candidate),
                 descriptor_key: CloudFormatMigrationPending::candidate_descriptor_key(
                     &migration_id,
@@ -139,8 +141,8 @@ impl MigrationFixture {
         let uploads = self.backend.get_uploads();
         assert!(!uploads.iter().any(|(key, _)| {
             key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY
-                || key == crate::wal::cloud_catalog::OBJECT_KEY
-                || key == crate::wal::cloud_catalog::MIRROR_OBJECT_KEY
+                || key == cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY
+                || key == cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY
         }));
     }
 }
@@ -149,9 +151,12 @@ fn stage_candidate(
     cloud: &CloudStorage,
     source: &BTreeMap<String, Vec<u8>>,
 ) -> MidgeResult<CloudMetadataGeneration> {
-    use crate::metadata::{files, local_authority::LocalMetadataAuthority};
-    let local: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
-    crate::metadata::format::ensure_or_create_format_marker(&local, std::path::Path::new("."))?;
+    use cntryl_midge_durability::metadata::{files, local_authority::LocalMetadataAuthority};
+    let local: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
+    cntryl_midge_durability::metadata::format::ensure_or_create_format_marker(
+        &local,
+        std::path::Path::new("."),
+    )?;
     let selected = LocalMetadataAuthority::stage_upgrade_candidate(
         Arc::clone(&local),
         [7; 32],
@@ -165,8 +170,11 @@ fn stage_candidate(
     )?;
     let mut bodies = BTreeMap::from([(files::FORMAT.to_owned(), FORMAT_10_MARKER.to_vec())]);
     for name in selected.selected_relative_paths() {
-        let bytes = crate::io::read_all(local.as_ref(), &crate::io::FsPath::new(&name))
-            .map_err(crate::io::FsError::into_midge)?;
+        let bytes = cntryl_midge_core::io::read_all(
+            local.as_ref(),
+            &cntryl_midge_core::io::FsPath::new(&name),
+        )
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?;
         bodies.insert(name, bytes.to_vec());
     }
     LocalMetadataAuthority::validate_cloud_bodies(&bodies)?;
@@ -179,16 +187,19 @@ fn generation(
     ordinal: u64,
     bodies: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> CloudMetadataGeneration {
-    let id = crate::lease::SharedGenerationId::new(ordinal).expect("positive generation ordinal");
+    let id = cntryl_midge_durability::lease::SharedGenerationId::new(ordinal)
+        .expect("positive generation ordinal");
     let uuid = format!("00000000-0000-4000-8000-{ordinal:012}");
     let objects = bodies
         .iter()
-        .map(|(file_name, body)| crate::lease::CloudMetadataObject {
-            file_name: file_name.clone(),
-            object_key: format!("metadata/generations/{uuid}/{file_name}"),
-            len: u64::try_from(body.len()).expect("test body length"),
-            crc32c: crc32c::crc32c(body),
-        })
+        .map(
+            |(file_name, body)| cntryl_midge_durability::lease::CloudMetadataObject {
+                file_name: file_name.clone(),
+                object_key: format!("metadata/generations/{uuid}/{file_name}"),
+                len: u64::try_from(body.len()).expect("test body length"),
+                crc32c: crc32c::crc32c(body),
+            },
+        )
         .collect();
     CloudMetadataGeneration {
         id,
@@ -208,7 +219,7 @@ fn upload_generation(
             .get(&object.file_name)
             .expect("generation object has a body")
             .clone();
-        crate::storage::cloud::BlockingCloud::new(cloud, &deadline).put_with_precondition(
+        cntryl_midge_storage::cloud::BlockingCloud::new(cloud, &deadline).put_with_precondition(
             &object.object_key,
             body,
             &StoragePrecondition::IfAbsent,
@@ -315,7 +326,7 @@ fn should_reject_missing_candidate_descriptor_before_startup_catalog_mutation() 
 fn should_refuse_migration_descriptor_when_successful_put_has_no_readback() -> MidgeResult<()> {
     // Arrange
     let fixture = MigrationFixture::new(false)?;
-    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let _test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     fail::cfg(
         "midge::cloud::inject_missing_format_descriptor_readback",
@@ -387,7 +398,7 @@ fn should_reject_changed_candidate_object_before_startup_catalog_mutation() -> M
         .find(|object| object.file_name == "metadata/generations/upgrade-candidate/manifest/base")
         .expect("candidate manifest base object");
     let deadline = OperationDeadline::from_budget(Duration::from_secs(2));
-    crate::storage::cloud::BlockingCloud::new(&fixture.cloud, &deadline).put_with_headers(
+    cntryl_midge_storage::cloud::BlockingCloud::new(&fixture.cloud, &deadline).put_with_headers(
         &object.object_key,
         b"changed candidate".to_vec(),
         Vec::new(),
@@ -424,12 +435,13 @@ fn force_unexpected_pointer_selection(
     let wire = BlockingCloud::new(cloud, &deadline)
         .get_optional("metadata/committed-pointer.v1")?
         .ok_or(MidgeError::NotFound)?;
-    let mut pointer: TestPointer = crate::metadata::codec::decode(4, &wire)
+    let mut pointer: TestPointer = cntryl_midge_durability::metadata::codec::decode(4, &wire)
         .map_err(|error| MidgeError::Corruption(error.to_string()))?;
     let mut unexpected = candidate.clone();
-    unexpected.id = crate::lease::SharedGenerationId::new(3).expect("third generation");
+    unexpected.id =
+        cntryl_midge_durability::lease::SharedGenerationId::new(3).expect("third generation");
     pointer.committed = Some(unexpected);
-    let wire = crate::metadata::codec::encode(4, &pointer)
+    let wire = cntryl_midge_durability::metadata::codec::encode(4, &pointer)
         .map_err(|error| MidgeError::Internal(error.to_string()))?;
     BlockingCloud::new(cloud, &deadline).put_with_headers(
         "metadata/committed-pointer.v1",

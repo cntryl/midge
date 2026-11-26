@@ -16,12 +16,14 @@
 //! Memory mode keeps the same ledger in memory (#851), with no segment files
 //! behind it, so the ledger is the one open-segment authority in every mode.
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
-use crate::lease::LeaderStore;
-use crate::wal::format::{holds_no_records, ChainLink, SealedFacts, SegmentHeader, SegmentScan};
-use crate::wal::ledger::{HolderId, LedgerEdit, OpenFacts, SegmentId, WalLedger};
-use crate::wal::ledger_store::{LedgerStore, LEDGER_FILE};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
+use cntryl_midge_durability::lease::LeaderStore;
+use cntryl_midge_durability::wal::format::{
+    holds_no_records, ChainLink, SealedFacts, SegmentHeader, SegmentScan,
+};
+use cntryl_midge_durability::wal::ledger::{HolderId, LedgerEdit, OpenFacts, SegmentId, WalLedger};
+use cntryl_midge_durability::wal::ledger_store::{LedgerStore, LEDGER_FILE};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,7 +74,7 @@ fn with_writer_fence<T>(
         )));
     }
 
-    crate::wal::writer_effect::with_writer_effect(
+    cntryl_midge_durability::wal::writer_effect::with_writer_effect(
         |run| {
             fence
                 .store
@@ -86,8 +88,8 @@ fn with_writer_fence<T>(
 
 /// Where a [`WalHistory`] persists its ledger edits.
 pub(crate) trait LedgerJournal: Send {
-    fn sync_counts(&self) -> crate::wal::ledger_store::LedgerSyncSnapshot {
-        crate::wal::ledger_store::LedgerSyncSnapshot::default()
+    fn sync_counts(&self) -> cntryl_midge_durability::wal::ledger_store::LedgerSyncSnapshot {
+        cntryl_midge_durability::wal::ledger_store::LedgerSyncSnapshot::default()
     }
     /// The ledger as persisted.
     fn ledger(&self) -> &WalLedger;
@@ -101,7 +103,7 @@ pub(crate) trait LedgerJournal: Send {
 }
 
 impl LedgerJournal for LedgerStore {
-    fn sync_counts(&self) -> crate::wal::ledger_store::LedgerSyncSnapshot {
+    fn sync_counts(&self) -> cntryl_midge_durability::wal::ledger_store::LedgerSyncSnapshot {
         LedgerStore::sync_counts(self)
     }
     fn ledger(&self) -> &WalLedger {
@@ -161,7 +163,9 @@ impl std::fmt::Debug for WalHistory {
 }
 
 impl WalHistory {
-    pub(crate) fn ledger_sync_counts(&self) -> crate::wal::ledger_store::LedgerSyncSnapshot {
+    pub(crate) fn ledger_sync_counts(
+        &self,
+    ) -> cntryl_midge_durability::wal::ledger_store::LedgerSyncSnapshot {
         self.journal.sync_counts()
     }
     /// The ledger as stored in `wal`, without changing anything: for epoch
@@ -465,7 +469,7 @@ impl WalHistory {
             MidgeError::Internal(format!("cannot rotate WAL segment {seal}: {error}"))
         })?;
         if let Some(wal) = &self.segments {
-            let open_file = FsPath::new(crate::wal::segment_file_name(seal));
+            let open_file = FsPath::new(cntryl_midge_durability::wal::segment_file_name(seal));
             if !wal.exists(&open_file).map_err(FsError::into_midge)? {
                 return Err(MidgeError::RecoveryFailed(format!(
                     "open WAL segment {seal} disappeared; the records appended to it are lost"
@@ -582,7 +586,7 @@ impl WalHistory {
     pub(crate) fn record_sync_in_group(
         &mut self,
         through_bytes: u64,
-        group: &crate::lease::WriterEffectGroup,
+        group: &cntryl_midge_durability::lease::WriterEffectGroup,
     ) -> MidgeResult<()> {
         let fence = self.fence.clone().ok_or_else(|| {
             MidgeError::Internal("native writer group requires a fenced WAL history".into())
@@ -595,9 +599,9 @@ impl WalHistory {
         let epoch = self.epoch;
         let active = group
             .reserve_ticket(fence.timeout)
-            .and_then(crate::lease::WriterEffectTicket::activate)
+            .and_then(cntryl_midge_durability::lease::WriterEffectTicket::activate)
             .map_err(|error| error.into_writer_effect_error("WAL history group activation"))?;
-        crate::wal::writer_effect::with_writer_effect(
+        cntryl_midge_durability::wal::writer_effect::with_writer_effect(
             |run| {
                 fence
                     .store
@@ -633,7 +637,7 @@ impl WalHistory {
     /// Record a salvage cut only after shared authority committed its floor.
     pub(crate) fn prepare_open_cut(
         &mut self,
-        cut: crate::wal::planner::OpenCut,
+        cut: cntryl_midge_durability::wal::planner::OpenCut,
         floor: u64,
     ) -> MidgeResult<()> {
         self.under_writer_fence(|history| {
@@ -732,7 +736,7 @@ impl WalHistory {
             .members()
             .take_while(|id| *id < to)
             .map(|id| {
-                let name = FsPath::new(crate::wal::segment_file_name(id));
+                let name = FsPath::new(cntryl_midge_durability::wal::segment_file_name(id));
                 let bytes = wal.metadata(&name).map_or(0, |metadata| metadata.len);
                 (id, bytes)
             })
@@ -824,16 +828,18 @@ fn keep_aside(wal: &dyn Fs, cut: Option<SegmentId>, dropped: &[SegmentId]) -> Mi
     let aside = unused_aside_directory(wal)?;
     wal.create_dir_all(&aside).map_err(FsError::into_midge)?;
     if let Some(id) = cut {
-        let name = crate::wal::segment_file_name(id);
-        crate::io::copy_durably(wal, &FsPath::new(&name), &join(&aside, &name))
+        let name = cntryl_midge_durability::wal::segment_file_name(id);
+        cntryl_midge_core::io::copy_durably(wal, &FsPath::new(&name), &join(&aside, &name))
             .map_err(FsError::into_midge)?;
     }
     for id in dropped {
-        let name = FsPath::new(crate::wal::segment_file_name(*id));
+        let name = FsPath::new(cntryl_midge_durability::wal::segment_file_name(*id));
         if wal.exists(&name).map_err(FsError::into_midge)? {
             wal.rename_atomic(&name, &join(&aside, &name.0))
                 .map_err(FsError::into_midge)?;
-            crate::failpoints::fail_point!("midge::recovery::after_salvage_member_moved");
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::recovery::after_salvage_member_moved"
+            );
         }
     }
     wal.sync_dir(&aside, Durability::Durable)
@@ -846,16 +852,17 @@ fn keep_aside(wal: &dyn Fs, cut: Option<SegmentId>, dropped: &[SegmentId]) -> Mi
 /// Cut segment `cut.segment` back to the `cut.valid_bytes` replay applied
 /// and seal that prefix with a footer, synced.
 fn cut_and_seal(wal: &dyn Fs, cut: SalvageCut) -> MidgeResult<SealedFacts> {
-    let path = FsPath::new(crate::wal::segment_file_name(cut.segment));
+    let path = FsPath::new(cntryl_midge_durability::wal::segment_file_name(cut.segment));
     let scan = {
         let file = wal.open(&path, read_only()).map_err(FsError::into_midge)?;
-        crate::wal::recovery::streaming::scan_segment_file(
+        cntryl_midge_durability::wal::recovery::streaming::scan_segment_file(
             file.as_ref(),
             &path,
             Some(cut.valid_bytes),
         )?
     };
-    crate::io::truncate_durably(wal, &path, cut.valid_bytes).map_err(FsError::into_midge)?;
+    cntryl_midge_core::io::truncate_durably(wal, &path, cut.valid_bytes)
+        .map_err(FsError::into_midge)?;
     write_footer(wal, &path, &scan)
 }
 
@@ -863,7 +870,7 @@ fn cut_and_seal(wal: &dyn Fs, cut: SalvageCut) -> MidgeResult<SealedFacts> {
 /// records need and sync it, or only sync the footer a rotation that
 /// crashed before recording it already wrote.
 fn seal_scanned(wal: &dyn Fs, id: SegmentId, scan: &SegmentScan) -> MidgeResult<SealedFacts> {
-    let path = FsPath::new(crate::wal::segment_file_name(id));
+    let path = FsPath::new(cntryl_midge_durability::wal::segment_file_name(id));
     if let Some(footer) = scan.footer() {
         let mut file = wal.open(&path, read_write()).map_err(FsError::into_midge)?;
         file.sync(Durability::Durable)
@@ -892,14 +899,14 @@ fn write_footer(wal: &dyn Fs, path: &FsPath, scan: &SegmentScan) -> MidgeResult<
 
 /// Read open member `id` whole.
 fn scan_member(wal: &dyn Fs, id: SegmentId) -> MidgeResult<SegmentScan> {
-    let path = FsPath::new(crate::wal::segment_file_name(id));
+    let path = FsPath::new(cntryl_midge_durability::wal::segment_file_name(id));
     let file = wal.open(&path, read_only()).map_err(|error| match error {
         FsError::NotFound(_) => MidgeError::RecoveryFailed(format!(
             "open WAL segment {id} disappeared; the records appended to it are lost"
         )),
         error => error.into_midge(),
     })?;
-    crate::wal::recovery::streaming::scan_segment_file(file.as_ref(), &path, None)
+    cntryl_midge_durability::wal::recovery::streaming::scan_segment_file(file.as_ref(), &path, None)
 }
 
 /// Physical cleanup authorized by a durable ledger retirement.
@@ -974,7 +981,7 @@ fn unused_aside_directory(wal: &dyn Fs) -> MidgeResult<FsPath> {
 /// the header synced, then its directory entry. A file holding no record
 /// that an earlier crash left is rewritten.
 fn create_segment(wal: &dyn Fs, header: &SegmentHeader) -> MidgeResult<()> {
-    let name = crate::wal::segment_file_name(header.id);
+    let name = cntryl_midge_durability::wal::segment_file_name(header.id);
     let path = FsPath::new(&name);
     if wal.exists(&path).map_err(FsError::into_midge)? && !holds_no_records_named(wal, &name)? {
         return Err(MidgeError::Corruption(format!(
@@ -1040,7 +1047,7 @@ fn segment_files(wal: &dyn ReadFs) -> MidgeResult<Vec<(SegmentId, String)>> {
         // Only canonical names are segments; anything else is left alone.
         .filter_map(|entry| {
             Some((
-                crate::wal::parse_segment_file_name(&entry.name)?,
+                cntryl_midge_durability::wal::parse_segment_file_name(&entry.name)?,
                 entry.name,
             ))
         })
@@ -1060,5 +1067,7 @@ fn join(dir: &FsPath, leaf: &str) -> FsPath {
 
 #[cfg(test)]
 pub(crate) mod fixture;
+#[cfg(test)]
+mod ledger_chain_tests;
 #[cfg(test)]
 mod tests;

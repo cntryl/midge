@@ -122,7 +122,9 @@ impl RecoveredCloudWalConfig {
         sealed_tail: Option<crate::runtime::wal_history::SealedSegment>,
     ) -> Self {
         let mut recovered = Self::from(config);
-        if config.wal_durability_policy != crate::wal::DurabilityPolicy::CloudAsync {
+        if config.wal_durability_policy
+            != cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync
+        {
             return recovered;
         }
         if let Some(sealed) = sealed_tail {
@@ -196,7 +198,8 @@ struct PublicationCoordination {
     compaction_publish_result_rx: crossbeam::channel::Receiver<CompactionPublishCompletion>,
     deferred_compaction_result: Option<CompactionPublishCompletion>,
     compaction_publication: compaction::PublicationSlot<compaction::PendingCompactionPublication>,
-    flush_barrier_waiters: HashMap<crate::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
+    flush_barrier_waiters:
+        HashMap<cntryl_midge_core::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
 }
 
 struct PipelineCoordination {
@@ -241,7 +244,7 @@ pub struct EventLoop {
     state: RuntimeState,
     observed_frontiers: Arc<crate::runtime::frontiers::ObservedDurabilityFrontiers>,
     observed_pending_cloud_uploads: Arc<crate::runtime::frontiers::ObservedPendingCloudUploads>,
-    published_frontiers: crate::types::DurabilityFrontiersSnapshot,
+    published_frontiers: cntryl_midge_core::types::DurabilityFrontiersSnapshot,
     published_pending_cloud_uploads: usize,
     actors: EventLoopActors,
     routing: RequestRouting,
@@ -281,10 +284,10 @@ impl EventLoop {
         router: Arc<ResponseRouter>,
         config: super::RuntimeConfig,
         flush_worker_mode: FlushWorkerMode,
-    ) -> crate::common::MidgeResult<Self> {
+    ) -> cntryl_midge_core::common::MidgeResult<Self> {
         let observed_frontiers =
             Arc::new(crate::runtime::frontiers::ObservedDurabilityFrontiers::new(
-                crate::types::DurabilityFrontiersSnapshot {
+                cntryl_midge_core::types::DurabilityFrontiersSnapshot {
                     current_sequence: state.sequence,
                     wal_local_durable_seq: state.wal.frontiers.local_durable(),
                     wal_cloud_durable_seq: state.wal.frontiers.cloud_durable(),
@@ -313,7 +316,7 @@ impl EventLoop {
         flush_worker_mode: FlushWorkerMode,
         observed_frontiers: Arc<crate::runtime::frontiers::ObservedDurabilityFrontiers>,
         observed_pending_cloud_uploads: Arc<crate::runtime::frontiers::ObservedPendingCloudUploads>,
-    ) -> crate::common::MidgeResult<Self> {
+    ) -> cntryl_midge_core::common::MidgeResult<Self> {
         let sealed_tail = Self::seal_recovered_tail(&mut state, &config)?;
         let (inline_flush_worker, worker_msg_tx) = (
             flush_worker_mode.is_inline(),
@@ -367,7 +370,7 @@ impl EventLoop {
             state,
             observed_frontiers,
             observed_pending_cloud_uploads,
-            published_frontiers: crate::types::DurabilityFrontiersSnapshot::default(),
+            published_frontiers: cntryl_midge_core::types::DurabilityFrontiersSnapshot::default(),
             published_pending_cloud_uploads: 0,
             actors: EventLoopActors {
                 flush_actor,
@@ -427,7 +430,7 @@ impl EventLoop {
     }
 
     fn publish_progress_snapshots(&mut self, force_publish: bool) {
-        let frontiers = crate::types::DurabilityFrontiersSnapshot {
+        let frontiers = cntryl_midge_core::types::DurabilityFrontiersSnapshot {
             current_sequence: self.state.sequence,
             wal_local_durable_seq: self.state.wal.frontiers.local_durable(),
             wal_cloud_durable_seq: self.state.wal.frontiers.cloud_durable(),
@@ -447,11 +450,11 @@ impl EventLoop {
 
     fn finish_initialization(
         &mut self,
-        hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+        hybrid_storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
         compaction_memory_limit: usize,
         recovered_cloud_wal: &RecoveredCloudWalConfig,
-        startup_scope: Option<&crate::common::DeadlineScope>,
-    ) -> crate::common::MidgeResult<()> {
+        startup_scope: Option<&cntryl_midge_core::common::DeadlineScope>,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if let Some(storage) = hybrid_storage {
             storage.configure_maintenance_memory(compaction_memory_limit);
             self.set_hybrid_storage(storage);
@@ -470,7 +473,7 @@ impl EventLoop {
     /// deterministic tests run every publication phase on the calling thread.
     fn create_compaction_publish_actor(
         inline: bool,
-    ) -> crate::common::MidgeResult<(
+    ) -> cntryl_midge_core::common::MidgeResult<(
         CompactionPublishActor,
         crossbeam::channel::Receiver<CompactionPublishCompletion>,
     )> {
@@ -501,10 +504,10 @@ impl EventLoop {
     }
 
     fn create_compaction_actor(
-        sst_factory: Arc<dyn crate::sst::SstFactory>,
+        sst_factory: Arc<dyn cntryl_midge_table::sst::SstFactory>,
         config: &super::RuntimeConfig,
         grandparent_overlap_rolls: Arc<std::sync::atomic::AtomicU64>,
-    ) -> crate::common::MidgeResult<CompactionActor> {
+    ) -> cntryl_midge_core::common::MidgeResult<CompactionActor> {
         let mut compaction_config = crate::compaction::LeveledCompactionConfig {
             l0_file_count_threshold: config.l0_compaction_trigger.max(1),
             ..Default::default()
@@ -542,7 +545,7 @@ impl EventLoop {
         state: &RuntimeState,
         config: &super::RuntimeConfig,
         read_resources: Option<&Arc<ReadResources>>,
-    ) -> crate::common::MidgeResult<WalActor> {
+    ) -> cntryl_midge_core::common::MidgeResult<WalActor> {
         let mut wal_actor = WalActor::open(
             state,
             config.wal_durability_policy,
@@ -559,7 +562,8 @@ impl EventLoop {
     fn seal_recovered_tail(
         state: &mut RuntimeState,
         config: &super::RuntimeConfig,
-    ) -> crate::common::MidgeResult<Option<crate::runtime::wal_history::SealedSegment>> {
+    ) -> cntryl_midge_core::common::MidgeResult<Option<crate::runtime::wal_history::SealedSegment>>
+    {
         Self::check_existing_levels(state, &config.compaction_levels)?;
         state.begin_wal_epoch(config.writer_epoch)
     }
@@ -569,11 +573,11 @@ impl EventLoop {
     fn check_existing_levels(
         state: &RuntimeState,
         levels: &crate::config::CompactionLevelConfig,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let deepest = state.manifest.files.iter().map(|file| file.level).max();
         match deepest {
             Some(deepest) if usize::try_from(deepest).map_or(true, |d| d >= levels.max_levels) => {
-                Err(crate::common::MidgeError::InvalidArgument(format!(
+                Err(cntryl_midge_core::common::MidgeError::InvalidArgument(format!(
                     "store holds SSTs at level {deepest}, which is not below configured compaction max_levels {}",
                     levels.max_levels
                 )))
@@ -585,7 +589,7 @@ impl EventLoop {
     fn apply_runtime_state_config(
         state: &mut RuntimeState,
         config: &super::RuntimeConfig,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         state.install_ttl_clock(Arc::clone(&config.ttl_clock));
         state.limits.eventual_flush_segment_gap =
             config.cloud_runtime_policy.eventual_flush_segment_gap;
@@ -605,8 +609,8 @@ impl EventLoop {
     fn initialize_recovered_cloud_wal(
         &mut self,
         config: &RecoveredCloudWalConfig,
-        startup_scope: Option<&crate::common::DeadlineScope>,
-    ) -> crate::common::MidgeResult<()> {
+        startup_scope: Option<&cntryl_midge_core::common::DeadlineScope>,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         check_startup_scope(startup_scope, "recovered cloud WAL initialization")?;
         let remote_segments = &config.remote_segments;
         let local_segments = &config.local_segments;
@@ -614,7 +618,7 @@ impl EventLoop {
             return Ok(());
         }
         if !self.actors.wal_actor.is_cloud_async() {
-            return Err(crate::common::MidgeError::RecoveryFailed(
+            return Err(cntryl_midge_core::common::MidgeError::RecoveryFailed(
                 "cloud WAL recovery obligations installed outside CloudAsync mode".to_string(),
             ));
         }
@@ -623,7 +627,7 @@ impl EventLoop {
             .hybrid_storage
             .as_ref()
             .ok_or_else(|| {
-                crate::common::MidgeError::RecoveryFailed(
+                cntryl_midge_core::common::MidgeError::RecoveryFailed(
                     "cloud WAL recovery requires hybrid storage".to_string(),
                 )
             })?;
@@ -632,7 +636,7 @@ impl EventLoop {
         for (&segment_id, &segment) in local_segments {
             check_startup_scope(startup_scope, "recovered cloud WAL identities")?;
             if let Some(remote_segment) = recovered_segments.insert(segment_id, segment) {
-                return Err(crate::common::MidgeError::RecoveryFailed(format!(
+                return Err(cntryl_midge_core::common::MidgeError::RecoveryFailed(format!(
                     "WAL segment {segment_id} is both remote and local-only during recovery: remote max {}, local max {}",
                     remote_segment.max_sequence,
                     segment.max_sequence
@@ -655,12 +659,16 @@ impl EventLoop {
             .pipeline
             .durability
             .contiguous_acked_cloud_segments(self.actors.cloud_coordinator.cloud_wal.acks())
-            .map_err(|refusal| crate::common::MidgeError::RecoveryFailed(refusal.to_string()))?;
+            .map_err(|refusal| {
+                cntryl_midge_core::common::MidgeError::RecoveryFailed(refusal.to_string())
+            })?;
         check_startup_scope(startup_scope, "recovered cloud WAL acknowledgement")?;
         if let Some(durable) = initially_durable.last() {
             self.state.wal.advance_cloud_through(durable.max_sequence);
         }
-        for crate::wal::publish::OwedSegment { segment_id, .. } in initially_durable {
+        for cntryl_midge_durability::wal::publish::OwedSegment { segment_id, .. } in
+            initially_durable
+        {
             check_startup_scope(startup_scope, "recovered durable cloud WAL")?;
             self.pipeline
                 .wal_transition
@@ -681,11 +689,11 @@ impl EventLoop {
             // these uploads need; the sealed tail stays owed to the cloud.
             let deadline = startup_scope.map_or_else(
                 || {
-                    crate::common::OperationDeadline::from_budget(
+                    cntryl_midge_core::common::OperationDeadline::from_budget(
                         self.routing.runtime_response_timeout,
                     )
                 },
-                crate::common::DeadlineScope::deadline,
+                cntryl_midge_core::common::DeadlineScope::deadline,
             );
             self.try_drain_cloud_wal_upload_backlog_within(&deadline)?;
         }
@@ -694,7 +702,7 @@ impl EventLoop {
         Ok(())
     }
 
-    pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
+    pub fn set_hybrid_storage(&mut self, storage: Arc<cntryl_midge_storage::HybridStorage>) {
         self.actors
             .compaction_actor
             .configure_work_target(Some(storage.as_ref()));
@@ -710,9 +718,9 @@ impl EventLoop {
     }
 
     /// Returns an error if the lease has been lost (heartbeat detected failure).
-    fn check_lease_health(&self) -> crate::common::MidgeResult<()> {
+    fn check_lease_health(&self) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.state.partial_apply_prefix || self.pipeline.memtable_apply.terminal_prefix() {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "a memtable group has an unknown applied prefix; restart before admitting writes"
                     .into(),
             ));
@@ -727,8 +735,8 @@ impl EventLoop {
 
     fn validate_runtime_writer_lease_within(
         &self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.authority.fencing.validate_within(deadline)
     }
 
@@ -739,7 +747,7 @@ impl EventLoop {
     pub(super) fn registered_request_deadline(
         &self,
         request_id: u64,
-    ) -> crate::common::OperationDeadline {
+    ) -> cntryl_midge_core::common::OperationDeadline {
         self.routing.request_deadline(request_id)
     }
 
@@ -748,8 +756,10 @@ impl EventLoop {
     /// Anything this thread waits for blocks every read, write, ack and
     /// shutdown behind it, so it gets the same budget the runtime promises
     /// its callers rather than waiting indefinitely.
-    pub(super) fn event_loop_cloud_deadline(&self) -> crate::common::OperationDeadline {
-        crate::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout)
+    pub(super) fn event_loop_cloud_deadline(&self) -> cntryl_midge_core::common::OperationDeadline {
+        cntryl_midge_core::common::OperationDeadline::from_budget(
+            self.routing.runtime_response_timeout,
+        )
     }
 
     /// Set the snapshot cache for read-path bypass.
@@ -834,7 +844,10 @@ impl EventLoop {
 
     /// Ordinary commits update only their families. Lifecycle and manifest
     /// publication use the full pass above, retaining unchanged source Arcs.
-    pub(super) fn publish_snapshots_for(&self, cf_ids: &[crate::types::ColumnFamilyId]) {
+    pub(super) fn publish_snapshots_for(
+        &self,
+        cf_ids: &[cntryl_midge_core::types::ColumnFamilyId],
+    ) {
         for &cf_id in cf_ids {
             self.publish_write_pressure(cf_id);
         }
@@ -879,7 +892,7 @@ impl EventLoop {
                     cf_state.immutable_memtables.clone(),
                     sst_view,
                     Arc::clone(&self.state.fs),
-                    std::path::PathBuf::from(crate::sst::fs::SST_DIR),
+                    std::path::PathBuf::from(cntryl_midge_table::sst::fs::SST_DIR),
                     self.state.is_memory_mode(),
                     self.state.observed_time_millis(),
                     self.authority.read_resources.clone(),
@@ -891,18 +904,18 @@ impl EventLoop {
     #[cfg(test)]
     fn publish_flushed_sst(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sst_name: &str,
         sequence: u64,
-        file_meta: Option<crate::runtime::FileMeta>,
-        _frozen_memtable: Option<&std::sync::Arc<crate::memtable::SkipListMemtable>>,
-    ) -> crate::common::MidgeResult<()> {
+        file_meta: Option<cntryl_midge_durability::metadata::intent::FileMeta>,
+        _frozen_memtable: Option<&std::sync::Arc<cntryl_midge_table::memtable::SkipListMemtable>>,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let Some(file_meta) = file_meta else {
             return Ok(());
         };
         self.state.commit_flush_publication_for(
             crate::runtime::state::FlushManifestPublication {
-                origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+                origin: cntryl_midge_durability::metadata::accounting::Origin::OrdinaryLocalFlush,
                 cf_id,
                 sequence,
                 file_meta: &file_meta,
@@ -919,7 +932,7 @@ impl EventLoop {
         )?;
         self.state.transition_flush_publication_intent(
             sst_name,
-            crate::runtime::PublicationPhase::ManifestPublished,
+            cntryl_midge_durability::metadata::intent::PublicationPhase::ManifestPublished,
         )?;
         crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
         self.state.clear_flush_publication_intent(sst_name)?;
@@ -953,23 +966,24 @@ impl EventLoop {
     }
 
     pub(super) fn retry_gc(&mut self) -> HandleOutcome {
-        let deadline =
-            crate::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout);
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            self.routing.runtime_response_timeout,
+        );
         gc::GcCoordinator::retry_within(self, &deadline)
     }
 
     pub(super) fn retry_gc_within(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) -> HandleOutcome {
         gc::GcCoordinator::retry_within(self, deadline)
     }
 }
 
 fn check_startup_scope(
-    scope: Option<&crate::common::DeadlineScope>,
+    scope: Option<&cntryl_midge_core::common::DeadlineScope>,
     context: &str,
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     scope.map_or(Ok(()), |scope| scope.check(context))
 }
 

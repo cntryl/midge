@@ -1,5 +1,5 @@
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{Runtime, RuntimeHandle};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -57,17 +57,17 @@ where
 }
 
 fn spawn_thread(name: &str, task: ReaperTask) -> std::io::Result<JoinHandle<()>> {
-    let gate = crate::failpoints::worker_gate();
+    let gate = cntryl_midge_core::failpoints::worker_gate();
     std::thread::Builder::new()
         .name(name.to_string())
         .spawn(move || gate.run(task))
 }
 
 pub(super) struct FencingResources {
-    heartbeat: Option<Mutex<crate::lease::LeaseHeartbeat>>,
-    lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
-    guard: Option<crate::lease::LeaseGuard>,
-    storage: Option<Arc<crate::storage::HybridStorage>>,
+    heartbeat: Option<Mutex<cntryl_midge_durability::lease::LeaseHeartbeat>>,
+    lease: Option<Arc<dyn cntryl_midge_durability::lease::PrimaryLease>>,
+    guard: Option<cntryl_midge_durability::lease::LeaseGuard>,
+    storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
 }
 
 pub(super) enum PendingFencingCleanup {
@@ -82,19 +82,19 @@ pub(super) enum PendingFencingCleanup {
 
 /// Owns the writer-fencing resources retained for the engine lifetime.
 pub(super) struct LeaseState {
-    pub(super) lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
-    pub(super) guard: Option<crate::lease::LeaseGuard>,
-    pub(super) heartbeat: Option<Mutex<crate::lease::LeaseHeartbeat>>,
-    pub(super) storage: Option<Arc<crate::storage::HybridStorage>>,
+    pub(super) lease: Option<Arc<dyn cntryl_midge_durability::lease::PrimaryLease>>,
+    pub(super) guard: Option<cntryl_midge_durability::lease::LeaseGuard>,
+    pub(super) heartbeat: Option<Mutex<cntryl_midge_durability::lease::LeaseHeartbeat>>,
+    pub(super) storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     pub(super) pending_cleanup: Option<PendingFencingCleanup>,
 }
 
 impl LeaseState {
     pub(super) fn new(
-        lease: Arc<dyn crate::lease::PrimaryLease>,
-        guard: crate::lease::LeaseGuard,
-        heartbeat: crate::lease::LeaseHeartbeat,
-        storage: Option<Arc<crate::storage::HybridStorage>>,
+        lease: Arc<dyn cntryl_midge_durability::lease::PrimaryLease>,
+        guard: cntryl_midge_durability::lease::LeaseGuard,
+        heartbeat: cntryl_midge_durability::lease::LeaseHeartbeat,
+        storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     ) -> Self {
         Self {
             lease: Some(lease),
@@ -140,10 +140,10 @@ impl LeaseState {
     }
 
     pub(super) fn release_fencing_parts(
-        lease_heartbeat: Option<Mutex<crate::lease::LeaseHeartbeat>>,
-        lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
-        lease_guard: Option<crate::lease::LeaseGuard>,
-        storage: Option<Arc<crate::storage::HybridStorage>>,
+        lease_heartbeat: Option<Mutex<cntryl_midge_durability::lease::LeaseHeartbeat>>,
+        lease: Option<Arc<dyn cntryl_midge_durability::lease::PrimaryLease>>,
+        lease_guard: Option<cntryl_midge_durability::lease::LeaseGuard>,
+        storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     ) -> MidgeResult<()> {
         let cleanup_started = std::time::Instant::now();
         tracing::info!(
@@ -184,7 +184,9 @@ impl LeaseState {
 
     /// Retry release for no longer than the lease TTL. An unreleased lease
     /// expires after its heartbeat stops.
-    fn release_lease_bounded(lease: &dyn crate::lease::PrimaryLease) -> MidgeResult<()> {
+    fn release_lease_bounded(
+        lease: &dyn cntryl_midge_durability::lease::PrimaryLease,
+    ) -> MidgeResult<()> {
         const MAX_BACKOFF: Duration = Duration::from_secs(1);
         let deadline = std::time::Instant::now() + lease.ttl();
         let mut backoff = Duration::from_millis(1);
@@ -193,7 +195,11 @@ impl LeaseState {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() || matches!(error, crate::lease::LeaseError::Internal(_))
+                    if remaining.is_zero()
+                        || matches!(
+                            error,
+                            cntryl_midge_durability::lease::LeaseError::Internal(_)
+                        )
                     {
                         tracing::warn!(%error, "primary lease release failed; it will expire at its TTL");
                         return Err(MidgeError::LeaseUnavailable(format!(
@@ -425,7 +431,7 @@ impl LeaseState {
 #[cfg(test)]
 mod tests {
     use super::{FencingResources, LeaseState};
-    use crate::lease::PrimaryLease;
+    use cntryl_midge_durability::lease::PrimaryLease;
     use std::sync::Arc;
 
     struct TestLease;
@@ -433,15 +439,18 @@ mod tests {
     impl PrimaryLease for TestLease {
         fn try_acquire(
             self: Arc<Self>,
-        ) -> Result<crate::lease::LeaseGuard, crate::lease::LeaseError> {
-            Ok(crate::lease::LeaseGuard::token())
+        ) -> Result<
+            cntryl_midge_durability::lease::LeaseGuard,
+            cntryl_midge_durability::lease::LeaseError,
+        > {
+            Ok(cntryl_midge_durability::lease::LeaseGuard::token())
         }
 
-        fn renew(&self) -> Result<(), crate::lease::LeaseError> {
+        fn renew(&self) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
             Ok(())
         }
 
-        fn release(&self) -> Result<(), crate::lease::LeaseError> {
+        fn release(&self) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
             Ok(())
         }
 
@@ -462,8 +471,13 @@ mod tests {
     fn should_move_fencing_resources_when_cleanup_begins() {
         // Arrange
         let lease: Arc<dyn PrimaryLease> = Arc::new(TestLease);
-        let heartbeat = crate::lease::LeaseHeartbeat::new(Arc::clone(&lease));
-        let mut state = LeaseState::new(lease, crate::lease::LeaseGuard::token(), heartbeat, None);
+        let heartbeat = cntryl_midge_durability::lease::LeaseHeartbeat::new(Arc::clone(&lease));
+        let mut state = LeaseState::new(
+            lease,
+            cntryl_midge_durability::lease::LeaseGuard::token(),
+            heartbeat,
+            None,
+        );
 
         // Act
         let resources = state.take_resources();
@@ -480,8 +494,13 @@ mod tests {
     fn should_restore_fencing_resources_when_reaper_spawn_fails() {
         // Arrange
         let lease: Arc<dyn PrimaryLease> = Arc::new(TestLease);
-        let heartbeat = crate::lease::LeaseHeartbeat::new(Arc::clone(&lease));
-        let mut state = LeaseState::new(lease, crate::lease::LeaseGuard::token(), heartbeat, None);
+        let heartbeat = cntryl_midge_durability::lease::LeaseHeartbeat::new(Arc::clone(&lease));
+        let mut state = LeaseState::new(
+            lease,
+            cntryl_midge_durability::lease::LeaseGuard::token(),
+            heartbeat,
+            None,
+        );
 
         // Act
         let result = state.schedule_cleanup_with_spawner(Ok(()), |_, _| {

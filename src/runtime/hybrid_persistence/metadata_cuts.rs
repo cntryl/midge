@@ -5,9 +5,11 @@ use super::metadata_snapshot::{
     capture_local_metadata, validate_manifest_successor, MetadataMirrorCache,
 };
 use super::{decode_generation_manifest, CloudMetadataMirrorContext};
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::lease::{CloudMetadataGeneration, CloudMetadataHead, LeaseError, SharedGenerationId};
 use crate::runtime::CapturedMetadataCut;
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::{
+    CloudMetadataGeneration, CloudMetadataHead, LeaseError, SharedGenerationId,
+};
 use std::collections::BTreeMap;
 
 #[cfg(test)]
@@ -17,8 +19,9 @@ struct SelectedCut {
     generation: Option<CloudMetadataGeneration>,
     cache: Option<MetadataMirrorCache>,
     bodies: Option<BTreeMap<String, Vec<u8>>>,
-    _memory: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
-    _decode_memory: Option<crate::common::resource_budget::ResourceReservation>,
+    _memory:
+        Option<std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
+    _decode_memory: Option<cntryl_midge_core::common::resource_budget::ResourceReservation>,
 }
 
 /// Upload and CAS run without the local publication mutex. A rejected CAS is
@@ -41,7 +44,7 @@ pub(crate) fn mirror_captured_control_metadata_within(
     let local = capture_local_metadata(&context)?;
     cut.proof.validate(&local)?;
     let format_10 = local
-        .get(crate::metadata::files::FORMAT)
+        .get(cntryl_midge_durability::metadata::files::FORMAT)
         .is_some_and(|format| format == b"midge-format-version=10\n");
     let _format_10_writer = format_10
         .then(|| {
@@ -245,7 +248,7 @@ fn selected_cut(context: &CloudMetadataMirrorContext<'_>, fresh: bool) -> MidgeR
 fn load_selected_cut(
     context: &CloudMetadataMirrorContext<'_>,
     generation: CloudMetadataGeneration,
-    memory: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+    memory: std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>,
 ) -> MidgeResult<SelectedCut> {
     let (bodies, chain_cut) = if super::metadata_chain::is_chain(&generation) {
         super::metadata_chain::read_with_cut_reserved(
@@ -297,21 +300,19 @@ fn read_format10_cut_proof(
     context: &CloudMetadataMirrorContext<'_>,
     generation: &CloudMetadataGeneration,
     bodies: &BTreeMap<String, Vec<u8>>,
-    memory: &std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+    memory: &std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>,
 ) -> MidgeResult<Option<crate::runtime::MetadataCutProof>> {
-    let Some(object) = generation
-        .objects
-        .iter()
-        .find(|object| object.file_name == crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME)
-    else {
+    let Some(object) = generation.objects.iter().find(|object| {
+        object.file_name == cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF
+    }) else {
         return Ok(None);
     };
-    if object.len > crate::runtime::MetadataCutProof::MAX_CLOUD_OBJECT_BYTES as u64 {
+    if object.len > cntryl_midge_durability::metadata::files::MAX_CLOUD_CUT_PROOF_BYTES as u64 {
         return Err(MidgeError::ResourceLimit(
             "cloud metadata cut proof exceeds its byte bound".into(),
         ));
     }
-    let bytes = crate::storage::cloud::BlockingCloud::new(context.cloud, context.deadline)
+    let bytes = cntryl_midge_storage::cloud::BlockingCloud::new(context.cloud, context.deadline)
         .with_reservation(std::sync::Arc::clone(memory))
         .get_exact_len(&object.object_key, object.len)?
         .ok_or_else(|| {
@@ -350,7 +351,7 @@ fn covered(selected: &SelectedCut, cut: &CapturedMetadataCut) -> MidgeResult<boo
 fn stage_cut(
     context: &CloudMetadataMirrorContext<'_>,
     local: &BTreeMap<String, Vec<u8>>,
-    candidate: &crate::metadata::Manifest,
+    candidate: &cntryl_midge_durability::metadata::Manifest,
     selected: &SelectedCut,
     cut: &CapturedMetadataCut,
     format_10: bool,
@@ -402,7 +403,9 @@ fn stage_cut(
             Some(cut),
         )?
     };
-    crate::failpoints::fail_point!("midge::cloud::after_metadata_chain_upload_before_pointer_cas");
+    cntryl_midge_core::failpoints::fail_point!(
+        "midge::cloud::after_metadata_chain_upload_before_pointer_cas"
+    );
     Ok((
         CloudMetadataGeneration {
             id,
@@ -416,14 +419,14 @@ fn stage_cut(
 fn decode_format10_cut_manifest(
     bodies: &BTreeMap<String, Vec<u8>>,
     deadline: &OperationDeadline,
-) -> MidgeResult<crate::metadata::Manifest> {
-    use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
+    use cntryl_midge_durability::metadata::local_authority::{LocalMetadataAuthority, Stream};
     let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Manifest)?;
-    crate::metadata::ManifestPersistence::decode_format_10_stream(
+    cntryl_midge_durability::metadata::ManifestPersistence::decode_format_10_stream(
         stream.base,
         stream.checkpoint,
         stream.segments,
-        Some(&crate::common::DeadlineScope::new(*deadline)),
+        Some(&cntryl_midge_core::common::DeadlineScope::new(*deadline)),
     )
 }
 

@@ -1,0 +1,487 @@
+//! Intent log persistence - serialization and file I/O
+//!
+//! Persists append-only checksummed runtime intent edits to enable recovery of
+//! actor intent states across restarts.
+
+use super::intent::IntentLogEntry;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::FsError;
+#[cfg(test)]
+use std::fs;
+#[cfg(any(test, feature = "internal-testing"))]
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+
+pub struct IntentPersistence;
+mod edits;
+pub use edits::IntentDecodeWorkspace;
+
+pub struct IntentUpgradeState {
+    pub entries: Vec<IntentLogEntry>,
+    pub sequence: u64,
+    pub checksum: u32,
+}
+
+impl IntentPersistence {
+    const INTENT_FILE: &'static str = crate::metadata::files::INTENT_LOG;
+    const INTENT_FILE_TEMP: &'static str = "intent_log.json.tmp";
+
+    /// Bound owned typed replay allocations before decoding immutable bytes.
+    /// Raw input ownership and later serialization scratch belong to the caller.
+    pub fn decoded_workspace_bound(
+        bytes: &[u8],
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> MidgeResult<IntentDecodeWorkspace> {
+        edits::decoded_workspace_bound(bytes, deadline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn intent_path(db_path: &Path) -> PathBuf {
+        db_path.join(Self::INTENT_FILE)
+    }
+
+    /// Replay durable intent edits under the requested recovery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unreadable storage or invalid intent history.
+    pub fn load_with_fs_and_policy(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        recovery_policy: crate::RecoveryPolicy,
+    ) -> Result<Vec<IntentLogEntry>, String> {
+        Self::load_with_fs_and_policy_typed(fs, recovery_policy).map_err(|error| error.to_string())
+    }
+
+    pub fn load_with_fs_and_policy_typed(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        recovery_policy: crate::RecoveryPolicy,
+    ) -> MidgeResult<Vec<IntentLogEntry>> {
+        // Byte corruption remains an error in both modes. Only a genuine
+        // partial final append can retain the preceding durable state.
+        let _ = recovery_policy;
+        let intents = if crate::metadata::format::is_format_10(fs.as_ref())? {
+            crate::metadata::journal::with_manifest_writer_lock(
+                fs,
+                || -> MidgeResult<Vec<IntentLogEntry>> {
+                    let authority = crate::metadata::local_authority::LocalMetadataAuthority::open(
+                        std::sync::Arc::clone(fs),
+                    )?;
+                    let (base, segments) =
+                        authority.read_stream(crate::metadata::local_authority::Stream::Intent)?;
+                    Self::decode_format_10_stream(
+                        &base,
+                        segments.iter().map(|(_, _, payload)| payload.as_slice()),
+                    )
+                },
+            )?
+        } else {
+            edits::load(fs)?
+        };
+        Self::validate_persisted_sst_names(&intents).map_err(MidgeError::RecoveryFailed)?;
+        Ok(intents)
+    }
+
+    pub fn validate_cloud_format_10_bodies(
+        bodies: &std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> MidgeResult<()> {
+        use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+        let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Intent)?;
+        let intents = Self::decode_format_10_stream(
+            stream.base,
+            stream.segments.into_iter().map(|(_, _, payload)| payload),
+        )?;
+        Self::validate_persisted_sst_names(&intents).map_err(MidgeError::RecoveryFailed)
+    }
+
+    fn decode_format_10_stream<'a>(
+        base: &[u8],
+        segments: impl IntoIterator<Item = &'a [u8]>,
+    ) -> MidgeResult<Vec<IntentLogEntry>> {
+        let mut latest = serde_json::from_slice(base).map_err(|error| {
+            MidgeError::Corruption(format!("invalid FORMAT 10 intent base: {error}"))
+        })?;
+        for payload in segments {
+            latest = serde_json::from_slice(payload).map_err(|error| {
+                MidgeError::Corruption(format!("invalid FORMAT 10 intent segment: {error}"))
+            })?;
+        }
+        Ok(latest)
+    }
+
+    /// Validate every byte of the captured FORMAT 9 intent history before upgrade.
+    pub fn decode_for_upgrade(
+        bytes: bytes::Bytes,
+        scope: &cntryl_midge_core::common::DeadlineScope,
+    ) -> MidgeResult<IntentUpgradeState> {
+        let state = edits::decode_for_upgrade(bytes, scope)?;
+        Self::validate_persisted_sst_names(&state.entries).map_err(MidgeError::RecoveryFailed)?;
+        Ok(state)
+    }
+
+    fn validate_persisted_sst_names(intents: &[IntentLogEntry]) -> Result<(), String> {
+        fn validate(name: &str, context: &str) -> Result<(), String> {
+            cntryl_midge_core::cloud_layout::PersistedSstName::parse(name)
+                .map(|_| ())
+                .map_err(|error| format!("{context} SST name is invalid: {error}"))
+        }
+
+        fn validate_meta(
+            meta: &crate::metadata::intent::FileMeta,
+            context: &str,
+        ) -> Result<(), String> {
+            validate(&meta.name, context)
+        }
+
+        for intent in intents {
+            match intent {
+                IntentLogEntry::CompactionPlanned { input_files, .. } => {
+                    for name in input_files {
+                        validate(name, "compaction plan input")?;
+                    }
+                }
+                IntentLogEntry::MoveSstsPublish { captured, .. } => {
+                    for file in captured {
+                        validate(&file.name, "logical move")?;
+                    }
+                }
+                IntentLogEntry::FlushPublish { file_meta, .. }
+                | IntentLogEntry::SstAdded { file_meta } => {
+                    validate_meta(file_meta, "intent")?;
+                }
+                IntentLogEntry::CompactionPublish { removed, added, .. }
+                | IntentLogEntry::CompactionApplied { removed, added } => {
+                    for name in removed {
+                        validate(name, "compaction removal")?;
+                    }
+                    for meta in added {
+                        validate_meta(meta, "compaction output")?;
+                    }
+                }
+                IntentLogEntry::SeqnoAllocated { .. }
+                | IntentLogEntry::FlushPlanned { .. }
+                | IntentLogEntry::WalSynced { .. }
+                | IntentLogEntry::CloudUploadComplete { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
+        use cntryl_midge_core::io::real::RealFs;
+        use std::sync::Arc;
+
+        let real = RealFs::open_existing(db_path)
+            .map_err(|e| format!("failed to open existing real fs: {e:?}"))?;
+        let fs: Arc<dyn cntryl_midge_core::io::traits::Fs> = Arc::new(real);
+        Self::load_with_fs_and_policy(&fs, crate::RecoveryPolicy::Strict)
+    }
+
+    /// Append and durably synchronize the requested intent state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid SST identities or failed durable I/O.
+    pub fn save_with_fs(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        intents: &[IntentLogEntry],
+    ) -> Result<(), String> {
+        Self::save_with_fs_typed(fs, intents).map_err(|error| error.to_string())
+    }
+
+    pub fn save_with_fs_typed(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        intents: &[IntentLogEntry],
+    ) -> MidgeResult<()> {
+        let format_10 = crate::metadata::format::is_format_10(fs.as_ref())?;
+        Self::save_for_selected_format(fs, intents, format_10)
+    }
+
+    pub fn save_for_selected_format(
+        fs: &std::sync::Arc<dyn cntryl_midge_core::io::traits::Fs>,
+        intents: &[IntentLogEntry],
+        format_10: bool,
+    ) -> MidgeResult<()> {
+        Self::validate_persisted_sst_names(intents).map_err(MidgeError::RecoveryFailed)?;
+        if format_10 {
+            return crate::metadata::journal::with_manifest_writer_lock(fs, || {
+                cntryl_midge_core::failpoints::fail_point!("midge::intent::before_save");
+                cntryl_midge_core::failpoints::fail_point!(
+                    "midge::intent::inject_no_space_on_save",
+                    |_| Err(MidgeError::NoSpace(
+                        "failpoint: no space while saving intent log".into()
+                    ))
+                );
+                let mut authority = crate::metadata::local_authority::LocalMetadataAuthority::open(
+                    std::sync::Arc::clone(fs),
+                )?;
+                let sequence = authority
+                    .high_water(crate::metadata::local_authority::Stream::Intent)
+                    .checked_add(1)
+                    .ok_or_else(|| MidgeError::ResourceLimit("intent sequence exhausted".into()))?;
+                let payload = serde_json::to_vec(intents).map_err(|error| {
+                    MidgeError::Internal(format!("encode FORMAT 10 intent state: {error}"))
+                })?;
+                let stream = crate::metadata::local_authority::Stream::Intent;
+                if authority.append_would_exceed_limits(stream, sequence, sequence, &payload)? {
+                    authority.compact_intent(&payload, sequence, crc32c::crc32c(&payload))
+                } else {
+                    authority.append(stream, sequence, sequence, &payload)
+                }
+            });
+        }
+        edits::save(fs, intents)
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn save(db_path: &Path, intents: &[IntentLogEntry]) -> Result<(), String> {
+        use cntryl_midge_core::io::real::RealFs;
+        use std::sync::Arc;
+
+        let real =
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
+        let fs: Arc<dyn cntryl_midge_core::io::traits::Fs> = Arc::new(real);
+        Self::save_with_fs(&fs, intents)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete(db_path: &Path) -> Result<(), String> {
+        let p = Self::intent_path(db_path);
+        let temp = db_path.join(Self::INTENT_FILE_TEMP);
+        if p.exists() {
+            fs::remove_file(&p).map_err(|e| format!("failed to delete intent file: {e}"))?;
+        }
+        if temp.exists() {
+            fs::remove_file(&temp)
+                .map_err(|e| format!("failed to delete temp intent file: {e}"))?;
+        }
+        tracing::debug!(path = ?p, temp_path = ?temp, "intent file deleted");
+        Ok(())
+    }
+}
+
+fn recovery_io_error(error: FsError, context: &str) -> MidgeError {
+    match error {
+        FsError::Timeout(message) => MidgeError::Timeout(message),
+        error => MidgeError::RecoveryFailed(format!("{context}: {error:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::intent::IntentLogEntry;
+    use proptest::prelude::*;
+
+    fn create_test_dir() -> std::path::PathBuf {
+        static TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let pid = std::process::id();
+        let counter = TEST_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let test_dir =
+            std::env::temp_dir().join(format!("midge_intent_test_{pid}_{counter}_{nanos}"));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).expect("failed to create test dir");
+        test_dir
+    }
+
+    #[test]
+    fn should_fail_default_load_when_intent_log_is_corrupt() {
+        // Arrange
+        let test_dir = create_test_dir();
+        std::fs::write(test_dir.join("intent_log.json"), "not-json")
+            .expect("write corrupt intent log");
+
+        // Act
+        let error =
+            IntentPersistence::load(&test_dir).expect_err("default intent load must be strict");
+
+        // Assert
+        assert!(
+            error.contains("unsupported metadata encoding"),
+            "expected strict intent parse error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn should_ignore_temp_intent_file_when_loading_empty_state() {
+        // Arrange
+        let test_dir = create_test_dir();
+        std::fs::write(
+            test_dir.join(IntentPersistence::INTENT_FILE_TEMP),
+            br#"[{"WalSynced":{"segment_id":7,"seqno":11}}]"#,
+        )
+        .expect("write temp intent log");
+
+        // Act
+        let loaded = IntentPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert!(
+            loaded.is_empty(),
+            "temp intent log must not become authoritative on load"
+        );
+    }
+
+    #[test]
+    fn should_roundtrip_intent_log() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let intents = vec![IntentLogEntry::WalSynced {
+            segment_id: 1,
+            seqno: 42,
+        }];
+
+        // Act
+        IntentPersistence::save(&test_dir, &intents).expect("save should succeed");
+        assert!(
+            !test_dir.join(IntentPersistence::INTENT_FILE_TEMP).exists(),
+            "intent staging temp file should not remain after save"
+        );
+        let loaded = IntentPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            matches!(
+                loaded[0],
+                IntentLogEntry::WalSynced {
+                    segment_id: 1,
+                    seqno: 42
+                }
+            ),
+            "expected WalSynced entry, got: {:?}",
+            loaded[0]
+        );
+        assert!(
+            IntentPersistence::intent_path(&test_dir).ends_with("intent_log.json"),
+            "intent log should persist to intent_log.json"
+        );
+    }
+
+    #[test]
+    fn should_reject_unsafe_sst_name_before_intent_log_is_persisted() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let intents = vec![IntentLogEntry::SstAdded {
+            file_meta: crate::metadata::intent::FileMeta {
+                name: "/outside.sst".to_string(),
+                level: 0,
+                size_bytes: 0,
+                content_crc32c: None,
+                cf_id: 0,
+                smallest_key: None,
+                largest_key: None,
+                smallest_seq: None,
+                largest_seq: None,
+                key_bounds_complete: false,
+                earliest_expiration_millis: None,
+            },
+        }];
+
+        // Act
+        let error = IntentPersistence::save(&test_dir, &intents)
+            .expect_err("unsafe intent name must be rejected");
+
+        // Assert
+        assert!(error.contains("SST name"), "unexpected error: {error}");
+        assert!(
+            !IntentPersistence::intent_path(&test_dir).exists(),
+            "invalid intent log must not reach durable storage"
+        );
+    }
+
+    #[test]
+    fn should_delete_temp_intent_file_when_requested() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let temp_path = test_dir.join(IntentPersistence::INTENT_FILE_TEMP);
+        std::fs::write(
+            &temp_path,
+            br#"[{"WalSynced":{"segment_id":7,"seqno":11}}]"#,
+        )
+        .expect("write temp intent log");
+
+        // Act
+        IntentPersistence::delete(&test_dir).expect("delete should succeed");
+
+        // Assert
+        assert!(
+            !temp_path.exists(),
+            "temp intent log should not exist after delete"
+        );
+    }
+
+    #[test]
+    fn should_return_empty_intent_log_after_delete_when_temp_file_exists() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let intents = vec![IntentLogEntry::WalSynced {
+            segment_id: 1,
+            seqno: 42,
+        }];
+        IntentPersistence::save(&test_dir, &intents).expect("save should succeed");
+        std::fs::write(
+            test_dir.join(IntentPersistence::INTENT_FILE_TEMP),
+            br#"[{"WalSynced":{"segment_id":9,"seqno":99}}]"#,
+        )
+        .expect("write temp intent log");
+
+        // Act
+        IntentPersistence::delete(&test_dir).expect("delete should succeed");
+        let loaded = IntentPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert!(
+            loaded.is_empty(),
+            "load after delete should not recover intent entries from temp residue"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn should_roundtrip_arbitrary_wal_synced_intents(
+            pairs in proptest::collection::vec((0u64..10_000, 0u64..10_000), 0..32)
+        ) {
+            // Arrange
+            let test_dir = create_test_dir();
+            let intents: Vec<IntentLogEntry> = pairs
+                .iter()
+                .map(|(segment_id, seqno)| IntentLogEntry::WalSynced {
+                    segment_id: *segment_id,
+                    seqno: *seqno,
+                })
+                .collect();
+
+            // Act
+            IntentPersistence::save(&test_dir, &intents).expect("save should succeed");
+            let loaded = IntentPersistence::load(&test_dir).expect("load should succeed");
+
+            // Assert
+            prop_assert_eq!(loaded.len(), intents.len());
+            for (loaded_entry, expected_entry) in loaded.iter().zip(intents.iter()) {
+                match (loaded_entry, expected_entry) {
+                    (
+                        IntentLogEntry::WalSynced {
+                            segment_id: loaded_segment,
+                            seqno: loaded_seqno,
+                        },
+                        IntentLogEntry::WalSynced {
+                            segment_id: expected_segment,
+                            seqno: expected_seqno,
+                        },
+                    ) => {
+                        prop_assert_eq!(loaded_segment, expected_segment);
+                        prop_assert_eq!(loaded_seqno, expected_seqno);
+                    }
+                    other => prop_assert!(false, "unexpected intent roundtrip pair: {:?}", other),
+                }
+            }
+        }
+    }
+}

@@ -1,9 +1,9 @@
 //! Runtime assessment of files that are present but not authoritative.
 
-use crate::common::MidgeResult;
-use crate::config::EngineHealth;
-use crate::io::{Fs, FsError, FsPath};
-use crate::metadata::Manifest;
+use cntryl_midge_core::common::MidgeResult;
+use cntryl_midge_core::io::{Fs, FsError, FsPath};
+use cntryl_midge_core::types::EngineHealth;
+use cntryl_midge_durability::metadata::Manifest;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -43,7 +43,7 @@ impl StorageResidueAssessment {
         manifest: &Manifest,
         mut check: impl FnMut(&'static str) -> MidgeResult<()>,
     ) -> MidgeResult<Self> {
-        let entries = match fs.list_dir(&FsPath::new(crate::sst::fs::SST_DIR)) {
+        let entries = match fs.list_dir(&FsPath::new(cntryl_midge_table::sst::fs::SST_DIR)) {
             Ok(entries) => entries,
             Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
             Err(_) => return Ok(Self::default()),

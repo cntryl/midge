@@ -1,17 +1,17 @@
 //! Submit immutable control-file cuts; only the event loop applies completion.
 
 use super::{EventLoop, MetadataMirrorJob, MirrorContinuation};
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use std::sync::Arc;
 
 struct MetadataControlWork {
-    cloud: Arc<crate::storage::cloud::CloudStorage>,
-    fs: Arc<dyn crate::io::Fs>,
+    cloud: Arc<cntryl_midge_storage::cloud::CloudStorage>,
+    fs: Arc<dyn cntryl_midge_core::io::Fs>,
     source: Option<Arc<crate::runtime::CapturedMetadataCut>>,
     publication_lock: crate::runtime::MetadataPublicationLock,
     fence: super::super::fencing::RuntimeFence,
     deadline: OperationDeadline,
-    storage: Option<Arc<crate::storage::HybridStorage>>,
+    storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     sweep: Option<super::orphans::OrphanSweepTask>,
 }
 
@@ -110,7 +110,7 @@ impl EventLoop {
         id: u64,
         continuation: MirrorContinuation,
         deadline: OperationDeadline,
-        cloud: Arc<crate::storage::cloud::CloudStorage>,
+        cloud: Arc<cntryl_midge_storage::cloud::CloudStorage>,
     ) -> MidgeResult<()> {
         self.check_lease_health()?;
         let fence = self.authority.fencing.clone();
@@ -161,14 +161,18 @@ impl EventLoop {
             sweep,
         };
         let (result_tx, result) = crossbeam::channel::bounded(1);
-        let failpoint_gate = crate::failpoints::worker_gate();
+        let failpoint_gate = cntryl_midge_core::failpoints::worker_gate();
         let worker = std::thread::Builder::new()
             .name("midge-metadata-mirror".into())
             .spawn(move || {
                 failpoint_gate.run(|| {
-                    crate::failpoints::fail_point!("midge::metadata_mirror::before_provider");
+                    cntryl_midge_core::failpoints::fail_point!(
+                        "midge::metadata_mirror::before_provider"
+                    );
                     let outcome = work.run();
-                    crate::failpoints::fail_point!("midge::metadata_mirror::before_completion");
+                    cntryl_midge_core::failpoints::fail_point!(
+                        "midge::metadata_mirror::before_completion"
+                    );
                     let _ = result_tx.send(outcome);
                     if let Some(storage) = storage {
                         storage.queue_cloud_metadata_mirror_complete(id, epoch);

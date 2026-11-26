@@ -2,8 +2,8 @@
 
 use super::super::{Engine, OpenOptions};
 use super::EngineStartup;
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::{StartupAdmission, StartupEvent, StartupObserver};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crossbeam::channel::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -46,7 +46,7 @@ pub(super) fn open(opts: OpenOptions, budget: Duration) -> MidgeResult<Engine> {
     let worker_scope = scope.clone();
     let caller_dispatch = tracing::dispatcher::get_default(Clone::clone);
     let caller_span = tracing::Span::current();
-    let failpoint_gate = crate::failpoints::worker_gate();
+    let failpoint_gate = cntryl_midge_core::failpoints::worker_gate();
     std::thread::Builder::new()
         .name("midge-startup".into())
         .spawn(move || {

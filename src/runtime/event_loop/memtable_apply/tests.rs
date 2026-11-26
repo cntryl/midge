@@ -83,9 +83,9 @@ fn start_group(
 
 #[test]
 fn should_publish_one_ordered_cut_when_later_apply_finishes_before_first_unit(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldApply::new();
@@ -149,9 +149,9 @@ fn should_publish_one_ordered_cut_when_later_apply_finishes_before_first_unit(
 
 #[test]
 fn should_reconcile_memtable_accounting_when_authority_is_lost_during_apply(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let healthy = Arc::new(AtomicBool::new(true));
@@ -194,9 +194,9 @@ fn should_reconcile_memtable_accounting_when_authority_is_lost_during_apply(
 
 #[test]
 fn should_preserve_group_authority_when_authority_is_lost_during_apply(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     event_loop.state.column_families.insert(
@@ -264,7 +264,7 @@ fn should_preserve_group_authority_when_authority_is_lost_during_apply(
     let recovered = crate::runtime::state::RuntimeState::try_new(
         path,
         false,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     for key in [
         b"first-one".as_slice(),

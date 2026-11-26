@@ -2,9 +2,9 @@ use super::{
     Arc, FileMeta, KeyState, LevelRangeCandidates, MidgeError, MidgeResult, RangeCandidates,
     RangeCoverSweep, RangeTombstone, ReadSnapshot, SstFileIo, SstStateReader, SstStateScan,
 };
-use crate::memtable::SkipListMemtable;
-use crate::sst::cache::CacheFill;
-use crate::sst::read_path_metrics::SstReadObserver as _;
+use cntryl_midge_table::memtable::SkipListMemtable;
+use cntryl_midge_table::sst::cache::CacheFill;
+use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 
 #[cfg(test)]
 #[path = "l0_scan_tests.rs"]
@@ -530,7 +530,10 @@ impl SnapshotScan {
             }
 
             if let KeyState::Value(value, _, expiration, _) = best {
-                if !crate::common::time::is_expired_at(expiration, self.snapshot.read_time_millis) {
+                if !cntryl_midge_core::common::time::is_expired_at(
+                    expiration,
+                    self.snapshot.read_time_millis,
+                ) {
                     return Ok(Some((key, value)));
                 }
             }

@@ -23,7 +23,7 @@ fn spill_request(
         request_id,
         source: intents.take_source(),
         assertions: Vec::new(),
-        durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+        durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict),
         start_sequence: event_loop.state.applied_sequence,
         conflict_policy: ConflictPolicy::AbortOnWriteConflict,
         validation: None,
@@ -85,7 +85,7 @@ fn assert_spilled_flushed_conflict(
 ) -> MidgeResult<()> {
     // Arrange: the missing key lies inside an actual SST's bounds, so the
     // production validation read must query its contents rather than skip it.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::tests::create_test_local_event_loop()?;
     seed_spanning_sst(&mut event_loop);
     let held = HeldCallback::first("midge::validation::before_spill_snapshot_reads");
@@ -162,7 +162,7 @@ fn assert_rejected_spill_recovers(event_loop: EventLoop) -> MidgeResult<()> {
     let recovered = crate::runtime::state::RuntimeState::try_new(
         path,
         false,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     assert_eq!(recovered.applied_sequence, 7);
     let family = recovered.get_cf(0).unwrap();
@@ -171,7 +171,7 @@ fn assert_rejected_spill_recovers(event_loop: EventLoop) -> MidgeResult<()> {
         family.immutable_memtables.clone(),
         recovered.manifest.files.clone(),
         Arc::clone(&recovered.fs),
-        std::path::PathBuf::from(crate::sst::fs::SST_DIR),
+        std::path::PathBuf::from(cntryl_midge_table::sst::fs::SST_DIR),
         false,
         u64::MAX,
     );
@@ -181,7 +181,7 @@ fn assert_rejected_spill_recovers(event_loop: EventLoop) -> MidgeResult<()> {
 }
 
 struct ManualClock(std::sync::atomic::AtomicU64);
-impl crate::common::time::Clock for ManualClock {
+impl cntryl_midge_core::common::time::Clock for ManualClock {
     fn now_millis(&self) -> u64 {
         self.0.load(Ordering::Acquire)
     }
@@ -191,14 +191,12 @@ impl crate::common::time::Clock for ManualClock {
 fn should_admit_spilled_insert_when_ttl_expires_after_detached_reads_without_new_sequence(
 ) -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::tests::create_test_local_event_loop()?;
     let clock = Arc::new(ManualClock(std::sync::atomic::AtomicU64::new(1_000)));
-    event_loop
-        .state
-        .install_ttl_clock(Arc::new(crate::common::time::ObservedClock::new(
-            clock.clone(),
-        )));
+    event_loop.state.install_ttl_clock(Arc::new(
+        cntryl_midge_core::common::time::ObservedClock::new(clock.clone()),
+    ));
     let mut seed = request(946_010, b"m", false);
     if let TransactionOp::Put { ttl_seconds, .. } = &mut seed.ops[0] {
         *ttl_seconds = Some(1);
@@ -278,14 +276,12 @@ fn should_report_later_spilled_conflict_when_earlier_ttl_duplicate_expires() -> 
 fn assert_ttl_error_order(expire: bool) -> MidgeResult<()> {
     // Arrange: the first operation's duplicate is time-dependent; the
     // second operation's post-start conflict is permanent at this cut.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::tests::create_test_local_event_loop()?;
     let clock = Arc::new(ManualClock(std::sync::atomic::AtomicU64::new(1_000)));
-    event_loop
-        .state
-        .install_ttl_clock(Arc::new(crate::common::time::ObservedClock::new(
-            clock.clone(),
-        )));
+    event_loop.state.install_ttl_clock(Arc::new(
+        cntryl_midge_core::common::time::ObservedClock::new(clock.clone()),
+    ));
     let mut seed = request(946_020, b"m", false);
     if let TransactionOp::Put { ttl_seconds, .. } = &mut seed.ops[0] {
         *ttl_seconds = Some(1);
@@ -339,7 +335,7 @@ fn assert_ttl_error_order(expire: bool) -> MidgeResult<()> {
 fn should_retry_spilled_validation_when_flush_changes_sources_without_advancing_cut(
 ) -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::tests::create_test_local_event_loop()?;
     seed_spanning_sst(&mut event_loop);
     let write = event_loop
@@ -461,7 +457,7 @@ fn should_keep_large_supported_spill_values_without_raising_queued_validation_bu
 fn should_wait_for_consumed_spill_completion_before_reading_another_workspace() -> MidgeResult<()> {
     // Arrange: both jobs must execute real SST queries, but only one result
     // may retain decoded error/input memory before the next read starts.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::tests::create_test_local_event_loop()?;
     seed_spanning_sst(&mut event_loop);
     let first = spill_request(&event_loop, 946_050, request(0, b"m", false).ops)?;
@@ -532,7 +528,7 @@ fn should_wait_for_consumed_spill_completion_before_reading_another_workspace() 
 #[test]
 fn should_keep_original_spill_deadline_after_detached_reads_complete() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::tests::create_test_local_event_loop()?;
     seed_spanning_sst(&mut event_loop);
     let checked = spill_request(&event_loop, 946_060, request(0, b"m", false).ops)?;
@@ -582,7 +578,7 @@ fn should_keep_original_spill_deadline_after_detached_reads_complete() -> MidgeR
 #[test]
 fn should_reject_completed_spill_validation_after_writer_epoch_changes() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::tests::create_test_local_event_loop()?;
     seed_spanning_sst(&mut event_loop);
     let checked = spill_request(&event_loop, 946_070, request(0, b"m", false).ops)?;

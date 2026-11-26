@@ -1,8 +1,8 @@
 use super::*;
-use crate::io::{Fs, MockFs};
-use crate::metadata::FileMeta;
-use crate::sst::{FsSstFactoryIo, SstFactory};
-use crate::types::EntryType;
+use cntryl_midge_core::io::{Fs, MockFs};
+use cntryl_midge_core::types::EntryType;
+use cntryl_midge_durability::metadata::FileMeta;
+use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory};
 use std::sync::Arc;
 
 fn parent(name: &str, lower: &[u8], upper: &[u8], bytes: u64) -> FileMeta {
@@ -61,7 +61,8 @@ fn should_bound_grandparent_overlap_when_complete_disjoint_spans_are_feasible(
     assert_eq!(overlap_rolls.load(std::sync::atomic::Ordering::Relaxed), 2);
     let mut keys_seen = Vec::new();
     for name in outputs {
-        let summary = crate::sst::fs::SstFileIo::summarize_with_fs(&name, factory.output_fs())?;
+        let summary =
+            cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs(&name, factory.output_fs())?;
         let overlap: u64 = parents
             .iter()
             .filter(|parent| {
@@ -74,7 +75,7 @@ fn should_bound_grandparent_overlap_when_complete_disjoint_spans_are_feasible(
         let reader = factory.open(Path::new(&name))?;
         for (key, state) in reader.scan_range_raw_state(None, None)? {
             assert!(
-                matches!(state, crate::types::KeyState::Value(value, 2, _, _) if value.as_ref() == b"new")
+                matches!(state, cntryl_midge_core::types::KeyState::Value(value, 2, _, _) if value.as_ref() == b"new")
             );
             keys_seen.push(key);
         }
@@ -146,7 +147,7 @@ fn should_keep_indivisible_key_group_when_adjacent_grandparents_exceed_soft_limi
     assert_eq!(d_outputs.len(), 1);
     assert!(matches!(
         &d_outputs[0].1,
-        crate::types::KeyState::Value(value, 2, _, _) if value.as_ref() == b"new"
+        cntryl_midge_core::types::KeyState::Value(value, 2, _, _) if value.as_ref() == b"new"
     ));
     let d_overlap: u64 = parents
         .iter()

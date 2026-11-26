@@ -7,8 +7,9 @@ use super::{
     SnapshotPinRegistry, SnapshotState, TransactionCoordination, WalRecoveryState, WalState,
     WritePressureState,
 };
-use crate::common::DeadlineScope;
-use crate::io::FsError;
+use cntryl_midge_core::common::DeadlineScope;
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_durability::metadata::store::ManifestStore;
 
 fn check_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeResult<()> {
     scope.map_or(Ok(()), |scope| scope.check(context))
@@ -63,7 +64,7 @@ impl RuntimeState {
     /// every SST and WAL record; a host with a fresh cache never saw that
     /// reservation.
     pub(super) fn manifest_visible_sequence_floor(manifest: &Manifest) -> u64 {
-        use crate::metadata::frontiers::FamilyFrontier;
+        use cntryl_midge_durability::metadata::frontiers::FamilyFrontier;
         let file_sequences = manifest
             .files
             .iter()
@@ -83,7 +84,9 @@ impl RuntimeState {
         manifest
             .files
             .iter()
-            .filter_map(|file| crate::cloud_layout::parse_compaction_file_name(&file.name))
+            .filter_map(|file| {
+                cntryl_midge_core::cloud_layout::parse_compaction_file_name(&file.name)
+            })
             .map(|(_, _, generation, _)| generation)
             // The manifest counter reserves names before cloud output
             // publication. An interrupted job can leave no visible SSTs.
@@ -96,8 +99,12 @@ impl RuntimeState {
     /// If `memory_mode` is true, filesystem is never touched.
     #[cfg(test)]
     pub fn new(db_path: std::path::PathBuf, memory_mode: bool) -> Self {
-        Self::try_new(db_path, memory_mode, crate::config::RecoveryPolicy::Strict)
-            .expect("runtime state initialization failed")
+        Self::try_new(
+            db_path,
+            memory_mode,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
+        )
+        .expect("runtime state initialization failed")
     }
 
     /// [`Self::new`] for a writer under lease `writer_epoch`: a new WAL
@@ -114,7 +121,7 @@ impl RuntimeState {
             db_path,
             memory_mode,
             root,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
             RecoveryWal::Replay { writer_epoch },
             None,
             None,
@@ -127,7 +134,7 @@ impl RuntimeState {
     pub fn try_new(
         db_path: impl AsRef<std::path::Path>,
         memory_mode: bool,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
     ) -> MidgeResult<Self> {
         let db_path = db_path.as_ref();
         let root = Self::test_root(db_path, memory_mode)?;
@@ -145,10 +152,10 @@ impl RuntimeState {
     #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
     fn test_root(db_path: &std::path::Path, memory_mode: bool) -> MidgeResult<Arc<dyn Fs>> {
         if memory_mode {
-            return Ok(Arc::new(crate::io::MockFs::new()));
+            return Ok(Arc::new(cntryl_midge_core::io::MockFs::new()));
         }
         Ok(Arc::new(
-            crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?,
+            cntryl_midge_core::io::RealFs::new(db_path).map_err(FsError::into_midge)?,
         ))
     }
 
@@ -167,7 +174,7 @@ impl RuntimeState {
         db_path: &std::path::Path,
         memory_mode: bool,
         root: Arc<dyn Fs>,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
         wal: RecoveryWal,
         wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
         scope: Option<&DeadlineScope>,
@@ -175,13 +182,13 @@ impl RuntimeState {
         check_scope(scope, "recovery filesystem")?;
         Self::ensure_directories(root.as_ref(), memory_mode)?;
         let format_version = if memory_mode {
-            crate::metadata::format::CURRENT_FORMAT_VERSION
+            cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION
         } else {
-            crate::metadata::ensure_or_create_format_marker(&root, db_path)?
+            cntryl_midge_durability::metadata::ensure_or_create_format_marker(&root, db_path)?
         };
         check_scope(scope, "recovery directories")?;
         let fs = match scope {
-            Some(scope) => crate::io::scope_fs(root, scope.clone()),
+            Some(scope) => cntryl_midge_core::io::scope_fs(root, scope.clone()),
             None => root,
         };
         Self::initialize_recovery_core(
@@ -201,7 +208,7 @@ impl RuntimeState {
     fn initialize_recovery_core(
         db_path: &std::path::Path,
         memory_mode: bool,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
         wal_input: RecoveryWalInput,
         fs: Arc<dyn Fs>,
         format_version: u32,
@@ -229,11 +236,11 @@ impl RuntimeState {
                 .max(wal_recovery.recovered_sequence);
         let sst_names = super::SstNameAllocation::recovered(&manifest);
 
-        let accounting = crate::metadata::accounting::Owner::new();
+        let accounting = cntryl_midge_durability::metadata::accounting::Owner::new();
         let accounting_medium = if persistence.is_memory() {
-            crate::metadata::accounting::Medium::MemoryOnly
+            cntryl_midge_durability::metadata::accounting::Medium::MemoryOnly
         } else {
-            crate::metadata::accounting::Medium::Persistent
+            cntryl_midge_durability::metadata::accounting::Medium::Persistent
         };
         let mut state = Self {
             #[cfg(test)]
@@ -250,7 +257,7 @@ impl RuntimeState {
             manifest: super::ManifestRuntimeState::new(manifest),
             fs: fs.clone(),
             startup_scope: scope.cloned(),
-            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new_with_format(
+            manifest_store: Arc::new(ManifestStore::new_with_format(
                 fs,
                 accounting,
                 accounting_medium,
@@ -259,7 +266,7 @@ impl RuntimeState {
             sst_names,
             recovery_sst_fs: None,
             salvaged_local_ssts: std::collections::HashSet::new(),
-            ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
+            ttl_clock: Arc::new(cntryl_midge_core::common::time::ObservedClock::default()),
             wal: WalState {
                 frontiers: crate::runtime::frontiers::WalFrontiers::recovered_at(
                     wal_recovery.recovered_sequence,
@@ -320,7 +327,7 @@ impl RuntimeState {
     fn load_startup_recovery(
         db_path: &std::path::Path,
         persistence: RuntimePersistence,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
         wal: RecoveryWal,
         wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
         fs: &Arc<dyn Fs>,
@@ -402,7 +409,7 @@ impl RuntimeState {
     fn load_recovery_state(
         db_path: &std::path::Path,
         memory_mode: bool,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
         fs: &Arc<dyn Fs>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<RecoveryLoadState> {
@@ -434,7 +441,7 @@ impl RuntimeState {
     fn load_manifest(
         db_path: &std::path::Path,
         memory_mode: bool,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
         fs: &Arc<dyn Fs>,
         opened_in_salvage_mode: &mut bool,
     ) -> MidgeResult<Manifest> {
@@ -451,7 +458,7 @@ impl RuntimeState {
     fn load_manifest_within(
         _db_path: &std::path::Path,
         memory_mode: bool,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
         fs: &Arc<dyn Fs>,
         opened_in_salvage_mode: &mut bool,
         scope: Option<&DeadlineScope>,
@@ -459,13 +466,15 @@ impl RuntimeState {
         if memory_mode {
             return Ok(Manifest::default());
         }
-        let load = |policy| match scope {
-            Some(scope) => crate::metadata::ManifestPersistence::load_with_fs_and_policy_within(
+        let load = |policy| {
+            match scope {
+            Some(scope) => cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy_within(
                 fs, policy, scope,
             ),
-            None => crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(fs, policy),
+            None => cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy_typed(fs, policy),
+        }
         };
-        match load(crate::config::RecoveryPolicy::Strict) {
+        match load(cntryl_midge_durability::RecoveryPolicy::Strict) {
             Ok(manifest) => {
                 tracing::info!("manifest loaded from disk");
                 Ok(manifest)
@@ -474,7 +483,7 @@ impl RuntimeState {
                 if matches!(error, MidgeError::Timeout(_)) {
                     return Err(error);
                 }
-                if recovery_policy == crate::config::RecoveryPolicy::Strict {
+                if recovery_policy == cntryl_midge_durability::RecoveryPolicy::Strict {
                     return Err(MidgeError::RecoveryFailed(format!(
                         "failed to load manifest: {error}"
                     )));
@@ -484,30 +493,30 @@ impl RuntimeState {
                     "failed to load manifest strictly, retrying in salvage mode: {}",
                     error
                 );
-                load(crate::config::RecoveryPolicy::Salvage)
+                load(cntryl_midge_durability::RecoveryPolicy::Salvage)
             }
         }
     }
 
     fn load_intent_log(
         memory_mode: bool,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
         fs: &Arc<dyn Fs>,
         opened_in_salvage_mode: &mut bool,
     ) -> MidgeResult<Vec<IntentLogEntry>> {
         if memory_mode {
             return Ok(Vec::new());
         }
-        match crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+        match cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
             fs,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         ) {
             Ok(intent_log) => Ok(intent_log),
             Err(error) => {
                 if matches!(error, MidgeError::Timeout(_)) {
                     return Err(error);
                 }
-                if recovery_policy == crate::config::RecoveryPolicy::Strict {
+                if recovery_policy == cntryl_midge_durability::RecoveryPolicy::Strict {
                     return Err(MidgeError::RecoveryFailed(format!(
                         "failed to load intent log: {error}"
                     )));
@@ -518,9 +527,9 @@ impl RuntimeState {
                     "failed to load intent log strictly, retrying in salvage mode"
                 );
                 Ok(
-                    crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+                    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
                         fs,
-                        crate::config::RecoveryPolicy::Salvage,
+                        cntryl_midge_durability::RecoveryPolicy::Salvage,
                     )
                     .or_else(|salvage_error| {
                         if matches!(salvage_error, MidgeError::Timeout(_)) {
@@ -555,7 +564,7 @@ impl RuntimeState {
         memory_mode: bool,
         root: &Arc<dyn Fs>,
         replay_dir: &std::path::Path,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
         (writer_epoch, scope, wal_fence): (
@@ -572,7 +581,7 @@ impl RuntimeState {
             )
         } else {
             check_scope(scope, "WAL ledger")?;
-            let wal = crate::io::subdirectory(Arc::clone(root), "wal");
+            let wal = cntryl_midge_core::io::subdirectory(Arc::clone(root), "wal");
             let history = match wal_fence.as_ref() {
                 Some(fence) => crate::runtime::wal_history::WalHistory::open_with_fence(
                     Arc::clone(&wal),
@@ -608,7 +617,7 @@ impl RuntimeState {
     fn replay_wal_storage_within(
         replay_dir: &std::path::Path,
         _root: &Arc<dyn Fs>,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
         manifest: &Manifest,
         mut column_families: HashMap<u32, ColumnFamilyState>,
         scope: Option<&DeadlineScope>,
@@ -619,16 +628,23 @@ impl RuntimeState {
         check_scope(scope, "local WAL replay filesystem")?;
         let mut recovery_memtables = HashMap::new();
         let replay_policy = match recovery_policy {
-            crate::config::RecoveryPolicy::Strict => crate::wal::recovery::ReplayPolicy::Strict,
-            crate::config::RecoveryPolicy::Salvage => {
-                crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
+            cntryl_midge_durability::RecoveryPolicy::Strict => {
+                cntryl_midge_durability::wal::recovery::ReplayPolicy::Strict
+            }
+            cntryl_midge_durability::RecoveryPolicy::Salvage => {
+                cntryl_midge_durability::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
         };
         // The local plan replays every ledger member (#844).
-        let segments = crate::wal::recovery::ReplaySegments::from_ledger(history.ledger(), |id| {
-            crate::io::FsPath::new(crate::wal::segment_file_name(id))
-        });
-        let stats = crate::wal::recovery::replay_wal_with_frontiers_within(
+        let segments = cntryl_midge_durability::wal::recovery::ReplaySegments::from_ledger(
+            history.ledger(),
+            |id| {
+                cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::wal::segment_file_name(
+                    id,
+                ))
+            },
+        );
+        let stats = cntryl_midge_durability::wal::recovery::replay_wal_with_frontiers_within(
             storage,
             &segments,
             &mut recovery_memtables,
@@ -649,16 +665,17 @@ impl RuntimeState {
         if let Some(stop) = &stats.salvage_stop {
             let segment = stop.segment;
             // A segment replay took no record from leaves history whole.
-            let set_aside = if crate::wal::format::holds_no_records(stop.valid_bytes) {
-                crate::runtime::wal_history::SetAside::From(segment)
-            } else {
-                crate::runtime::wal_history::SetAside::After(
-                    crate::runtime::wal_history::SalvageCut {
-                        segment,
-                        valid_bytes: stop.valid_bytes,
-                    },
-                )
-            };
+            let set_aside =
+                if cntryl_midge_durability::wal::format::holds_no_records(stop.valid_bytes) {
+                    crate::runtime::wal_history::SetAside::From(segment)
+                } else {
+                    crate::runtime::wal_history::SetAside::After(
+                        crate::runtime::wal_history::SalvageCut {
+                            segment,
+                            valid_bytes: stop.valid_bytes,
+                        },
+                    )
+                };
             history.set_aside(set_aside, 0).map_err(|error| {
                 preserve_timeout(error, "failed to set aside WAL beyond the salvage point")
             })?;
@@ -688,13 +705,14 @@ impl RuntimeState {
     /// reopens it for append. Otherwise new frames land after the torn bytes,
     /// and the next recovery sees mid-file corruption instead of a tail.
     fn truncate_tolerated_active_tail(
-        storage: &dyn crate::io::Fs,
-        tail: &crate::wal::recovery::ToleratedActiveTail,
+        storage: &dyn cntryl_midge_core::io::Fs,
+        tail: &cntryl_midge_durability::wal::recovery::ToleratedActiveTail,
         wal_fence: Option<&crate::runtime::wal_history::WalHistoryFence>,
     ) -> MidgeResult<()> {
         let truncate = || {
-            let discarded = crate::io::truncate_durably(storage, &tail.path, tail.valid_bytes)
-                .map_err(FsError::into_midge)?;
+            let discarded =
+                cntryl_midge_core::io::truncate_durably(storage, &tail.path, tail.valid_bytes)
+                    .map_err(FsError::into_midge)?;
             if discarded > 0 {
                 tracing::warn!(
                     path = %tail.path,
@@ -713,7 +731,7 @@ impl RuntimeState {
 
     fn record_wal_recovery_stats(
         replay_dir: &std::path::Path,
-        stats: &crate::wal::recovery::RecoveryStats,
+        stats: &cntryl_midge_durability::wal::recovery::RecoveryStats,
     ) {
         tracing::info!(
             records_recovered = stats.record_count,
@@ -757,7 +775,7 @@ impl RuntimeState {
 
     fn handle_recovery_issue(&mut self, message: String) -> MidgeResult<bool> {
         self.check_startup_scope("recovery issue classification")?;
-        if self.recovery_policy() == crate::config::RecoveryPolicy::Strict {
+        if self.recovery_policy() == cntryl_midge_durability::RecoveryPolicy::Strict {
             return Err(MidgeError::RecoveryFailed(message));
         }
 
@@ -773,9 +791,11 @@ impl RuntimeState {
     /// view so a replacement object cannot be mixed into one proof.
     pub(crate) fn validate_sst_fs_proof(
         fs: Arc<dyn Fs>,
-        file_meta: &crate::runtime::FileMeta,
+        file_meta: &cntryl_midge_durability::metadata::intent::FileMeta,
     ) -> MidgeResult<()> {
-        let path = crate::io::FsPath::new(crate::cloud_layout::object_key(&file_meta.name));
+        let path = cntryl_midge_core::io::FsPath::new(cntryl_midge_core::cloud_layout::object_key(
+            &file_meta.name,
+        ));
         let pinned = fs
             .immutable_read_view(&path)
             .map_err(FsError::into_midge)?
@@ -783,8 +803,8 @@ impl RuntimeState {
         let file = pinned
             .open(
                 &path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
+                cntryl_midge_core::io::OpenOptions {
+                    mode: cntryl_midge_core::io::OpenMode::ReadOnly,
                     create: false,
                     create_new: false,
                     truncate: false,
@@ -794,13 +814,13 @@ impl RuntimeState {
         let size = file.len().map_err(FsError::into_midge)?;
         // Recovery keeps readable data an older writer never proved, so a
         // manifest entry with no recorded size or CRC is accepted.
-        crate::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)
+        cntryl_midge_table::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)
             .and_then(|identity| {
                 identity
                     .verify_against(
                         file_meta.expected_sst(),
                         None,
-                        crate::sst::identity::ProofPolicy::Legacy,
+                        cntryl_midge_table::sst::identity::ProofPolicy::Legacy,
                     )
                     .map_err(|mismatch| {
                         MidgeError::RecoveryFailed(format!(
@@ -816,7 +836,7 @@ impl RuntimeState {
                 other => other,
             })?;
         drop(file);
-        crate::sst::fs::SstFileIo::open(&path.0, pinned)?;
+        cntryl_midge_table::sst::fs::SstFileIo::open(&path.0, pinned)?;
         Ok(())
     }
 
@@ -826,7 +846,7 @@ impl RuntimeState {
 
     fn validate_recovered_sst(
         &mut self,
-        file_meta: &crate::runtime::FileMeta,
+        file_meta: &cntryl_midge_durability::metadata::intent::FileMeta,
     ) -> MidgeResult<bool> {
         let fs = self.recovery_sst_fs.as_ref().unwrap_or(&self.fs).clone();
         match Self::validate_sst_fs_proof(fs, file_meta) {
@@ -841,7 +861,7 @@ impl RuntimeState {
 
     fn validate_local_recovered_sst(
         &mut self,
-        file_meta: &crate::runtime::FileMeta,
+        file_meta: &cntryl_midge_durability::metadata::intent::FileMeta,
     ) -> MidgeResult<bool> {
         match Self::validate_sst_fs_proof(Arc::clone(&self.fs), file_meta) {
             Ok(()) => Ok(true),
@@ -855,20 +875,22 @@ impl RuntimeState {
 
     fn local_sst_exists(&self, sst_name: &str) -> MidgeResult<bool> {
         self.fs
-            .exists(&crate::io::FsPath::new(crate::cloud_layout::object_key(
-                sst_name,
-            )))
+            .exists(&cntryl_midge_core::io::FsPath::new(
+                cntryl_midge_core::cloud_layout::object_key(sst_name),
+            ))
             .map_err(FsError::into_midge)
     }
 
     fn delete_sst_if_exists(&mut self, sst_name: &str) -> MidgeResult<()> {
         self.check_startup_scope("recovery SST deletion")?;
-        let path = crate::io::FsPath::new(crate::cloud_layout::object_key(sst_name));
+        let path = cntryl_midge_core::io::FsPath::new(cntryl_midge_core::cloud_layout::object_key(
+            sst_name,
+        ));
         match self.fs.remove_file(&path) {
             Ok(()) | Err(FsError::NotFound(_)) => Ok(()),
             Err(error @ FsError::Timeout(_)) => Err(error.into_midge()),
             Err(error) => {
-                if self.recovery_policy() == crate::config::RecoveryPolicy::Strict {
+                if self.recovery_policy() == cntryl_midge_durability::RecoveryPolicy::Strict {
                     Err(MidgeError::RecoveryFailed(format!(
                         "failed to delete SST '{sst_name}' during recovery: {error}"
                     )))
@@ -889,7 +911,7 @@ impl RuntimeState {
     fn replay_flush_publish_intent(
         &mut self,
         phase: PublicationPhase,
-        file_meta: &crate::runtime::FileMeta,
+        file_meta: &cntryl_midge_durability::metadata::intent::FileMeta,
     ) -> MidgeResult<bool> {
         if self.manifest_has_file(&file_meta.name) {
             tracing::info!(sst_name = %file_meta.name, "flush publish intent already reflected in manifest");
@@ -935,7 +957,7 @@ impl RuntimeState {
         &mut self,
         phase: PublicationPhase,
         removed: &[String],
-        added: &[crate::runtime::FileMeta],
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
     ) -> MidgeResult<bool> {
         if removed.is_empty() {
             return self
@@ -1005,16 +1027,16 @@ impl RuntimeState {
     fn compaction_output_is_superseded_by_published_retry(
         &self,
         current_index: usize,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         removed: &[String],
-        added: &[crate::runtime::FileMeta],
-        intents: &[crate::runtime::IntentLogEntry],
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
+        intents: &[cntryl_midge_durability::metadata::intent::IntentLogEntry],
     ) -> bool {
         intents.iter().enumerate().any(|(index, intent)| {
             if index == current_index {
                 return false;
             }
-            let crate::runtime::IntentLogEntry::CompactionPublish {
+            let cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
                 phase: retry_phase,
                 cf_id: retry_cf_id,
                 removed: retry_removed,
@@ -1041,11 +1063,11 @@ impl RuntimeState {
 
     fn compaction_retry_groups_are_unambiguous(
         &mut self,
-        intents: &[crate::runtime::IntentLogEntry],
+        intents: &[cntryl_midge_durability::metadata::intent::IntentLogEntry],
     ) -> MidgeResult<bool> {
         for (left_index, left) in intents.iter().enumerate() {
             self.check_startup_scope("compaction intent groups")?;
-            let crate::runtime::IntentLogEntry::CompactionPublish {
+            let cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
                 phase: left_phase,
                 cf_id: left_cf_id,
                 removed: left_removed,
@@ -1056,7 +1078,7 @@ impl RuntimeState {
             };
             for right in intents.iter().skip(left_index + 1) {
                 self.check_startup_scope("compaction intent groups")?;
-                let crate::runtime::IntentLogEntry::CompactionPublish {
+                let cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
                     phase: right_phase,
                     cf_id: right_cf_id,
                     removed: right_removed,
@@ -1097,7 +1119,7 @@ impl RuntimeState {
 
     fn roll_back_superseded_compaction_output(
         &mut self,
-        added: &[crate::runtime::FileMeta],
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
     ) -> MidgeResult<()> {
         for file_meta in added {
             self.check_startup_scope("compaction intent proof")?;
@@ -1118,8 +1140,8 @@ impl RuntimeState {
 
     fn reject_compaction_for_inactive_column_family(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
-        added: &[crate::runtime::FileMeta],
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
     ) -> MidgeResult<()> {
         for file_meta in added {
             self.check_startup_scope("compaction intent proof")?;
@@ -1143,7 +1165,7 @@ impl RuntimeState {
     fn compaction_manifest_state(
         &self,
         removed: &[String],
-        added: &[crate::runtime::FileMeta],
+        added: &[cntryl_midge_durability::metadata::intent::FileMeta],
     ) -> CompactionManifestState {
         let all_inputs_present = removed.iter().all(|name| self.manifest_has_file(name));
         let all_inputs_absent = removed.iter().all(|name| !self.manifest_has_file(name));
@@ -1168,13 +1190,16 @@ impl RuntimeState {
     /// intent. The caller validates object identity before deletion.
     pub(crate) fn non_authoritative_compaction_outputs_for_remote_cleanup(
         &self,
-    ) -> MidgeResult<Vec<crate::runtime::FileMeta>> {
+    ) -> MidgeResult<Vec<cntryl_midge_durability::metadata::intent::FileMeta>> {
         let intents = &self.intent_log;
-        let mut candidates = std::collections::BTreeMap::<String, crate::runtime::FileMeta>::new();
+        let mut candidates = std::collections::BTreeMap::<
+            String,
+            cntryl_midge_durability::metadata::intent::FileMeta,
+        >::new();
 
         for (intent_index, intent) in intents.iter().enumerate() {
             self.check_startup_scope("intent replay decision")?;
-            let crate::runtime::IntentLogEntry::CompactionPublish {
+            let cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
                 phase,
                 cf_id,
                 removed,
@@ -1257,13 +1282,16 @@ impl RuntimeState {
     fn replay_sst_move_intent(
         &self,
         phase: PublicationPhase,
-        captured: &[crate::metadata::FileMeta],
+        captured: &[cntryl_midge_durability::metadata::FileMeta],
         target: u32,
     ) -> MidgeResult<()> {
         // The journal alone changes authority. A pre-edit intent retains all
         // sources; a published intent must already be fully reflected.
-        let reflected =
-            crate::metadata::manifest::validate_sst_move(&self.manifest.files, captured, target)?;
+        let reflected = cntryl_midge_durability::metadata::manifest::validate_sst_move(
+            &self.manifest.files,
+            captured,
+            target,
+        )?;
         if phase == PublicationPhase::ManifestPublished && !reflected {
             return Err(MidgeError::RecoveryFailed(
                 "published logical SST move has no matching durable edit".into(),
@@ -1287,12 +1315,14 @@ impl RuntimeState {
         for (intent_index, intent) in intents.iter().enumerate() {
             self.check_startup_scope("intent replay decision")?;
             match intent {
-                crate::runtime::IntentLogEntry::FlushPublish {
-                    phase, file_meta, ..
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish {
+                    phase,
+                    file_meta,
+                    ..
                 } => {
                     manifest_changed |= self.replay_flush_publish_intent(*phase, file_meta)?;
                 }
-                crate::runtime::IntentLogEntry::CompactionPublish {
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
                     phase,
                     cf_id,
                     removed,
@@ -1326,21 +1356,26 @@ impl RuntimeState {
                     manifest_changed |=
                         self.replay_compaction_publish_intent(*phase, removed, added)?;
                 }
-                crate::runtime::IntentLogEntry::MoveSstsPublish {
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::MoveSstsPublish {
                     phase,
                     captured,
                     target_level,
                 } => {
                     self.replay_sst_move_intent(*phase, captured, *target_level)?;
                 }
-                crate::runtime::IntentLogEntry::CompactionApplied { removed, added } => {
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionApplied {
+                    removed,
+                    added,
+                } => {
                     manifest_changed |= self.replay_compaction_publish_intent(
                         PublicationPhase::ManifestPublished,
                         removed,
                         added,
                     )?;
                 }
-                crate::runtime::IntentLogEntry::SstAdded { file_meta } => {
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::SstAdded {
+                    file_meta,
+                } => {
                     manifest_changed |= self.replay_flush_publish_intent(
                         PublicationPhase::ManifestPublished,
                         file_meta,
@@ -1374,7 +1409,7 @@ impl RuntimeState {
         // New intents will be written during normal operation
         self.check_startup_scope("intent log clear")?;
         if !self.is_memory_mode() {
-            if let Err(error) = crate::runtime::IntentPersistence::save_for_selected_format(
+            if let Err(error) = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_for_selected_format(
                 &self.fs,
                 &[],
                 self.manifest_store.uses_format_10(),
@@ -1413,28 +1448,32 @@ mod salvage_quarantine_tests {
     use std::io::Write as _;
 
     fn frame(key: &'static [u8], seq: u64) -> Vec<u8> {
-        let record = crate::wal::WalRecord::new(
-            crate::wal::types::WalOpKind::Put,
+        let record = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::types::WalOpKind::Put,
             bytes::Bytes::from_static(key),
             Some(bytes::Bytes::from_static(b"value")),
             seq,
         );
-        let payload = crate::wal::encoding::encode(&record).expect("encode record");
+        let payload =
+            cntryl_midge_durability::wal::encoding::encode(&record).expect("encode record");
         let mut frame = Vec::new();
-        crate::wal::frame::append_frame(&mut frame, &payload).expect("frame record");
+        cntryl_midge_durability::wal::frame::append_frame(&mut frame, &payload)
+            .expect("frame record");
         frame
     }
 
     fn frame_with_value(key: &'static [u8], value: &'static [u8], seq: u64) -> Vec<u8> {
-        let record = crate::wal::WalRecord::new(
-            crate::wal::types::WalOpKind::Put,
+        let record = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::types::WalOpKind::Put,
             bytes::Bytes::from_static(key),
             Some(bytes::Bytes::from_static(value)),
             seq,
         );
-        let payload = crate::wal::encoding::encode(&record).expect("encode record");
+        let payload =
+            cntryl_midge_durability::wal::encoding::encode(&record).expect("encode record");
         let mut frame = Vec::new();
-        crate::wal::frame::append_frame(&mut frame, &payload).expect("frame record");
+        cntryl_midge_durability::wal::frame::append_frame(&mut frame, &payload)
+            .expect("frame record");
         frame
     }
 
@@ -1442,11 +1481,11 @@ mod salvage_quarantine_tests {
     /// different value for `k` at the same sequence.
     fn conflicting_repeated_sequence(wal_dir: &std::path::Path) {
         write(
-            &wal_dir.join(crate::wal::segment_file_name(1)),
+            &wal_dir.join(cntryl_midge_durability::wal::segment_file_name(1)),
             &[frame_with_value(b"k", b"a", 7)],
         );
         write(
-            &wal_dir.join(crate::wal::segment_file_name(2)),
+            &wal_dir.join(cntryl_midge_durability::wal::segment_file_name(2)),
             &[frame_with_value(b"k", b"b", 7)],
         );
         record_history(wal_dir, &[1], 2);
@@ -1465,11 +1504,11 @@ mod salvage_quarantine_tests {
     /// Recover the WAL under `wal_dir` the way opening the database does.
     fn recover(
         wal_dir: &std::path::Path,
-        policy: crate::config::RecoveryPolicy,
+        policy: cntryl_midge_durability::RecoveryPolicy,
     ) -> MidgeResult<WalRecoveryState> {
         RuntimeState::recover_wal_state(
             false,
-            &crate::io::real::test_root(wal_dir.parent().expect("database root")),
+            &cntryl_midge_core::io::real::test_root(wal_dir.parent().expect("database root")),
             wal_dir,
             policy,
             &Manifest::default(),
@@ -1489,12 +1528,12 @@ mod salvage_quarantine_tests {
     fn history_missing_its_middle_segment(wal_dir: &std::path::Path) {
         for (id, key, value) in [(1, b"k", b"a"), (2, b"k", b"b"), (3, b"z", b"z")] {
             write(
-                &wal_dir.join(crate::wal::segment_file_name(id)),
+                &wal_dir.join(cntryl_midge_durability::wal::segment_file_name(id)),
                 &[frame_with_value(key, value, id)],
             );
         }
         record_history(wal_dir, &[1, 2], 3);
-        std::fs::remove_file(wal_dir.join(crate::wal::segment_file_name(2)))
+        std::fs::remove_file(wal_dir.join(cntryl_midge_durability::wal::segment_file_name(2)))
             .expect("lose segment 2");
     }
 
@@ -1507,7 +1546,7 @@ mod salvage_quarantine_tests {
         history_missing_its_middle_segment(&wal_dir);
 
         // Act
-        let result = recover(&wal_dir, crate::config::RecoveryPolicy::Strict);
+        let result = recover(&wal_dir, cntryl_midge_durability::RecoveryPolicy::Strict);
 
         // Assert
         match result {
@@ -1529,8 +1568,8 @@ mod salvage_quarantine_tests {
         history_missing_its_middle_segment(&wal_dir);
 
         // Act
-        let recovered =
-            recover(&wal_dir, crate::config::RecoveryPolicy::Salvage).expect("salvage opens");
+        let recovered = recover(&wal_dir, cntryl_midge_durability::RecoveryPolicy::Salvage)
+            .expect("salvage opens");
 
         // Assert: history keeps segment 1 and continues past every id it
         // handed out; segment 3 is set aside, not replayed after the hole.
@@ -1550,7 +1589,7 @@ mod salvage_quarantine_tests {
         conflicting_repeated_sequence(&wal_dir);
 
         // Act
-        let result = recover(&wal_dir, crate::config::RecoveryPolicy::Strict);
+        let result = recover(&wal_dir, cntryl_midge_durability::RecoveryPolicy::Strict);
 
         // Assert
         let Err(error) = result else {
@@ -1589,7 +1628,7 @@ mod salvage_quarantine_tests {
         let wal_dir = directory.path().join("wal");
         std::fs::create_dir(&wal_dir).expect("create wal dir");
         write(
-            &wal_dir.join(crate::wal::segment_file_name(1)),
+            &wal_dir.join(cntryl_midge_durability::wal::segment_file_name(1)),
             &[
                 frame_with_value(b"k", b"a", 7),
                 frame_with_value(b"k", b"b", 7),
@@ -1630,7 +1669,7 @@ mod salvage_quarantine_tests {
         corrupt[last] ^= 0xFF;
         let prefix_bytes = prefix.concat();
         write(
-            &wal_dir.join(crate::wal::segment_file_name(3)),
+            &wal_dir.join(cntryl_midge_durability::wal::segment_file_name(3)),
             &[
                 prefix[0].clone(),
                 prefix[1].clone(),
@@ -1639,11 +1678,11 @@ mod salvage_quarantine_tests {
             ],
         );
         write(
-            &wal_dir.join(crate::wal::segment_file_name(4)),
+            &wal_dir.join(cntryl_midge_durability::wal::segment_file_name(4)),
             &[frame(b"e", 5)],
         );
         write(
-            &wal_dir.join(crate::wal::segment_file_name(5)),
+            &wal_dir.join(cntryl_midge_durability::wal::segment_file_name(5)),
             &[frame(b"f", 6)],
         );
         record_history(wal_dir, &[3, 4], 5);
@@ -1651,7 +1690,7 @@ mod salvage_quarantine_tests {
     }
 
     fn salvage_replay(wal_dir: &std::path::Path) -> WalRecoveryState {
-        recover(wal_dir, crate::config::RecoveryPolicy::Salvage).expect("salvage replay")
+        recover(wal_dir, cntryl_midge_durability::RecoveryPolicy::Salvage).expect("salvage replay")
     }
 
     #[test]
@@ -1661,7 +1700,7 @@ mod salvage_quarantine_tests {
         let wal_dir = directory.path().join("wal");
         std::fs::create_dir(&wal_dir).expect("create wal dir");
         let prefix = corrupt_middle_segment(&wal_dir);
-        let header_len = crate::wal::format::HEADER_LEN;
+        let header_len = cntryl_midge_durability::wal::format::HEADER_LEN;
 
         // Act
         let recovered = salvage_replay(&wal_dir);
@@ -1674,14 +1713,14 @@ mod salvage_quarantine_tests {
             recovered.recovered_sequence
         );
         // The stop segment keeps its replayed prefix, sealed by a footer.
-        let cut = std::fs::read(wal_dir.join(crate::wal::segment_file_name(3)))
+        let cut = std::fs::read(wal_dir.join(cntryl_midge_durability::wal::segment_file_name(3)))
             .expect("stop segment keeps its replayed prefix");
         assert_eq!(
             &cut[header_len..header_len + prefix.len()],
             prefix.as_slice()
         );
         assert_eq!(
-            crate::wal::format::segment::footer_link(&cut)
+            cntryl_midge_durability::wal::format::segment::footer_link(&cut)
                 .expect("the cut segment decodes")
                 .map(|link| link.last_seq),
             Some(2)
@@ -1691,8 +1730,12 @@ mod salvage_quarantine_tests {
             (vec![3], 6),
             "history continues in a new segment after the replayed prefix"
         );
-        assert!(!wal_dir.join(crate::wal::segment_file_name(4)).exists());
-        assert!(!wal_dir.join(crate::wal::segment_file_name(5)).exists());
+        assert!(!wal_dir
+            .join(cntryl_midge_durability::wal::segment_file_name(4))
+            .exists());
+        assert!(!wal_dir
+            .join(cntryl_midge_durability::wal::segment_file_name(5))
+            .exists());
         let quarantine = std::fs::read_dir(&wal_dir)
             .expect("read wal dir")
             .filter_map(Result::ok)
@@ -1700,11 +1743,11 @@ mod salvage_quarantine_tests {
             .expect("quarantine directory")
             .path();
         for id in [3, 4, 5] {
-            let name = crate::wal::segment_file_name(id);
+            let name = cntryl_midge_durability::wal::segment_file_name(id);
             assert!(quarantine.join(&name).exists(), "{name} must be preserved");
         }
         assert!(
-            std::fs::metadata(quarantine.join(crate::wal::segment_file_name(3)))
+            std::fs::metadata(quarantine.join(cntryl_midge_durability::wal::segment_file_name(3)))
                 .expect("stop segment copy")
                 .len()
                 > (header_len + prefix.len()) as u64,
@@ -1724,7 +1767,7 @@ mod salvage_quarantine_tests {
         // header.
         let mut segment = std::fs::OpenOptions::new()
             .append(true)
-            .open(wal_dir.join(crate::wal::segment_file_name(open)))
+            .open(wal_dir.join(cntryl_midge_durability::wal::segment_file_name(open)))
             .expect("open the new open segment");
         segment
             .write_all(&frame(b"after", 7))
@@ -1732,7 +1775,7 @@ mod salvage_quarantine_tests {
         segment.sync_all().expect("sync the new open segment");
 
         // Act
-        let reopened = recover(&wal_dir, crate::config::RecoveryPolicy::Strict);
+        let reopened = recover(&wal_dir, cntryl_midge_durability::RecoveryPolicy::Strict);
 
         // Assert
         let reopened = reopened.expect("writes after salvage must not sit behind corruption");

@@ -1,6 +1,6 @@
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{next_request_id, RuntimeHandle, RuntimeMsg, RuntimeResponse};
-use crate::types::{
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::types::{
     DurabilityFrontiersSnapshot, ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot,
     RuntimeMetricsSnapshot, StorageLayoutSnapshot,
 };
@@ -159,7 +159,7 @@ impl EngineMetrics {
 #[cfg(test)]
 mod tests {
     use super::EngineMetrics;
-    use crate::common::MidgeError;
+    use cntryl_midge_core::common::MidgeError;
     use std::time::Duration;
 
     #[test]

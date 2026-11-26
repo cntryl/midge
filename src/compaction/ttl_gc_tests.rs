@@ -1,7 +1,7 @@
 use super::*;
-use crate::io::{Fs, MockFs};
-use crate::sst::{FsSstFactoryIo, SstFactory};
-use crate::types::EntryType;
+use cntryl_midge_core::io::{Fs, MockFs};
+use cntryl_midge_core::types::EntryType;
+use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory};
 use std::sync::Arc;
 
 #[test]
@@ -32,15 +32,15 @@ fn should_preserve_raw_expiration_when_compaction_precedes_clock_correction(
         assert!(rows.iter().any(|(key, _)| key.as_ref() == b"future"));
         let latest = rows.iter().find(|(key, _)| key.as_ref() == b"key");
         assert!(
-            matches!(latest, Some((_, crate::types::KeyState::Value(value, 2, Some(100), _))) if value.as_ref() == b"latest")
+            matches!(latest, Some((_, cntryl_midge_core::types::KeyState::Value(value, 2, Some(100), _))) if value.as_ref() == b"latest")
         );
         assert!(matches!(
             reader.get_state_at_with_time(b"key", u64::MAX, 100)?,
-            crate::types::KeyState::Tombstone(2)
+            cntryl_midge_core::types::KeyState::Tombstone(2)
         ));
         assert!(
             matches!(reader.get_state_at_with_time(b"key", u64::MAX, 99)?,
-            crate::types::KeyState::Value(value, 2, Some(100), _) if value.as_ref() == b"latest")
+            cntryl_midge_core::types::KeyState::Value(value, 2, Some(100), _) if value.as_ref() == b"latest")
         );
     }
     Ok(())

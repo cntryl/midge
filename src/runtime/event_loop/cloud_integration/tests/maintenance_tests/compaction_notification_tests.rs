@@ -1,9 +1,9 @@
 //! Genuine compute receipts retain correlation without owning caller routes.
 
 use super::*;
-use crate::common::{MidgeError, MidgeResult};
-use crate::lease::PrimaryLease as _;
-use crate::types::KeyState;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::types::KeyState;
+use cntryl_midge_durability::lease::PrimaryLease as _;
 
 const WAIT: Duration = Duration::from_secs(3);
 const MANUAL_ID: u64 = 96_001;
@@ -14,7 +14,7 @@ struct NotificationFixture {
     input: String,
     input_bytes: Vec<u8>,
     cloud: bool,
-    lease: Option<Arc<crate::lease::CloudStorageLease>>,
+    lease: Option<Arc<cntryl_midge_durability::lease::CloudStorageLease>>,
 }
 
 struct Receipt {
@@ -50,7 +50,8 @@ impl NotificationFixture {
             // singleton could legally move without reading its data blocks.
             let mut overlap = el.state.manifest.files[0].clone();
             overlap.sst_seq = 2;
-            overlap.name = crate::cloud_layout::file_name(0, overlap.level, overlap.sst_seq);
+            overlap.name =
+                cntryl_midge_core::cloud_layout::file_name(0, overlap.level, overlap.sst_seq);
             std::fs::write(el.state.host_sst_dir().join(&overlap.name), &input_bytes)?;
             if cloud {
                 std::fs::write(remote_sst_path_for_test(&el, &overlap.name), &input_bytes)?;
@@ -58,8 +59,11 @@ impl NotificationFixture {
             el.state.manifest.test_mut().files.push(overlap);
             el.state.manifest.test_mut().next_sst_seqs.insert(0, 3);
             el.state.restore_sequence_floor_from_manifest();
-            crate::metadata::ManifestPersistence::save_with_fs(&el.state.fs, &el.state.manifest)
-                .map_err(MidgeError::Internal)?;
+            cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
+                &el.state.fs,
+                &el.state.manifest,
+            )
+            .map_err(MidgeError::Internal)?;
         }
         Ok(Self {
             el,
@@ -234,7 +238,7 @@ fn assert_one_manual_response(
 
 #[test]
 fn should_publish_background_compaction_without_routing_its_notification() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let mut fixture = NotificationFixture::new(true)?;
         fixture.launch()?;
@@ -267,7 +271,7 @@ fn should_publish_background_compaction_without_routing_its_notification() -> Mi
 
 #[test]
 fn should_complete_registered_manual_caller_once_after_real_compaction() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let mut fixture = NotificationFixture::new(false)?;
         let response = fixture.register_manual();
@@ -293,7 +297,7 @@ fn should_complete_registered_manual_caller_once_after_real_compaction() -> Midg
 
 #[test]
 fn should_fail_manual_caller_once_when_real_compute_detects_corrupt_input() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: damage the real block CRC, retaining every input byte.
         let mut fixture = NotificationFixture::new(false)?;
         let payload = u32::from_le_bytes(fixture.input_bytes[..4].try_into().unwrap());
@@ -333,7 +337,7 @@ fn should_fail_manual_caller_once_when_real_compute_detects_corrupt_input() -> M
 #[test]
 fn should_retain_inputs_without_routing_notification_when_publication_validation_fails(
 ) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: actual compute finishes before its captured identity changes.
         let mut fixture = NotificationFixture::new(true)?;
         fixture.launch()?;
@@ -371,28 +375,33 @@ fn should_retain_inputs_without_routing_notification_when_publication_validation
 }
 
 fn committed_intents(
-    cloud: &crate::storage::cloud::CloudStorage,
-    lease: &crate::lease::CloudStorageLease,
-) -> MidgeResult<Vec<crate::runtime::IntentLogEntry>> {
+    cloud: &cntryl_midge_storage::cloud::CloudStorage,
+    lease: &cntryl_midge_durability::lease::CloudStorageLease,
+) -> MidgeResult<Vec<cntryl_midge_durability::metadata::intent::IntentLogEntry>> {
     let directory = tempfile::tempdir()?;
-    let bytes =
-        get_committed_cloud_metadata_for_test(cloud, lease, crate::metadata::files::INTENT_LOG);
+    let bytes = get_committed_cloud_metadata_for_test(
+        cloud,
+        lease,
+        cntryl_midge_durability::metadata::files::INTENT_LOG,
+    );
     std::fs::write(
-        directory.path().join(crate::metadata::files::INTENT_LOG),
+        directory
+            .path()
+            .join(cntryl_midge_durability::metadata::files::INTENT_LOG),
         bytes,
     )?;
-    crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
-        &crate::io::real::test_root(directory.path()),
-        crate::config::RecoveryPolicy::Strict,
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
+        &cntryl_midge_core::io::real::test_root(directory.path()),
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )
 }
 
 fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
     let mut fixture = NotificationFixture::new(true)?;
     let backend = Arc::new(FailThirdIntentPutBackend::new(Arc::new(
-        crate::storage::cloud::MockCloudBackend::new(),
+        cntryl_midge_storage::cloud::MockCloudBackend::new(),
     )));
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+    let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
         backend.clone(),
         "notification-mirror".into(),
     ));
@@ -444,7 +453,7 @@ fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
         let committed = committed_intents(&cloud, &lease)?;
         assert!(
             committed.iter().any(|intent| matches!(intent,
-                crate::runtime::IntentLogEntry::CompactionPublish { added, .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish { added, .. }
                     if added.iter().any(|file| file.name == outputs[0])
             )),
             "the failed clear retains the previously committed remote intent"
@@ -466,7 +475,7 @@ fn should_retain_real_publication_failure_without_routing_worker_notification() 
     // Arrange: use the real metadata backend with its first intent upload rejected.
     // Act: dispatch the genuine compute notification and run publication.
     // Assert: retain the input/intent/reservation state and fail the manual route once.
-    crate::failpoints::with_read_gate(|| mirror_failure_case(true))
+    cntryl_midge_core::failpoints::with_read_gate(|| mirror_failure_case(true))
 }
 
 #[test]
@@ -475,13 +484,13 @@ fn should_settle_real_intent_clear_failure_without_routing_worker_notification()
     // Arrange: reject the third actual metadata intent upload.
     // Act: publish the real output, install the manifest, then fail its clear mirror.
     // Assert: retain settled authority and fail the manual route once.
-    crate::failpoints::with_read_gate(|| mirror_failure_case(false))
+    cntryl_midge_core::failpoints::with_read_gate(|| mirror_failure_case(false))
 }
 
 #[test]
 fn should_fail_real_shutdown_caller_without_routing_deferred_compute_notification(
 ) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let mut fixture = NotificationFixture::new(false)?;
         let response = fixture.register_manual();
@@ -532,7 +541,7 @@ fn should_fail_real_shutdown_caller_without_routing_deferred_compute_notificatio
 #[test]
 fn should_count_real_late_response_when_metrics_caller_has_abandoned_its_route() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let mut fixture = NotificationFixture::new(false)?;
         let id = 96_002;

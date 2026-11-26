@@ -1,19 +1,19 @@
 //! Actual recovery fixtures for the external watchdog's isolated child tests.
 
 use super::streaming_wal_plan::StreamingCloudWalRecovery;
-use crate::common::{MidgeError, MidgeResult};
-use crate::config::RecoveryPolicy;
-use crate::io::{Fs, FsError, ReadFs};
-use crate::memtable::SkipListMemtable;
-use crate::storage::StorageBackend;
-use crate::types::{EntryType, KeyState};
-use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
-use crate::wal::recovery::streaming::{
+use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::{Fs, FsError, ReadFs};
+use cntryl_midge_core::types::{EntryType, KeyState};
+use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
+use cntryl_midge_durability::wal::recovery::streaming::{
     replay_wal_with_options, ReplayOptions, StreamingReplayLimits,
 };
-use crate::wal::recovery::{RecoveryStats, ReplayPolicy};
-use crate::wal::{WalOpKind, WalRecord};
-use bytes::Bytes;
+use cntryl_midge_durability::wal::recovery::{RecoveryStats, ReplayPolicy};
+use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
+use cntryl_midge_durability::RecoveryPolicy;
+use cntryl_midge_storage::StorageBackend;
+use cntryl_midge_table::memtable::SkipListMemtable;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -70,7 +70,7 @@ enum PreparedInput {
         wal: Box<FixtureWal>,
     },
     #[cfg(any(test, feature = "cloud-common"))]
-    Inventory(Vec<crate::metadata::FileMeta>),
+    Inventory(Vec<cntryl_midge_durability::metadata::FileMeta>),
 }
 
 /// Seed fixture input before the external watchdog begins observing recovery.
@@ -182,10 +182,13 @@ fn prepare_recovery_progress_fixture_with_inventory_count(
             // The cache's ledger exists before recovery starts, as it does for
             // a real cache, so the measured recovery never writes locally.
             let local_root: Arc<dyn Fs> =
-                Arc::new(crate::io::RealFs::new(&local).map_err(FsError::into_midge)?);
+                Arc::new(cntryl_midge_core::io::RealFs::new(&local).map_err(FsError::into_midge)?);
             // A cache that joined the catalog: its first segment follows the
             // catalog's head, at its next id.
-            let local_wal = crate::io::subdirectory(local_root, crate::wal::WAL_DIR);
+            let local_wal = cntryl_midge_core::io::subdirectory(
+                local_root,
+                cntryl_midge_durability::wal::WAL_DIR,
+            );
             if crate::runtime::wal_history::WalHistory::load(Arc::clone(&local_wal), SEGMENT_EPOCH)?
                 .is_none()
             {
@@ -259,9 +262,11 @@ fn wal_fixture(
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
     observations.set_phase("planner")?;
     let local_root: Arc<dyn Fs> =
-        Arc::new(crate::io::RealFs::new(local).map_err(FsError::into_midge)?);
-    let wal_dir: Arc<dyn ReadFs> =
-        crate::io::subdirectory(Arc::clone(&local_root), crate::wal::WAL_DIR);
+        Arc::new(cntryl_midge_core::io::RealFs::new(local).map_err(FsError::into_midge)?);
+    let wal_dir: Arc<dyn ReadFs> = cntryl_midge_core::io::subdirectory(
+        Arc::clone(&local_root),
+        cntryl_midge_durability::wal::WAL_DIR,
+    );
     let ledger = crate::runtime::wal_history::WalHistory::read(&wal_dir)?
         .ok_or_else(|| MidgeError::Internal("the prepared cache has no WAL ledger".into()))?;
     let recovered = StreamingCloudWalRecovery::build(
@@ -333,7 +338,7 @@ fn inventory_fixture(
     mode: RecoveryProgressFixtureMode,
     local: &Path,
     observations: &Arc<FixtureObservations>,
-    files: Vec<crate::metadata::FileMeta>,
+    files: Vec<cntryl_midge_durability::metadata::FileMeta>,
     inventory_head_delay: Duration,
     started: Instant,
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
@@ -346,7 +351,7 @@ fn inventory_fixture(
         Arc::clone(observations),
         inventory_head_delay,
     )?;
-    let cloud = crate::storage::cloud::CloudStorage::new_with_timeout(
+    let cloud = cntryl_midge_storage::cloud::CloudStorage::new_with_timeout(
         Arc::new(backend),
         String::new(),
         PROVIDER_TIMEOUT,
@@ -397,14 +402,14 @@ fn inventory_fixture(
 fn seed_inventory(
     root: &Path,
     inventory_entries: usize,
-) -> MidgeResult<Vec<crate::metadata::FileMeta>> {
+) -> MidgeResult<Vec<cntryl_midge_durability::metadata::FileMeta>> {
     let directory = root.join("inventory-sst");
     std::fs::create_dir_all(directory.join("sst"))?;
     let fs: Arc<dyn Fs> =
-        Arc::new(crate::io::RealFs::new(&directory).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(fs, READ_WINDOW);
+        Arc::new(cntryl_midge_core::io::RealFs::new(&directory).map_err(FsError::into_midge)?);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(fs, READ_WINDOW);
     let mut writer = factory.create_for_flush(
-        crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        cntryl_midge_core::common::resource_budget::ResourceBudget::new(1024 * 1024),
     )?;
     writer.add_sorted_with_meta(
         b"inventory-key",
@@ -420,15 +425,15 @@ fn seed_inventory(
     for sequence in 1..=inventory_entries {
         let sequence = u64::try_from(sequence)
             .map_err(|_| MidgeError::InvalidArgument("inventory size exceeds u64".into()))?;
-        let name = crate::cloud_layout::file_name(0, 0, sequence);
+        let name = cntryl_midge_core::cloud_layout::file_name(0, 0, sequence);
         let cloud_path = root
             .join("cloud")
-            .join(crate::cloud_layout::object_key(&name));
+            .join(cntryl_midge_core::cloud_layout::object_key(&name));
         if let Some(parent) = cloud_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(cloud_path, &bytes)?;
-        files.push(crate::metadata::FileMeta {
+        files.push(cntryl_midge_durability::metadata::FileMeta {
             name,
             cf_id: 0,
             sst_seq: sequence,
@@ -458,15 +463,15 @@ fn seed_wal(root: &Path) -> MidgeResult<FixtureWal> {
             Some(Bytes::from(value)),
             sequence,
         );
-        let payload = crate::wal::encoding::encode(&record)?;
-        crate::wal::frame::append_frame(&mut bytes, &payload)?;
+        let payload = cntryl_midge_durability::wal::encoding::encode(&record)?;
+        cntryl_midge_durability::wal::frame::append_frame(&mut bytes, &payload)?;
         records.push(record);
     }
     // One sealed segment written by `SEGMENT_EPOCH`, as a writer publishes it.
-    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+    let (bytes, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
         1,
         SEGMENT_EPOCH,
-        crate::wal::format::ChainLink::GENESIS,
+        cntryl_midge_durability::wal::format::ChainLink::GENESIS,
     )
     .bytes(&bytes)
     .seal();
@@ -485,17 +490,19 @@ fn seed_wal(root: &Path) -> MidgeResult<FixtureWal> {
 
 fn replay_fixture(
     fs: &dyn ReadFs,
-    segments: &crate::wal::recovery::ReplaySegments,
+    segments: &cntryl_midge_durability::wal::recovery::ReplaySegments,
     memtables: &mut HashMap<u32, Arc<SkipListMemtable>>,
 ) -> MidgeResult<RecoveryStats> {
-    let frontiers = crate::metadata::frontiers::FlushFrontiers::default();
+    let frontiers = cntryl_midge_durability::metadata::frontiers::FlushFrontiers::default();
     replay_wal_with_options(
         fs,
         segments,
         memtables,
         ReplayPolicy::Strict,
         StreamingReplayLimits::local(),
-        ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers)),
+        ReplayOptions::new(
+            cntryl_midge_durability::wal::replay::ReplaySelection::Frontiers(&frontiers),
+        ),
         &mut |_, _| Ok(()),
     )
 }
@@ -529,11 +536,13 @@ fn local_wal_state(local: &Path) -> MidgeResult<(u64, u64)> {
     let mut files = 0_u64;
     for entry in std::fs::read_dir(local.join("wal"))? {
         let entry = entry?;
-        if entry.file_name() == crate::wal::ledger_store::LEDGER_FILE {
+        if entry.file_name() == cntryl_midge_durability::wal::ledger_store::LEDGER_FILE {
             continue;
         }
         let metadata = entry.metadata()?;
-        if metadata.is_file() && metadata.len() > crate::wal::format::HEADER_LEN as u64 {
+        if metadata.is_file()
+            && metadata.len() > cntryl_midge_durability::wal::format::HEADER_LEN as u64
+        {
             files += 1;
             bytes = bytes.saturating_add(metadata.len());
         }

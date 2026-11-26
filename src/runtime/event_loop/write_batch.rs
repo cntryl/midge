@@ -7,8 +7,8 @@ use super::super::{ConflictPolicy, RuntimeMsg, RuntimeResponse, TransactionOp};
 use super::durability_sync::AppliedTransaction;
 use super::wal::ApplyTransactionRequest;
 use super::EventLoop;
-use crate::common::MidgeError;
 use crate::runtime::actors::wal::StagedWriteOverlay;
+use cntryl_midge_core::common::MidgeError;
 use crossbeam::channel::{Receiver, TryRecvError};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -37,11 +37,13 @@ struct WriteResult {
     last_sequence: u64,
     op_count: usize,
     deferred: bool,
-    touched_cfs: Vec<crate::types::ColumnFamilyId>,
+    touched_cfs: Vec<cntryl_midge_core::types::ColumnFamilyId>,
 }
 
 impl EventLoop {
-    pub(super) fn transaction_cf_ids(ops: &[TransactionOp]) -> Vec<crate::types::ColumnFamilyId> {
+    pub(super) fn transaction_cf_ids(
+        ops: &[TransactionOp],
+    ) -> Vec<cntryl_midge_core::types::ColumnFamilyId> {
         let mut seen = HashSet::new();
         ops.iter()
             .filter_map(|op| {
@@ -55,11 +57,17 @@ impl EventLoop {
             .collect()
     }
 
-    pub(super) fn write_stall_hint_for_cfs(&self, cf_ids: &[crate::types::ColumnFamilyId]) -> bool {
+    pub(super) fn write_stall_hint_for_cfs(
+        &self,
+        cf_ids: &[cntryl_midge_core::types::ColumnFamilyId],
+    ) -> bool {
         cf_ids.iter().any(|cf_id| self.should_stall_writes(*cf_id))
     }
 
-    pub(super) fn should_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+    pub(super) fn should_stall_writes(
+        &self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> bool {
         self.state.should_stall_writes(cf_id)
             || !self.actors.cloud_coordinator.cloud_wal.backlog().is_empty()
             || self
@@ -72,7 +80,10 @@ impl EventLoop {
                 })
     }
 
-    pub(super) fn write_pressure_mask(&self, cf_id: crate::types::ColumnFamilyId) -> u8 {
+    pub(super) fn write_pressure_mask(
+        &self,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> u8 {
         #[cfg(any(test, feature = "internal-testing"))]
         {
             use crate::diagnostics::{
@@ -116,12 +127,12 @@ impl EventLoop {
 
     pub(super) fn ensure_l0_write_admission(
         &self,
-        cf_ids: &[crate::types::ColumnFamilyId],
+        cf_ids: &[cntryl_midge_core::types::ColumnFamilyId],
     ) -> Result<(), MidgeError> {
         if !cf_ids.is_empty() && self.state.write_pressure.admission.hard_pending_limit() {
-            self.state
-                .diagnostics
-                .record(crate::telemetry::metrics::Metrics::record_write_stall_compaction);
+            self.state.diagnostics.record(
+                cntryl_midge_core::telemetry::metrics::Metrics::record_write_stall_compaction,
+            );
             return Err(MidgeError::WriteStall(format!(
                 "pending compaction debt reached its configured hard limit ({} bytes)",
                 self.state.write_pressure.admission.pending_bytes()
@@ -147,7 +158,7 @@ impl EventLoop {
 
     pub(super) fn wake_write_stall_waiters(&mut self) {
         // Avoid borrowing issues by snapshotting keys.
-        let cf_ids: Vec<crate::types::ColumnFamilyId> =
+        let cf_ids: Vec<cntryl_midge_core::types::ColumnFamilyId> =
             self.pipeline.write_stall_waiters.column_families();
 
         for cf_id in cf_ids {
@@ -338,10 +349,12 @@ impl EventLoop {
         }
 
         let collect_window = match coalescing_key.durability_policy {
-            crate::wal::DurabilityPolicy::Strict => {
+            cntryl_midge_durability::wal::DurabilityPolicy::Strict => {
                 local_strict_group_commit_collect_window(msg_rx.is_empty())
             }
-            crate::wal::DurabilityPolicy::Batched if coalescing_key.has_start_sequence => {
+            cntryl_midge_durability::wal::DurabilityPolicy::Batched
+                if coalescing_key.has_start_sequence =>
+            {
                 Some(if msg_rx.is_empty() {
                     EXPLICIT_TRANSACTION_COALESCE_COLD_WINDOW
                 } else {
@@ -352,9 +365,11 @@ impl EventLoop {
         };
         if matches!(
             coalescing_key.durability_policy,
-            crate::wal::DurabilityPolicy::Strict
+            cntryl_midge_durability::wal::DurabilityPolicy::Strict
         ) {
-            crate::failpoints::fail_point!("midge::runtime::strict_group_before_collect");
+            cntryl_midge_core::failpoints::fail_point!(
+                "midge::runtime::strict_group_before_collect"
+            );
         }
         self.collect_coalesced_transaction_batch(msg_rx, max, &mut batch, collect_window);
         self.finish_coalesced_transaction_batch(batch)
@@ -508,7 +523,8 @@ impl EventLoop {
     ) -> usize {
         let retained =
             crate::runtime::actors::wal::WalActor::prepared_retained_bytes(&batch.prepared);
-        if batch.coalescing_key.durability_policy == crate::wal::DurabilityPolicy::Strict
+        if batch.coalescing_key.durability_policy
+            == cntryl_midge_durability::wal::DurabilityPolicy::Strict
             && self.actors.wal_actor.supports_sync_submission()
             && retained <= super::wal_pipeline::MAX_INFLIGHT_GROUP_BYTES
         {
@@ -525,8 +541,10 @@ impl EventLoop {
     pub(super) fn finish_coalesced_transaction_outcome(
         &mut self,
         batch: CoalescedTransactionBatch,
-        outcome: crate::common::MidgeResult<crate::runtime::actors::wal::PreparedGroupOutcome>,
-        retained: Option<crate::common::resource_budget::ResourceReservation>,
+        outcome: cntryl_midge_core::common::MidgeResult<
+            crate::runtime::actors::wal::PreparedGroupOutcome,
+        >,
+        retained: Option<cntryl_midge_core::common::resource_budget::ResourceReservation>,
     ) -> usize {
         let CoalescedTransactionBatch {
             coalescing_key: _,
@@ -726,8 +744,8 @@ impl EventLoop {
     /// a drain is running, so each write re-checks the fence before L0.
     fn admit_drained_transaction(
         &self,
-        touched_cfs: &[crate::types::ColumnFamilyId],
-    ) -> crate::common::MidgeResult<()> {
+        touched_cfs: &[cntryl_midge_core::types::ColumnFamilyId],
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.check_lease_health()?;
         self.ensure_l0_write_admission(touched_cfs)
     }
@@ -757,7 +775,7 @@ impl EventLoop {
                 .actors
                 .wal_actor
                 .coalesced_transaction_durability(request.durability_policy)
-                == Some(crate::wal::DurabilityPolicy::Strict)
+                == Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict)
         {
             self.prepare_single_strict_pipeline_request(request, touched_cfs);
             return;
@@ -798,10 +816,10 @@ impl EventLoop {
     fn prepare_single_strict_pipeline_request(
         &mut self,
         request: ApplyTransactionRequest,
-        touched_cfs: Vec<crate::types::ColumnFamilyId>,
+        touched_cfs: Vec<cntryl_midge_core::types::ColumnFamilyId>,
     ) {
         let key = TransactionCoalescingKey {
-            durability_policy: crate::wal::DurabilityPolicy::Strict,
+            durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::Strict,
             has_start_sequence: request.start_sequence.is_some(),
             conflict_policy: request.conflict_policy,
         };
@@ -832,7 +850,7 @@ impl EventLoop {
     fn finish_drained_write(
         &mut self,
         request_id: u64,
-        result: Result<WriteResult, crate::common::MidgeError>,
+        result: Result<WriteResult, cntryl_midge_core::common::MidgeError>,
     ) {
         if let Ok(result) = &result {
             self.publish_snapshots_for(&result.touched_cfs);
@@ -843,7 +861,7 @@ impl EventLoop {
     fn finish_drained_write_after_publish(
         &mut self,
         request_id: u64,
-        result: Result<WriteResult, crate::common::MidgeError>,
+        result: Result<WriteResult, cntryl_midge_core::common::MidgeError>,
     ) {
         match result {
             Ok(result) => self.handle_write_success(request_id, &result),
@@ -869,13 +887,18 @@ impl EventLoop {
         );
     }
 
-    fn handle_write_error(&mut self, request_id: u64, error: crate::common::MidgeError) {
+    fn handle_write_error(
+        &mut self,
+        request_id: u64,
+        error: cntryl_midge_core::common::MidgeError,
+    ) {
         // A WAL append failure fences the actor itself, so ask it rather than
         // looking for "wal writer" in the message: a NoSpace raised elsewhere
         // (storage admission) is backpressure, not lost durability.
         let must_fence = matches!(
             error,
-            crate::common::MidgeError::Timeout(_) | crate::common::MidgeError::OutcomeUnknown(_)
+            cntryl_midge_core::common::MidgeError::Timeout(_)
+                | cntryl_midge_core::common::MidgeError::OutcomeUnknown(_)
         ) || self.actors.wal_actor.is_fenced();
         if must_fence {
             self.state.mark_persistence_anomaly();
@@ -921,7 +944,7 @@ enum PrepareOutcome {
     Prepared {
         request_id: u64,
         prepared_transaction: Box<crate::runtime::actors::wal::PreparedTransactionAppend>,
-        touched_cfs: Vec<crate::types::ColumnFamilyId>,
+        touched_cfs: Vec<cntryl_midge_core::types::ColumnFamilyId>,
     },
     Fallback(ApplyTransactionRequest),
     Error {
@@ -935,7 +958,7 @@ pub(super) struct CoalescedTransactionBatch {
     staged_writes: StagedWriteOverlay,
     staged_growth: HashMap<u32, usize>,
     pub(super) prepared: Vec<crate::runtime::actors::wal::PreparedTransactionAppend>,
-    touched_cfs: HashMap<u64, Vec<crate::types::ColumnFamilyId>>,
+    touched_cfs: HashMap<u64, Vec<cntryl_midge_core::types::ColumnFamilyId>>,
     request_ids: Vec<u64>,
     handled: usize,
     fallback_request: Option<ApplyTransactionRequest>,
@@ -964,10 +987,10 @@ impl CoalescedTransactionBatch {
 
     pub(super) fn spilled_pipeline_placeholder(
         request_id: u64,
-        touched_cfs: Vec<crate::types::ColumnFamilyId>,
+        touched_cfs: Vec<cntryl_midge_core::types::ColumnFamilyId>,
     ) -> Self {
         let mut batch = Self::new(TransactionCoalescingKey {
-            durability_policy: crate::wal::DurabilityPolicy::Strict,
+            durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::Strict,
             has_start_sequence: false,
             conflict_policy: ConflictPolicy::LastWriteWins,
         });
@@ -981,7 +1004,7 @@ impl CoalescedTransactionBatch {
         &mut self,
         request_id: u64,
         prepared_transaction: crate::runtime::actors::wal::PreparedTransactionAppend,
-        touched_cfs: Vec<crate::types::ColumnFamilyId>,
+        touched_cfs: Vec<cntryl_midge_core::types::ColumnFamilyId>,
     ) {
         self.request_ids.push(request_id);
         self.touched_cfs.insert(request_id, touched_cfs);
@@ -992,7 +1015,7 @@ impl CoalescedTransactionBatch {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct TransactionCoalescingKey {
-    durability_policy: crate::wal::DurabilityPolicy,
+    durability_policy: cntryl_midge_durability::wal::DurabilityPolicy,
     has_start_sequence: bool,
     conflict_policy: ConflictPolicy,
 }

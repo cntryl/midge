@@ -2,8 +2,8 @@
 
 use super::RuntimeState;
 #[cfg(feature = "internal-testing")]
-use crate::metadata::accounting::MetricsHandle;
-use crate::metadata::accounting::{Medium, Origin, Owner};
+use cntryl_midge_durability::metadata::accounting::MetricsHandle;
+use cntryl_midge_durability::metadata::accounting::{Medium, Origin, Owner};
 use std::time::Instant;
 
 /// An immutable generation keeps its original origin through retry/shutdown.

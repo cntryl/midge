@@ -10,8 +10,8 @@
 //! This keeps one merge head per input and avoids materializing either an input
 //! SST, the aggregate plan, or a second deduplicated output vector.
 
-use crate::common::MidgeResult;
-use crate::sst::traits::RawSstVersion;
+use cntryl_midge_core::common::MidgeResult;
+use cntryl_midge_table::sst::traits::RawSstVersion;
 
 mod merge;
 mod overlap;
@@ -44,7 +44,7 @@ pub(super) fn ensure_compaction_not_aborted(
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<()> {
     if abort_check.is_some_and(|check| check()) {
-        return Err(crate::common::MidgeError::Aborted(
+        return Err(cntryl_midge_core::common::MidgeError::Aborted(
             "compaction aborted due to ingest epoch change".to_string(),
         ));
     }

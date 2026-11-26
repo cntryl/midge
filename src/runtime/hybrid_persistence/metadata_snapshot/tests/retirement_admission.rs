@@ -3,12 +3,12 @@ use super::super::{
     CloudMetadataMirrorContext, SharedMetadataSnapshot,
 };
 use super::Fixture;
-use crate::common::resource_budget::ResourceBudget;
-use crate::common::{MidgeError, OperationDeadline};
-use crate::lease::{CloudMetadataGeneration, LeaderStore, SharedGenerationId};
-use crate::metadata::{files, Manifest};
 use crate::runtime::hybrid_persistence::metadata_cuts::tests::HeldReadbackBackend;
-use crate::storage::cloud::{CloudStorage, MockCloudBackend};
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::common::{MidgeError, OperationDeadline};
+use cntryl_midge_durability::lease::{CloudMetadataGeneration, LeaderStore, SharedGenerationId};
+use cntryl_midge_durability::metadata::{files, Manifest};
+use cntryl_midge_storage::cloud::{CloudStorage, MockCloudBackend};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -85,17 +85,24 @@ fn assert_released(root: &ResourceBudget, child: &ResourceBudget) {
 
 #[test]
 fn should_refuse_dense_selected_slots_before_decoding_retirement_authority() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: this real current-format positional shape decodes before
         // invalid SST names are checked, and its typed slots exceed 16E.
         let fixture = Fixture::new();
         let mut raw = serde_json::to_value(Manifest::default()).unwrap();
         raw["files"] = serde_json::json!(vec![serde_json::json!(["", 0, 0]); 8192]);
-        let bytes = crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &raw).unwrap();
-        let decoded: Manifest =
-            crate::metadata::codec::decode(crate::metadata::codec::MANIFEST, &bytes).unwrap();
-        let actual_slots =
-            decoded.files.capacity() * std::mem::size_of::<crate::metadata::FileMeta>();
+        let bytes = cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &raw,
+        )
+        .unwrap();
+        let decoded: Manifest = cntryl_midge_durability::metadata::codec::decode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &bytes,
+        )
+        .unwrap();
+        let actual_slots = decoded.files.capacity()
+            * std::mem::size_of::<cntryl_midge_durability::metadata::FileMeta>();
         drop(decoded);
         let generation = publish_raw_snapshot(&fixture, &bytes);
         // The compatibility backend separately owns a 64 KiB completion
@@ -135,7 +142,7 @@ fn should_refuse_dense_selected_slots_before_decoding_retirement_authority() {
 
 #[test]
 fn should_retain_retirement_read_charge_until_the_actual_late_get_callback_finishes() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: fetch the actual selected immutable body, then hold its
         // physical callback beyond the original caller deadline.
         let (entered, arrived) = std::sync::mpsc::channel();
@@ -154,7 +161,7 @@ fn should_retain_retirement_read_charge_until_the_actual_late_get_callback_finis
         let child = root.child(256 * 1024);
         let reader = snapshot(&fixture, child.clone());
         backend.hold_next_read();
-        let worker_gate = crate::failpoints::worker_gate();
+        let worker_gate = cntryl_midge_core::failpoints::worker_gate();
         let worker = std::thread::spawn(move || {
             worker_gate.run(|| {
                 reader.committed_retirement_authority_within(&OperationDeadline::from_budget(
@@ -181,7 +188,7 @@ fn should_retain_retirement_read_charge_until_the_actual_late_get_callback_finis
 
 #[test]
 fn should_retain_typed_charge_for_the_full_retirement_manifest_lifetime() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: valid compact positional files need more conservative typed
         // workspace than the initial raw-body charge, within the same pool.
         let fixture = Fixture::new();
@@ -189,11 +196,19 @@ fn should_retain_typed_charge_for_the_full_retirement_manifest_lifetime() {
         raw["files"] = serde_json::Value::Array(
             (1..=64)
                 .map(|sequence| {
-                    serde_json::json!([crate::cloud_layout::file_name(0, 0, sequence), 0, 3,])
+                    serde_json::json!([
+                        cntryl_midge_core::cloud_layout::file_name(0, 0, sequence),
+                        0,
+                        3,
+                    ])
                 })
                 .collect(),
         );
-        let bytes = crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &raw).unwrap();
+        let bytes = cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &raw,
+        )
+        .unwrap();
         let generation = publish_raw_snapshot(&fixture, &bytes);
         let initial = initial_charge(&generation);
         let root = ResourceBudget::new(512 * 1024);
@@ -218,7 +233,7 @@ fn should_retain_typed_charge_for_the_full_retirement_manifest_lifetime() {
         assert!(child.used() <= child.limit());
         assert_eq!(
             authority.frontiers().get(0).unwrap(),
-            crate::metadata::frontiers::FamilyFrontier::Live {
+            cntryl_midge_durability::metadata::frontiers::FamilyFrontier::Live {
                 through_sequence: 0
             }
         );

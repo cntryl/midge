@@ -4,10 +4,10 @@
 //! runtime can therefore replay a spilled transaction in caller order without
 //! reconstructing its complete write set in memory.
 use super::TransactionOp;
-use crate::common::resource_budget::ResourceBudget;
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Fs, FsError, FsPath};
 use bytes::Bytes;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::{Fs, FsError, FsPath};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -40,7 +40,7 @@ const RUN_MAGIC: &[u8; 8] = b"MDGTXN01";
 const RUN_VERSION: u32 = 2;
 const RUN_HEADER_LEN: usize = 48;
 const SPARSE_INDEX_STRIDE: usize = 16;
-const MAX_FRAME_BYTES: usize = crate::wal::frame::WAL_MAX_RECORD_LEN;
+const MAX_FRAME_BYTES: usize = cntryl_midge_durability::wal::frame::WAL_MAX_RECORD_LEN;
 const RANGE_MAGIC: &[u8; 8] = b"MDGRNG01";
 const RANGE_VERSION: u32 = 2;
 const RANGE_HEADER_LEN: usize = 32;
@@ -254,7 +254,7 @@ impl SpillRun {
 }
 
 #[derive(Clone)]
-struct SpillDiskBudget(Arc<crate::storage::HybridStorage>);
+struct SpillDiskBudget(Arc<cntryl_midge_storage::HybridStorage>);
 
 impl std::fmt::Debug for SpillDiskBudget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -361,7 +361,7 @@ impl TransactionWriteSet {
 
     pub(crate) fn with_storage_budget(
         mut self,
-        storage: Option<Arc<crate::storage::HybridStorage>>,
+        storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     ) -> Self {
         self.disk_budget = storage.map(SpillDiskBudget);
         self
@@ -382,15 +382,18 @@ impl TransactionWriteSet {
         // spill files, so failed admission leaves the transaction unchanged.
         match &op {
             TransactionOp::Put { key, value, .. } => {
-                crate::sst::encoding::validate_entry_size(key.len(), value.len())?;
+                cntryl_midge_table::sst::encoding::validate_entry_size(key.len(), value.len())?;
             }
             TransactionOp::Delete { key, .. } => {
-                crate::sst::encoding::validate_entry_size(key.len(), 0)?;
+                cntryl_midge_table::sst::encoding::validate_entry_size(key.len(), 0)?;
             }
             TransactionOp::DeleteRange {
                 start_key, end_key, ..
             } => {
-                crate::sst::types::validate_range_tombstone_size(start_key.len(), end_key.len())?;
+                cntryl_midge_table::sst::types::validate_range_tombstone_size(
+                    start_key.len(),
+                    end_key.len(),
+                )?;
             }
         }
         let ordinal_op = OrdinalOp {
@@ -656,7 +659,9 @@ impl TransactionOpSource {
         Ok(latest.map(|(_, lookup)| lookup))
     }
 
-    pub(crate) fn touched_cf_ids(&self) -> MidgeResult<Vec<crate::types::ColumnFamilyId>> {
+    pub(crate) fn touched_cf_ids(
+        &self,
+    ) -> MidgeResult<Vec<cntryl_midge_core::types::ColumnFamilyId>> {
         let mut cfs = Vec::new();
         self.for_each(|_, op| {
             let cf_id = op_cf_id(&op);
@@ -715,7 +720,7 @@ fn consider_lookup(ordinal_op: &OrdinalOp, key: &[u8], latest: &mut Option<(u64,
     }
 }
 
-pub(crate) fn op_cf_id(op: &TransactionOp) -> crate::types::ColumnFamilyId {
+pub(crate) fn op_cf_id(op: &TransactionOp) -> cntryl_midge_core::types::ColumnFamilyId {
     match op {
         TransactionOp::Put { cf_id, .. }
         | TransactionOp::Delete { cf_id, .. }

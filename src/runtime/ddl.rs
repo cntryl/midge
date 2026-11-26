@@ -8,13 +8,13 @@
 //! commit is made visible immediately even when the local journal append must
 //! be retried during recovery.
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::traits::{FsPath, OpenMode, OpenOptions};
-use crate::io::FsError;
-use crate::metadata::manifest::FamilyLifecycleEdit;
-use crate::metadata::{ColumnFamilyMeta, Manifest, ManifestEdit};
 use crate::runtime::RuntimeState;
-use crate::storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::traits::{FsPath, OpenMode, OpenOptions};
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_durability::metadata::manifest::FamilyLifecycleEdit;
+use cntryl_midge_durability::metadata::{ColumnFamilyMeta, Manifest, ManifestEdit};
+use cntryl_midge_storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -28,13 +28,16 @@ pub(crate) const MAX_COLUMN_FAMILY_NAME_BYTES: usize = 255;
 /// so a conditional write prepared by the prior holder cannot land afterward.
 #[derive(Clone)]
 pub(crate) struct DdlLeaseAuthority {
-    pub(crate) store: Arc<dyn crate::lease::LeaderStore>,
+    pub(crate) store: Arc<dyn cntryl_midge_durability::lease::LeaderStore>,
     pub(crate) holder_id: String,
     pub(crate) writer_epoch: u64,
 }
 
 impl DdlLeaseAuthority {
-    pub(crate) fn validate(&self, deadline: &crate::common::OperationDeadline) -> MidgeResult<()> {
+    pub(crate) fn validate(
+        &self,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> MidgeResult<()> {
         if deadline.is_expired() {
             return Err(MidgeError::Timeout(
                 "cloud DDL lease validation exceeded its deadline".to_string(),
@@ -233,7 +236,10 @@ impl DdlRegistry {
                 "remote DDL registry accepts only column-family edits".to_string(),
             )
         })?;
-        crate::metadata::manifest::apply_column_family_lifecycle(&mut self.column_families, edit)
+        cntryl_midge_durability::metadata::manifest::apply_column_family_lifecycle(
+            &mut self.column_families,
+            edit,
+        )
     }
 }
 
@@ -337,19 +343,19 @@ fn write_local_prepare(state: &RuntimeState, prepare: &DdlPrepare) -> MidgeResul
         return Ok(());
     }
     let bytes = serialize(prepare)?;
-    crate::failpoints::fail_point!("midge::ddl::before_prepare", |_| Err(MidgeError::Internal(
-        "failpoint: DDL prepare failed".to_string()
-    )));
-    crate::io::staging::stage_bytes(
+    cntryl_midge_core::failpoints::fail_point!("midge::ddl::before_prepare", |_| Err(
+        MidgeError::Internal("failpoint: DDL prepare failed".to_string())
+    ));
+    cntryl_midge_core::io::staging::stage_bytes(
         &state.fs,
         &FsPath::new(LOCAL_DDL_PREPARE_TEMP),
         &FsPath::new(LOCAL_DDL_PREPARE_FILE),
         &bytes,
         MidgeError::Internal,
     )?;
-    crate::failpoints::fail_point!("midge::ddl::after_prepare", |_| Err(MidgeError::Internal(
-        "failpoint: DDL prepare completion failed".to_string()
-    )));
+    cntryl_midge_core::failpoints::fail_point!("midge::ddl::after_prepare", |_| Err(
+        MidgeError::Internal("failpoint: DDL prepare completion failed".to_string())
+    ));
     Ok(())
 }
 
@@ -366,7 +372,10 @@ fn clear_local_prepare(state: &RuntimeState, storage: Option<&HybridStorage>) ->
         .map_err(FsError::into_midge)?;
     state
         .fs
-        .sync_dir(&FsPath::new("."), crate::io::traits::Durability::Durable)
+        .sync_dir(
+            &FsPath::new("."),
+            cntryl_midge_core::io::traits::Durability::Durable,
+        )
         .map_err(FsError::into_midge)
 }
 
@@ -374,13 +383,16 @@ fn clear_local_prepare(state: &RuntimeState, storage: Option<&HybridStorage>) ->
 fn read_remote_registry(
     storage: &HybridStorage,
 ) -> Result<(Option<DdlRegistry>, Option<RemoteObjectProof>), String> {
-    read_remote_registry_within(storage, &crate::common::OperationDeadline::unbounded())
-        .map_err(|error| error.to_string())
+    read_remote_registry_within(
+        storage,
+        &cntryl_midge_core::common::OperationDeadline::unbounded(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn read_remote_registry_within(
     storage: &HybridStorage,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<(Option<DdlRegistry>, Option<RemoteObjectProof>)> {
     let proof = storage.remote_object_proof_optional_within(REMOTE_DDL_REGISTRY_KEY, deadline)?;
     let Some(proof) = proof else {
@@ -392,9 +404,9 @@ fn read_remote_registry_within(
 
 fn reread_remote_registry_after_ambiguous_cas_within(
     storage: &HybridStorage,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<(Option<DdlRegistry>, Option<RemoteObjectProof>)> {
-    crate::failpoints::fail_point!(
+    cntryl_midge_core::failpoints::fail_point!(
         "midge::ddl::before_ambiguous_cas_authority_reread",
         |_| Err(MidgeError::Internal(
             "failpoint: DDL authority re-read failed".to_string()
@@ -407,23 +419,25 @@ fn write_remote_registry_within(
     storage: &HybridStorage,
     registry: &DdlRegistry,
     expected: Option<&RemoteObjectProof>,
-    deadline: &crate::common::OperationDeadline,
-) -> Result<RemoteObjectProof, crate::storage::hybrid::backend::RemoteCasFailure> {
-    crate::failpoints::fail_point!("midge::ddl::before_remote_cas", |_| Err(
-        crate::storage::hybrid::backend::RemoteCasFailure::not_committed(MidgeError::Internal(
-            "remote DDL CAS failed before submission: injected failure".to_string()
-        ))
+    deadline: &cntryl_midge_core::common::OperationDeadline,
+) -> Result<RemoteObjectProof, cntryl_midge_storage::hybrid::backend::RemoteCasFailure> {
+    cntryl_midge_core::failpoints::fail_point!("midge::ddl::before_remote_cas", |_| Err(
+        cntryl_midge_storage::hybrid::backend::RemoteCasFailure::not_committed(
+            MidgeError::Internal(
+                "remote DDL CAS failed before submission: injected failure".to_string()
+            )
+        )
     ));
     let bytes = serialize_registry(registry)
-        .map_err(crate::storage::hybrid::backend::RemoteCasFailure::not_committed)?;
+        .map_err(cntryl_midge_storage::hybrid::backend::RemoteCasFailure::not_committed)?;
     let result = storage.compare_exchange_remote_object_phased(
         REMOTE_DDL_REGISTRY_KEY,
         expected.map(RemoteObjectProof::metadata),
         bytes,
         deadline,
     )?;
-    crate::failpoints::fail_point!("midge::ddl::after_remote_cas", |_| Err(
-        crate::storage::hybrid::backend::RemoteCasFailure::may_have_committed(
+    cntryl_midge_core::failpoints::fail_point!("midge::ddl::after_remote_cas", |_| Err(
+        cntryl_midge_storage::hybrid::backend::RemoteCasFailure::may_have_committed(
             MidgeError::Internal("failpoint: DDL remote CAS completion failed".to_string())
         )
     ));
@@ -437,7 +451,7 @@ fn write_remote_registry_within(
 pub(crate) fn fence_remote_registry_on_startup(
     storage: &HybridStorage,
     authority: &DdlLeaseAuthority,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<()> {
     loop {
         authority.validate(deadline)?;
@@ -466,17 +480,17 @@ pub(crate) fn fence_remote_registry_on_startup(
                     ))
                 })?;
             match head {
-                crate::lease::CloudMetadataHead::Committed(_) => {
+                cntryl_midge_durability::lease::CloudMetadataHead::Committed(_) => {
                     return Err(MidgeError::RecoveryFailed(
                         "cloud DDL registry is missing while lease metadata is committed".into(),
                     ));
                 }
-                crate::lease::CloudMetadataHead::MissingLease => {
+                cntryl_midge_durability::lease::CloudMetadataHead::MissingLease => {
                     return Err(MidgeError::RecoveryFailed(
                         "cloud DDL registry and acquired lease disappeared".into(),
                     ));
                 }
-                crate::lease::CloudMetadataHead::Uncommitted => {}
+                cntryl_midge_durability::lease::CloudMetadataHead::Uncommitted => {}
             }
         }
 
@@ -519,7 +533,7 @@ pub(crate) fn fence_remote_registry_on_startup(
 pub(crate) fn require_empty_registry_for_metadata_bootstrap(
     storage: &HybridStorage,
     authority: &DdlLeaseAuthority,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<()> {
     authority.validate(deadline)?;
     let (remote, _) = read_remote_registry_within(storage, deadline)?;
@@ -580,20 +594,24 @@ fn apply_remote_committed_visibility(
 /// manifest transition is prepared first so a failed journal append cannot mutate
 /// in-memory visibility.
 pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) -> MidgeResult<()> {
-    apply_local_edit_for(state, edit, crate::metadata::accounting::Origin::Ddl)
+    apply_local_edit_for(
+        state,
+        edit,
+        cntryl_midge_durability::metadata::accounting::Origin::Ddl,
+    )
 }
 
 fn apply_local_edit_for(
     state: &mut RuntimeState,
     edit: &ManifestEdit,
-    origin: crate::metadata::accounting::Origin,
+    origin: cntryl_midge_durability::metadata::accounting::Origin,
 ) -> MidgeResult<()> {
     if local_edit_matches(state, edit) {
         return Ok(());
     }
     let memory_mode = state.is_memory_mode();
     let prepared = state.manifest.prepare_edit(edit)?;
-    crate::failpoints::fail_point!("midge::ddl::before_local_commit", |_| Err(
+    cntryl_midge_core::failpoints::fail_point!("midge::ddl::before_local_commit", |_| Err(
         MidgeError::Internal("failpoint: DDL local commit failed".to_string())
     ));
     let journaled_id = if memory_mode {
@@ -635,9 +653,12 @@ fn apply_local_edit_for(
 
 #[cfg(feature = "failpoints")]
 fn fail_after_local_journal_before_memory() -> MidgeResult<()> {
-    crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
-        MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
-    ));
+    cntryl_midge_core::failpoints::fail_point!(
+        "midge::ddl::after_local_journal_before_memory",
+        |_| Err(MidgeError::Internal(
+            "failpoint: DDL local visibility failed".to_string(),
+        ))
+    );
     Ok(())
 }
 
@@ -647,7 +668,7 @@ pub(crate) fn reconcile_prepared_within(
     state: &mut RuntimeState,
     storage: Option<&Arc<HybridStorage>>,
     authority: Option<&DdlLeaseAuthority>,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<()> {
     reconcile_prepared_with_resolution(
         state,
@@ -662,13 +683,15 @@ fn reconcile_prepared_with_resolution(
     state: &mut RuntimeState,
     storage: Option<&Arc<HybridStorage>>,
     authority: Option<&DdlLeaseAuthority>,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
     resolution: AmbiguousPrepareResolution,
 ) -> MidgeResult<()> {
     let origin = match resolution {
-        AmbiguousPrepareResolution::ObserveOnly => crate::metadata::accounting::Origin::Ddl,
+        AmbiguousPrepareResolution::ObserveOnly => {
+            cntryl_midge_durability::metadata::accounting::Origin::Ddl
+        }
         AmbiguousPrepareResolution::RedriveOnceOnStartup => {
-            crate::metadata::accounting::Origin::Recovery
+            cntryl_midge_durability::metadata::accounting::Origin::Recovery
         }
     };
     let Some(prepare) = read_local_prepare(state)? else {
@@ -743,7 +766,7 @@ fn redrive_ambiguous_prepare_within(
     remote: Option<DdlRegistry>,
     proof: Option<&RemoteObjectProof>,
     authority: Option<&DdlLeaseAuthority>,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<()> {
     let mut registry = match remote {
         Some(registry) if registry.epoch == prepare.expected_remote_epoch => registry,
@@ -783,7 +806,7 @@ fn redrive_ambiguous_prepare_within(
                 apply_local_edit_for(
                     state,
                     &prepare.edit,
-                    crate::metadata::accounting::Origin::Recovery,
+                    cntryl_midge_durability::metadata::accounting::Origin::Recovery,
                 )?;
                 clear_local_prepare(state, Some(storage))
             }
@@ -805,7 +828,7 @@ fn redrive_ambiguous_prepare_within(
     apply_local_edit_for(
         state,
         &prepare.edit,
-        crate::metadata::accounting::Origin::Recovery,
+        cntryl_midge_durability::metadata::accounting::Origin::Recovery,
     )?;
     clear_local_prepare(state, Some(storage))
 }
@@ -823,7 +846,9 @@ pub(crate) fn reconcile_startup(
         state,
         storage,
         authority,
-        &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+        &cntryl_midge_core::common::DeadlineScope::new(
+            cntryl_midge_core::common::OperationDeadline::unbounded(),
+        ),
     )
 }
 
@@ -831,7 +856,7 @@ pub(crate) fn reconcile_startup_within(
     state: &mut RuntimeState,
     storage: Option<&Arc<HybridStorage>>,
     authority: Option<&DdlLeaseAuthority>,
-    scope: &crate::common::DeadlineScope,
+    scope: &cntryl_midge_core::common::DeadlineScope,
 ) -> MidgeResult<()> {
     scope.check("DDL startup reconciliation")?;
     let deadline = scope.deadline();
@@ -879,7 +904,7 @@ pub(crate) fn reconcile_startup_within(
             apply_local_edit_for(
                 state,
                 &operation.edit,
-                crate::metadata::accounting::Origin::Recovery,
+                cntryl_midge_durability::metadata::accounting::Origin::Recovery,
             )?;
         }
     }
@@ -917,7 +942,7 @@ pub(crate) fn execute_within(
     storage: Option<&Arc<HybridStorage>>,
     edit: &ManifestEdit,
     authority: Option<&DdlLeaseAuthority>,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<()> {
     if let Some(authority) = authority {
         authority.validate(deadline)?;
@@ -958,7 +983,7 @@ pub(crate) fn execute_within(
     // is not proof that a delayed CAS will never commit.
     prepare.remote_cas_ambiguous = true;
     write_local_prepare(state, &prepare)?;
-    crate::failpoints::fail_point!(
+    cntryl_midge_core::failpoints::fail_point!(
         "midge::ddl::after_ambiguous_prepare_before_remote_cas_submission",
         |_| Err(MidgeError::Internal(
             "failpoint: DDL stopped after ambiguous prepare before remote CAS submission"
@@ -1033,7 +1058,7 @@ pub(crate) fn execute_within(
 }
 
 fn remote_cas_definitely_not_committed(
-    failure: &crate::storage::hybrid::backend::RemoteCasFailure,
+    failure: &cntryl_midge_storage::hybrid::backend::RemoteCasFailure,
 ) -> bool {
     !failure.may_have_committed
 }
@@ -1128,13 +1153,13 @@ mod tests {
     }
 
     struct LoseFirstRegistryCasCallback {
-        inner: Arc<dyn crate::storage::StorageBackend>,
+        inner: Arc<dyn cntryl_midge_storage::StorageBackend>,
         armed: AtomicBool,
         registry_writes: AtomicUsize,
     }
 
-    impl crate::storage::StorageBackend for LoseFirstRegistryCasCallback {
-        crate::storage::forward_storage_backend!(
+    impl cntryl_midge_storage::StorageBackend for LoseFirstRegistryCasCallback {
+        cntryl_midge_storage::forward_storage_backend!(
             inner;
             submit_range_read_request, submit_range_head_request,
             submit_metadata_read_request, submit_head_request, submit_delete_request,
@@ -1142,9 +1167,9 @@ mod tests {
 
         fn submit_write_request(
             &self,
-            request: crate::storage::StorageRequest,
+            request: cntryl_midge_storage::StorageRequest,
             data: Vec<u8>,
-            callback: crate::storage::StorageCallback,
+            callback: cntryl_midge_storage::StorageCallback,
         ) {
             if request.key != REMOTE_DDL_REGISTRY_KEY {
                 self.inner.submit_write_request(request, data, callback);
@@ -1160,16 +1185,18 @@ mod tests {
             self.inner.submit_write_request(request, data, inner_tx);
             assert!(matches!(
                 inner_rx.recv_timeout(std::time::Duration::from_secs(1)),
-                Ok(crate::storage::StorageEvent::WriteComplete {
-                    result: crate::storage::StorageOutcome::Ok(()),
+                Ok(cntryl_midge_storage::StorageEvent::WriteComplete {
+                    result: cntryl_midge_storage::StorageOutcome::Ok(()),
                     ..
                 })
             ));
-            let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
+            let _ = callback.send(cntryl_midge_storage::StorageEvent::WriteComplete {
                 key,
-                result: crate::storage::StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "registry callback lost after commit",
-                )),
+                result: cntryl_midge_storage::StorageOutcome::Err(
+                    cntryl_midge_storage::storage_timeout_error(
+                        "registry callback lost after commit",
+                    ),
+                ),
             });
         }
     }
@@ -1177,14 +1204,14 @@ mod tests {
     #[cfg(feature = "failpoints")]
     #[test]
     fn should_preserve_registry_when_validity_expires_before_ddl_cas() {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         // Arrange
-        let _guard = crate::failpoints::test_failpoint_guard();
+        let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let _scenario = fail::FailScenario::setup();
         let directory = tempfile::tempdir().unwrap();
-        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+            Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
             "ddl-expiry-test".into(),
         ));
         let provider = Arc::new(LoseFirstRegistryCasCallback {
@@ -1194,7 +1221,7 @@ mod tests {
         });
         let storage = Arc::new(HybridStorage::with_policy(
             provider.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let lease = provider_test_lease(&cloud, directory.path());
         let _lease_guard = Arc::clone(&lease).try_acquire().unwrap();
@@ -1210,7 +1237,7 @@ mod tests {
                     .map_err(|error| MidgeError::Fenced(error.to_string()))
             }))
             .unwrap();
-        let deadline = crate::common::OperationDeadline::unbounded();
+        let deadline = cntryl_midge_core::common::OperationDeadline::unbounded();
         fence_remote_registry_on_startup(&storage, &authority, &deadline).unwrap();
         let (_, original) = read_remote_registry_within(&storage, &deadline).unwrap();
         let writes = provider.registry_writes.load(Ordering::SeqCst);
@@ -1255,19 +1282,19 @@ mod tests {
     #[cfg(feature = "failpoints")]
     #[test]
     fn should_preserve_successor_prepare_when_predecessor_ddl_cas_is_fenced() {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         // Arrange
-        let _guard = crate::failpoints::test_failpoint_guard();
+        let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let _scenario = fail::FailScenario::setup();
         let directory = tempfile::tempdir().unwrap();
-        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+            Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
             "ddl-prepare-expiry".into(),
         ));
         let storage = Arc::new(HybridStorage::with_policy(
             cloud.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let lease = provider_test_lease(&cloud, directory.path());
         let _lease_guard = Arc::clone(&lease).try_acquire().unwrap();
@@ -1283,7 +1310,7 @@ mod tests {
                     .map_err(|error| MidgeError::Fenced(error.to_string()))
             }))
             .unwrap();
-        let deadline = crate::common::OperationDeadline::unbounded();
+        let deadline = cntryl_midge_core::common::OperationDeadline::unbounded();
         fence_remote_registry_on_startup(&storage, &authority, &deadline).unwrap();
         let mut state = RuntimeState::new(directory.path().join("state"), false);
         let edit = create_edit(&state, "old-cf").unwrap();
@@ -1322,21 +1349,25 @@ mod tests {
     }
 
     fn provider_test_lease(
-        cloud: &Arc<crate::storage::cloud::CloudStorage>,
+        cloud: &Arc<cntryl_midge_storage::cloud::CloudStorage>,
         path: &std::path::Path,
-    ) -> Arc<crate::lease::CloudStorageLease> {
-        Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
-                bucket: "ddl-fence-test".to_string(),
-                prefix: "test/".to_string(),
-            },
-            path.to_path_buf(),
-            Arc::clone(cloud),
-        ))
+    ) -> Arc<cntryl_midge_durability::lease::CloudStorageLease> {
+        Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "ddl-fence-test".to_string(),
+                    prefix: "test/".to_string(),
+                },
+                path.to_path_buf(),
+                Arc::clone(cloud),
+            ),
+        )
     }
 
-    fn provider_test_authority(lease: &crate::lease::CloudStorageLease) -> DdlLeaseAuthority {
-        use crate::lease::PrimaryLease as _;
+    fn provider_test_authority(
+        lease: &cntryl_midge_durability::lease::CloudStorageLease,
+    ) -> DdlLeaseAuthority {
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         DdlLeaseAuthority {
             store: lease.get_leader_store().expect("provider leader store"),
@@ -1348,26 +1379,27 @@ mod tests {
     fn assert_stale_registry_cas_rejected_after_successor_startup(
         drop_existing: bool,
     ) -> MidgeResult<()> {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         // Arrange: A reads one registry identity and prepares a DDL CAS. The
         // successor uses the same provider objects but an independent cache.
         let temp = tempfile::tempdir()?;
-        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+            Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
             "ddl-fence-test".to_string(),
         ));
-        let storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        let storage = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
             cloud.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let lease_a = provider_test_lease(&cloud, &temp.path().join("lease-a"));
         let _guard_a = Arc::clone(&lease_a)
             .try_acquire()
             .expect("A acquires provider lease");
         let authority_a = provider_test_authority(&lease_a);
-        let deadline =
-            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            std::time::Duration::from_secs(5),
+        );
         fence_remote_registry_on_startup(&storage, &authority_a, &deadline)?;
         let mut state_a = RuntimeState::new(temp.path().join("state-a"), false);
         if drop_existing {
@@ -1424,7 +1456,7 @@ mod tests {
         // recovers the same CF visibility B already serves.
         assert!(matches!(
             stale_write,
-            Err(crate::storage::hybrid::backend::RemoteCasFailure {
+            Err(cntryl_midge_storage::hybrid::backend::RemoteCasFailure {
                 may_have_committed: false,
                 ..
             })
@@ -1485,21 +1517,21 @@ mod tests {
     #[test]
     fn should_accept_ddl_startup_fence_only_after_exact_ambiguous_cas_readback() -> MidgeResult<()>
     {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         // Arrange: the provider commits the first registry CAS but reports a
         // timeout. The startup path must read the exact V2 bytes back.
         let temp = tempfile::tempdir()?;
-        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
-        let inner: Arc<dyn crate::storage::StorageBackend> = cloud.clone();
+        let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::with_mock());
+        let inner: Arc<dyn cntryl_midge_storage::StorageBackend> = cloud.clone();
         let lossy = Arc::new(LoseFirstRegistryCasCallback {
             inner,
             armed: AtomicBool::new(true),
             registry_writes: AtomicUsize::new(0),
         });
-        let storage = crate::storage::HybridStorage::with_policy(
+        let storage = cntryl_midge_storage::HybridStorage::with_policy(
             lossy.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
         let lease = provider_test_lease(&cloud, &temp.path().join("lease"));
         let _guard = Arc::clone(&lease)
@@ -1511,7 +1543,9 @@ mod tests {
         fence_remote_registry_on_startup(
             &storage,
             &authority,
-            &crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+            &cntryl_midge_core::common::OperationDeadline::from_budget(
+                std::time::Duration::from_secs(5),
+            ),
         )?;
 
         // Assert: a second CAS was unnecessary because exact readback proved
@@ -1527,23 +1561,24 @@ mod tests {
 
     #[test]
     fn should_abort_prior_epoch_ambiguous_prepare_after_successor_fence() -> MidgeResult<()> {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         // Arrange: A persisted the admitted-CAS phase but did not publish its
         // operation. Its local cache is reused by B after takeover.
         let temp = tempfile::tempdir()?;
-        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
-        let storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::with_mock());
+        let storage = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
             cloud.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let lease_a = provider_test_lease(&cloud, &temp.path().join("lease-a"));
         let _guard_a = Arc::clone(&lease_a)
             .try_acquire()
             .expect("A acquires provider lease");
         let authority_a = provider_test_authority(&lease_a);
-        let deadline =
-            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            std::time::Duration::from_secs(5),
+        );
         fence_remote_registry_on_startup(&storage, &authority_a, &deadline)?;
         let state_path = temp.path().join("shared-state");
         let state_a = RuntimeState::new(state_path.clone(), false);
@@ -1586,21 +1621,22 @@ mod tests {
     #[test]
     fn should_keep_dropped_family_inactive_when_startup_replays_its_create_and_drop(
     ) -> MidgeResult<()> {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         // Arrange: the registry holds a family's create and drop, and the
         // local manifest already holds the drop tombstone (a same-cache restart).
         let temp = tempfile::tempdir()?;
-        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
-        let storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::with_mock());
+        let storage = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
             cloud.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let lease = provider_test_lease(&cloud, &temp.path().join("lease"));
         let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
         let authority = provider_test_authority(&lease);
-        let deadline =
-            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            std::time::Duration::from_secs(5),
+        );
         fence_remote_registry_on_startup(&storage, &authority, &deadline)?;
         let mut state = RuntimeState::new(temp.path().join("state"), false);
         let create = create_edit(&state, "dropped-cf")?;
@@ -1642,15 +1678,15 @@ mod tests {
 
     #[test]
     fn should_reject_missing_ddl_registry_when_lease_metadata_is_committed() -> MidgeResult<()> {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         // Arrange: a committed provider metadata generation proves this is an
         // existing database, so an absent DDL registry cannot be bootstrapped.
         let temp = tempfile::tempdir()?;
-        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
-        let storage = crate::storage::HybridStorage::with_policy(
+        let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::with_mock());
+        let storage = cntryl_midge_storage::HybridStorage::with_policy(
             cloud.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
         let lease = provider_test_lease(&cloud, &temp.path().join("lease"));
         let _guard = Arc::clone(&lease)
@@ -1659,16 +1695,18 @@ mod tests {
         let authority = provider_test_authority(&lease);
         let generation_id = uuid::Uuid::new_v4();
         let objects = [
-            crate::metadata::files::FORMAT,
-            crate::metadata::files::MANIFEST_SNAPSHOT,
+            cntryl_midge_durability::metadata::files::FORMAT,
+            cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT,
         ]
         .into_iter()
-        .map(|file_name| crate::lease::CloudMetadataObject {
-            file_name: file_name.to_string(),
-            object_key: format!("metadata/generations/{generation_id}/{file_name}"),
-            len: 1,
-            crc32c: 1,
-        })
+        .map(
+            |file_name| cntryl_midge_durability::lease::CloudMetadataObject {
+                file_name: file_name.to_string(),
+                object_key: format!("metadata/generations/{generation_id}/{file_name}"),
+                len: 1,
+                crc32c: 1,
+            },
+        )
         .collect();
         authority
             .store
@@ -1676,8 +1714,8 @@ mod tests {
                 &authority.holder_id,
                 authority.writer_epoch,
                 None,
-                crate::lease::CloudMetadataGeneration {
-                    id: crate::lease::SharedGenerationId::FIRST,
+                cntryl_midge_durability::lease::CloudMetadataGeneration {
+                    id: cntryl_midge_durability::lease::SharedGenerationId::FIRST,
                     manifest_horizon: 0,
                     objects,
                 },
@@ -1689,7 +1727,9 @@ mod tests {
         let error = fence_remote_registry_on_startup(
             &storage,
             &authority,
-            &crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+            &cntryl_midge_core::common::OperationDeadline::from_budget(
+                std::time::Duration::from_secs(5),
+            ),
         )
         .expect_err("missing registry must fail closed");
 
@@ -1702,7 +1742,9 @@ mod tests {
     }
 
     /// A memory-mode state holding one empty column family, plus its id.
-    fn state_with_column_family(label: &str) -> (RuntimeState, crate::types::ColumnFamilyId) {
+    fn state_with_column_family(
+        label: &str,
+    ) -> (RuntimeState, cntryl_midge_core::types::ColumnFamilyId) {
         let mut state = RuntimeState::new(std::path::PathBuf::from(label), true);
         let edit = create_edit(&state, "drop-me").expect("create edit");
         apply_local_edit(&mut state, &edit).expect("apply create");
@@ -1793,11 +1835,11 @@ mod tests {
     fn should_classify_cas_outcome_from_typed_flag_not_message_text() {
         // Arrange: the old classifier read phrases out of the message, so
         // rewording an error silently changed the recovery path.
-        let not_committed = crate::storage::hybrid::backend::RemoteCasFailure {
+        let not_committed = cntryl_midge_storage::hybrid::backend::RemoteCasFailure {
             may_have_committed: false,
             error: MidgeError::Internal("provider rejected the request".to_string()),
         };
-        let ambiguous = crate::storage::hybrid::backend::RemoteCasFailure {
+        let ambiguous = cntryl_midge_storage::hybrid::backend::RemoteCasFailure {
             may_have_committed: true,
             error: MidgeError::Timeout("remote CAS stalled before mutation".to_string()),
         };

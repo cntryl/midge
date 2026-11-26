@@ -13,14 +13,14 @@ impl FlushCoordinator {
     pub(super) fn flush_memtable(
         event_loop: &mut EventLoop,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> HandleOutcome {
         if event_loop.authority.fencing.ddl_authority_ambiguous {
             event_loop.respond(
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Fenced(
+                    error: cntryl_midge_core::common::MidgeError::Fenced(
                         "DDL authority is ambiguous; refusing flush until reconciliation".into(),
                     ),
                 },
@@ -40,7 +40,7 @@ impl FlushCoordinator {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::InvalidArgument(format!(
+                    error: cntryl_midge_core::common::MidgeError::InvalidArgument(format!(
                         "column family {cf_id} does not exist"
                     )),
                 },
@@ -76,7 +76,7 @@ impl FlushCoordinator {
     pub(super) fn flush_complete(
         event_loop: &mut EventLoop,
         request_id: u64,
-        _cf_id: crate::types::ColumnFamilyId,
+        _cf_id: cntryl_midge_core::types::ColumnFamilyId,
         _sst_name: &str,
         _sequence: u64,
     ) -> HandleOutcome {

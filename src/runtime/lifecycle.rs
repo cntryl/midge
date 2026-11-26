@@ -1,7 +1,7 @@
 //! Runtime lifecycle state and transaction/shutdown guards.
 
 use super::RuntimeResponse;
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crossbeam::channel::Receiver;
 use std::sync::{
     atomic::{AtomicU8, Ordering},

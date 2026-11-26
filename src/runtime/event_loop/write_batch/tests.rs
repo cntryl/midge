@@ -1,11 +1,11 @@
 use super::*;
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::event_loop::EventLoop;
 use crate::runtime::state::RuntimeState;
 use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{ConflictPolicy, ResponseRouter, RuntimeConfig};
-use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::wal::DurabilityPolicy;
 use std::sync::Arc;
 #[cfg(feature = "failpoints")]
 use std::sync::{Mutex, OnceLock};
@@ -67,7 +67,7 @@ struct TxnAppendBatchNoSpaceFailpointGuard {
     // Drop order: the scenario is torn down in `drop` before the gate field
     // is released.
     scenario: Option<fail::FailScenario<'static>>,
-    _test_guard: crate::failpoints::TestFailpointGuard,
+    _test_guard: cntryl_midge_core::failpoints::TestFailpointGuard,
 }
 
 #[cfg(feature = "failpoints")]
@@ -75,7 +75,7 @@ impl TxnAppendBatchNoSpaceFailpointGuard {
     /// Take the failpoint gate before the `fail` scenario lock, matching
     /// every other failpoint test; the reverse order deadlocks against them.
     fn setup(request_id: u64) -> Self {
-        let test_guard = crate::failpoints::test_failpoint_guard();
+        let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
         crate::runtime::actors::wal::set_txn_append_batch_no_space_failpoint_request_id(Some(
             request_id,
@@ -171,7 +171,7 @@ fn inline_txn_msg(
 }
 
 fn put_op(
-    cf_id: crate::types::ColumnFamilyId,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
     key: &'static [u8],
     value: &'static [u8],
 ) -> TransactionOp {
@@ -185,7 +185,7 @@ fn put_op(
 }
 
 fn insert_only_put_op(
-    cf_id: crate::types::ColumnFamilyId,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
     key: &'static [u8],
     value: &'static [u8],
 ) -> TransactionOp {
@@ -199,7 +199,7 @@ fn insert_only_put_op(
 }
 
 fn ttl_put_op(
-    cf_id: crate::types::ColumnFamilyId,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
     key: &'static [u8],
     value: &'static [u8],
     ttl_seconds: u64,
@@ -213,7 +213,7 @@ fn ttl_put_op(
     }
 }
 
-fn delete_op(cf_id: crate::types::ColumnFamilyId, key: &'static [u8]) -> TransactionOp {
+fn delete_op(cf_id: cntryl_midge_core::types::ColumnFamilyId, key: &'static [u8]) -> TransactionOp {
     TransactionOp::Delete {
         cf_id,
         key: Bytes::from_static(key),
@@ -221,7 +221,7 @@ fn delete_op(cf_id: crate::types::ColumnFamilyId, key: &'static [u8]) -> Transac
 }
 
 fn delete_range_op(
-    cf_id: crate::types::ColumnFamilyId,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
     start_key: &'static [u8],
     end_key: &'static [u8],
 ) -> TransactionOp {
@@ -335,7 +335,7 @@ fn should_fence_runtime_when_storage_acknowledgement_times_out() -> MidgeResult<
 
 fn assert_memtable_value(
     event_loop: &EventLoop,
-    cf_id: crate::types::ColumnFamilyId,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
     key: &[u8],
     expected: Option<&[u8]>,
 ) {
@@ -350,7 +350,7 @@ fn assert_memtable_value(
 
 fn seed_memtable_value(
     event_loop: &mut EventLoop,
-    cf_id: crate::types::ColumnFamilyId,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
     key: &[u8],
     value: &[u8],
     sequence: u64,
@@ -1330,7 +1330,7 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
     let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1390,7 +1390,10 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
 }
 
 #[cfg(feature = "failpoints")]
-fn memtable_keys(fixture: &EventLoopFixture, cf_id: crate::types::ColumnFamilyId) -> Vec<Vec<u8>> {
+fn memtable_keys(
+    fixture: &EventLoopFixture,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
+) -> Vec<Vec<u8>> {
     fixture
         .event_loop
         .state
@@ -1407,7 +1410,7 @@ fn memtable_keys(fixture: &EventLoopFixture, cf_id: crate::types::ColumnFamilyId
 /// (zero-based) hit of `failpoint`.
 #[cfg(feature = "failpoints")]
 fn lapse_lease_at(fixture: &mut EventLoopFixture, failpoint: &str, lapse_at: usize) {
-    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity
         .activate(
             fixture.event_loop.authority.fencing.writer_epoch,
@@ -1455,7 +1458,7 @@ fn commit_strict_spill(
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
     let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
         pool,
-        &crate::io::real::test_root(spill_dir),
+        &cntryl_midge_core::io::real::test_root(spill_dir),
         false,
         1,
     );
@@ -1485,7 +1488,7 @@ fn should_freeze_without_spilled_unit_when_lease_lapses_before_its_apply() -> Mi
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let temp = tempfile::tempdir().map_err(MidgeError::Io)?;
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
@@ -1522,7 +1525,7 @@ fn should_freeze_without_mark_when_spilled_apply_fails_before_its_first_op() -> 
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let temp = tempfile::tempdir().map_err(MidgeError::Io)?;
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
@@ -1564,7 +1567,7 @@ fn should_reject_flush_when_concurrent_group_loses_authority_before_visibility()
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -1655,7 +1658,7 @@ fn should_answer_outcome_unknown_when_group_append_is_partly_written_and_authori
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let first_keys: [&[u8]; 2] = [b"partial-a1", b"partial-a2"];
     let (fixture, first, second) = {
-        let test_guard = crate::failpoints::test_failpoint_guard();
+        let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
         let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
         let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -1722,7 +1725,7 @@ fn lapsed_group_outside_gate(
     request_ids: [u64; 2],
     keys: [&'static [u8]; 2],
 ) -> MidgeResult<(LapsedGroup, Vec<Vec<u8>>)> {
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let group = run_group_with_lease_lapse(policy, request_ids, keys)?;
     let memtable = memtable_keys(&group.fixture, 0);
@@ -1888,7 +1891,7 @@ fn should_freeze_without_failed_unit_when_strict_sync_fails_after_wal_append() -
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -2056,7 +2059,7 @@ fn should_stop_strict_group_at_existing_batch_cap() -> MidgeResult<()> {
 fn fence_stalled_writer(fixture: &mut EventLoopFixture, expired: bool) {
     fixture.event_loop.state.set_write_stalled(true);
     if expired {
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
         validity
             .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .expect("activate test writer authority");
@@ -2281,7 +2284,9 @@ fn should_report_stall_hint_for_transaction_actual_column_family() -> MidgeResul
         .get_cf_mut(secondary_cf)
         .expect("secondary column family")
         .immutable_memtables
-        .push(Arc::new(crate::memtable::SkipListMemtable::new()));
+        .push(Arc::new(
+            cntryl_midge_table::memtable::SkipListMemtable::new(),
+        ));
     assert!(!fixture.event_loop.state.should_stall_writes(0));
     assert!(fixture.event_loop.state.should_stall_writes(secondary_cf));
     let response_rx = fixture.register(901);
@@ -2324,12 +2329,14 @@ fn should_stall_before_wal_when_transaction_would_exceed_hard_l0_ceiling() -> Mi
         .manifest
         .test_mut()
         .files
-        .extend((0..2).map(|index| crate::metadata::FileMeta {
-            name: format!("l0-{index}.sst"),
-            level: 0,
-            cf_id: 0,
-            ..Default::default()
-        }));
+        .extend(
+            (0..2).map(|index| cntryl_midge_durability::metadata::FileMeta {
+                name: format!("l0-{index}.sst"),
+                level: 0,
+                cf_id: 0,
+                ..Default::default()
+            }),
+        );
     let first_rx = fixture.register(902);
     let second_rx = fixture.register(903);
     let (_tx, empty_rx) = crossbeam::channel::unbounded();
@@ -2436,12 +2443,14 @@ fn should_treat_memtable_limit_as_advisory_until_l0_slots_are_exhausted() -> Mid
         .manifest
         .test_mut()
         .files
-        .extend((0..2).map(|index| crate::metadata::FileMeta {
-            name: format!("advisory-l0-{index}.sst"),
-            level: 0,
-            cf_id: 0,
-            ..Default::default()
-        }));
+        .extend(
+            (0..2).map(|index| cntryl_midge_durability::metadata::FileMeta {
+                name: format!("advisory-l0-{index}.sst"),
+                level: 0,
+                cf_id: 0,
+                ..Default::default()
+            }),
+        );
     let sequence = fixture.event_loop.state.sequence;
     let appends = fixture.event_loop.actors.wal_actor.append_calls();
     let third = fixture.register(932);
@@ -2656,16 +2665,24 @@ struct UnreachableLeaderStore {
 }
 
 #[cfg(feature = "failpoints")]
-impl crate::lease::LeaderStore for UnreachableLeaderStore {
+impl cntryl_midge_durability::lease::LeaderStore for UnreachableLeaderStore {
     fn acquire_leadership(
         &self,
         _holder_id: &str,
-    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaderRecord,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         unreachable!("validation fixture")
     }
 
-    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
-        Err(crate::lease::LeaseError::IoError(
+    fn read_current(
+        &self,
+    ) -> Result<
+        Option<cntryl_midge_durability::lease::LeaderRecord>,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
+        Err(cntryl_midge_durability::lease::LeaseError::IoError(
             "test leader store is unreachable".to_string(),
         ))
     }
@@ -2675,7 +2692,7 @@ impl crate::lease::LeaderStore for UnreachableLeaderStore {
         _expected_holder_id: &str,
         _expected_epoch: u64,
         _timeout: Duration,
-    ) -> Result<(), crate::lease::LeaseError> {
+    ) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
         Ok(())
     }
 
@@ -2685,7 +2702,7 @@ impl crate::lease::LeaderStore for UnreachableLeaderStore {
         _expected_epoch: u64,
         _timeout: Duration,
         operation: &mut dyn FnMut(),
-    ) -> Result<(), crate::lease::LeaseError> {
+    ) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
         if self
             .writer_effects
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -2694,7 +2711,7 @@ impl crate::lease::LeaderStore for UnreachableLeaderStore {
             operation();
             Ok(())
         } else {
-            Err(crate::lease::LeaseError::IoError(
+            Err(cntryl_midge_durability::lease::LeaseError::IoError(
                 "test leader store became unreachable at sync".to_string(),
             ))
         }
@@ -2708,7 +2725,7 @@ fn should_answer_outcome_unknown_when_lease_lapses_before_group_sync() -> MidgeR
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
 
     // Act: both frames are appended; the lease lapses before their sync.
@@ -2745,7 +2762,7 @@ fn should_answer_outcome_unknown_when_leader_store_is_unreachable_at_group_sync(
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
 
     // Act: the grouped append is admitted, then the sync's authority check
@@ -2780,7 +2797,7 @@ fn should_answer_outcome_unknown_when_lease_lapses_before_spilled_sync() -> Midg
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let temp = tempfile::tempdir().map_err(MidgeError::Io)?;
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
@@ -2814,7 +2831,7 @@ fn should_answer_not_applied_to_fallback_request_when_its_group_fails() -> Midge
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (fixture, grouped, fallback) = {
-        let test_guard = crate::failpoints::test_failpoint_guard();
+        let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
         let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
         let (msg_tx, msg_rx) = crossbeam::channel::unbounded();

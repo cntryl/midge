@@ -1,9 +1,9 @@
 //! Detached SST reads tied to one fully applied runtime cut.
 
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::read_snapshot::point_read::ValidationPointState;
 use crate::runtime::{ConflictPolicy, KeyAssertion, ReadSnapshot, TransactionOp};
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ impl CommitValidationProof {
         assertions: &[KeyAssertion],
         conflict_policy: ConflictPolicy,
         start_sequence: Option<u64>,
-        deadline: crate::common::OperationDeadline,
+        deadline: cntryl_midge_core::common::OperationDeadline,
     ) -> MidgeResult<Self> {
         let mut proof = Self {
             applied_sequence,

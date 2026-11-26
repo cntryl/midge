@@ -1,11 +1,13 @@
 //! Immutable shared metadata publications and the authority they give WAL retirement.
 
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
-use crate::io::{FsError, FsPath};
-use crate::lease::{CloudMetadataGeneration, CloudMetadataHead, LeaderStore, SharedGenerationId};
-use crate::metadata::{files, Manifest, ManifestPersistence};
-use crate::storage::cloud::{BlockingCloud, CloudStorage};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::io::{FsError, FsPath};
+use cntryl_midge_durability::lease::{
+    CloudMetadataGeneration, CloudMetadataHead, LeaderStore, SharedGenerationId,
+};
+use cntryl_midge_durability::metadata::{files, Manifest, ManifestPersistence};
+use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -32,7 +34,7 @@ impl FileFingerprint {
 
 fn metadata_digest(bytes: &[u8]) -> Option<[u8; 32]> {
     use sha2::Digest;
-    if bytes.len() as u64 > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+    if bytes.len() as u64 > cntryl_midge_durability::metadata::cloud_manifest::MAX_CHAIN_BYTES {
         return None;
     }
     Some(sha2::Sha256::digest(bytes).into())
@@ -127,7 +129,9 @@ impl SharedRetirementAuthority {
     pub(crate) fn writer_epoch(&self) -> u64 {
         self.writer_epoch
     }
-    pub(crate) fn frontiers(&self) -> &crate::metadata::frontiers::FlushFrontiers {
+    pub(crate) fn frontiers(
+        &self,
+    ) -> &cntryl_midge_durability::metadata::frontiers::FlushFrontiers {
         self.manifest.flush_frontiers()
     }
 
@@ -289,7 +293,9 @@ pub(super) fn read_committed_metadata_bodies_reserved_within(
                 )));
             }
         }
-        if bodies[files::FORMAT] != crate::metadata::format::current_format_marker_bytes() {
+        if bodies[files::FORMAT]
+            != cntryl_midge_durability::metadata::format::current_format_marker_bytes()
+        {
             return Err(MidgeError::CompatibilityError(
                 "cloud manifest FORMAT differs from the current format".into(),
             ));
@@ -345,7 +351,9 @@ pub(super) fn read_committed_metadata_bodies_reserved_within(
             )));
         }
     }
-    if bodies[files::FORMAT] != crate::metadata::format::current_format_marker_bytes() {
+    if bodies[files::FORMAT]
+        != cntryl_midge_durability::metadata::format::current_format_marker_bytes()
+    {
         return Err(MidgeError::CompatibilityError(
             "committed cloud FORMAT differs from the current format".into(),
         ));
@@ -359,7 +367,7 @@ fn read_format_10_bodies(
     deadline: &OperationDeadline,
     reservation: Option<Arc<ResourceReservation>>,
 ) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
-    crate::lease::cloud::validate_metadata_generation(generation)
+    cntryl_midge_durability::lease::cloud::validate_metadata_generation(generation)
         .map_err(|error| MidgeError::Corruption(error.to_string()))?;
     let mut io = BlockingCloud::new(cloud, deadline);
     if let Some(reservation) = reservation {
@@ -367,7 +375,7 @@ fn read_format_10_bodies(
     }
     let mut bodies = BTreeMap::new();
     for object in &generation.objects {
-        if object.file_name == crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME {
+        if object.file_name == cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF {
             continue;
         }
         let data = io
@@ -389,13 +397,13 @@ fn read_format_10_bodies(
         bodies.insert(object.file_name.clone(), data);
     }
     let horizon =
-        crate::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(&bodies)?;
+        cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(&bodies)?;
     if horizon != generation.manifest_horizon {
         return Err(MidgeError::Corruption(
             "cloud FORMAT 10 HEAD differs from the selected manifest horizon".into(),
         ));
     }
-    crate::runtime::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
     Ok(bodies)
 }
 
@@ -405,7 +413,7 @@ pub(crate) fn decode_generation_manifest(
     deadline: &OperationDeadline,
 ) -> MidgeResult<Manifest> {
     let manifest = if generation.uses_format_10() {
-        use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+        use cntryl_midge_durability::metadata::local_authority::{LocalMetadataAuthority, Stream};
         let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Manifest)?;
         let scope = DeadlineScope::new(*deadline);
         ManifestPersistence::decode_format_10_stream(
@@ -450,7 +458,7 @@ pub(crate) struct CloudMetadataMirrorAuthority<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct CloudMetadataMirrorContext<'a> {
     pub(crate) cloud: &'a CloudStorage,
-    pub(crate) fs: &'a dyn crate::io::Fs,
+    pub(crate) fs: &'a dyn cntryl_midge_core::io::Fs,
     pub(crate) publication_lock: &'a crate::runtime::MetadataPublicationLock,
     pub(crate) lock_wait_budget: std::time::Duration,
     pub(crate) deadline: &'a OperationDeadline,
@@ -460,7 +468,7 @@ pub(crate) struct CloudMetadataMirrorContext<'a> {
 pub(super) fn capture_local_metadata(
     context: &CloudMetadataMirrorContext<'_>,
 ) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
-    if crate::metadata::format::is_format_10(context.fs)? {
+    if cntryl_midge_durability::metadata::format::is_format_10(context.fs)? {
         return Ok(super::capture_selected_format10_closure(
             context.fs,
             context.publication_lock,
@@ -475,7 +483,7 @@ pub(super) fn capture_local_metadata(
                 "metadata capture deadline exhausted".into(),
             ));
         }
-        match crate::io::read_all(context.fs, &FsPath::new(*name)) {
+        match cntryl_midge_core::io::read_all(context.fs, &FsPath::new(*name)) {
             Ok(bytes) => {
                 local.insert((*name).to_string(), bytes.to_vec());
             }
@@ -483,7 +491,9 @@ pub(super) fn capture_local_metadata(
             Err(error) => return Err(error.into_midge()),
         }
     }
-    if local.get(files::FORMAT) != Some(&crate::metadata::format::current_format_marker_bytes()) {
+    if local.get(files::FORMAT)
+        != Some(&cntryl_midge_durability::metadata::format::current_format_marker_bytes())
+    {
         return Err(MidgeError::Corruption(
             "cannot commit cloud metadata without current FORMAT".into(),
         ));
@@ -567,7 +577,7 @@ fn commit_metadata_generation(
             context.deadline.remaining(),
         ) {
             Ok(()) => break,
-            Err(crate::lease::LeaseError::AcquisitionFailed(_)) => {
+            Err(cntryl_midge_durability::lease::LeaseError::AcquisitionFailed(_)) => {
                 // A definite rejection has no unknown write to reconcile.
                 // Refresh both authority and identity before retrying the
                 // same immutable candidate within its original deadline.
@@ -622,7 +632,7 @@ pub(crate) fn mirror_control_metadata_within(
     context: CloudMetadataMirrorContext<'_>,
     mut validate_lease: impl FnMut(&OperationDeadline) -> MidgeResult<()>,
 ) -> MidgeResult<()> {
-    let format_10 = crate::metadata::format::is_format_10(context.fs)?;
+    let format_10 = cntryl_midge_durability::metadata::format::is_format_10(context.fs)?;
     let _format_10_writer = format_10
         .then(|| {
             context
@@ -779,9 +789,9 @@ fn mirror_format10_under_lock(
         context.publication_lock,
         context.deadline,
     )?;
-    let stream = crate::metadata::local_authority::LocalMetadataAuthority::read_cloud_stream(
+    let stream = cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::read_cloud_stream(
         &captured.bodies,
-        crate::metadata::local_authority::Stream::Manifest,
+        cntryl_midge_durability::metadata::local_authority::Stream::Manifest,
     )?;
     let scope = DeadlineScope::new(*context.deadline);
     let candidate = ManifestPersistence::decode_format_10_stream(
@@ -905,16 +915,17 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange: upload a real v10 closure and verify it through the same
         // bounded, identity-aware reader used during provider recovery.
-        use crate::lease::CloudMetadataObject;
-        use crate::metadata::{codec, local_authority::LocalMetadataAuthority};
-        use crate::storage::StoragePrecondition;
+        use cntryl_midge_durability::lease::CloudMetadataObject;
+        use cntryl_midge_durability::metadata::{codec, local_authority::LocalMetadataAuthority};
+        use cntryl_midge_storage::StoragePrecondition;
 
-        let root: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+        let root: Arc<dyn cntryl_midge_core::io::Fs> =
+            Arc::new(cntryl_midge_core::io::MockFs::new());
         let manifest = codec::encode(codec::MANIFEST, &Manifest::default())?;
         let local =
             LocalMetadataAuthority::initialize(Arc::clone(&root), "test-cut", &manifest, b"[]")?;
         let cloud = CloudStorage::new(
-            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
             "format-ten".into(),
         );
         let deadline = OperationDeadline::from_budget(std::time::Duration::from_secs(5));
@@ -937,8 +948,8 @@ mod tests {
         let selected = LocalMetadataAuthority::selected_relative_paths_from(root.as_ref())?;
         assert_eq!(selected, local.selected_relative_paths());
         for name in selected {
-            let bytes = crate::io::read_all(root.as_ref(), &FsPath::new(&name))
-                .map_err(crate::io::FsError::into_midge)?;
+            let bytes = cntryl_midge_core::io::read_all(root.as_ref(), &FsPath::new(&name))
+                .map_err(cntryl_midge_core::io::FsError::into_midge)?;
             objects.push(put(name, bytes.to_vec())?);
         }
         let mut descriptor = CloudMetadataGeneration {
@@ -965,8 +976,8 @@ mod tests {
         ));
         Ok(())
     }
-    use crate::io::Fs;
-    use crate::lease::fs_leader_store::FsLeaderStore;
+    use cntryl_midge_core::io::Fs;
+    use cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore;
 
     mod retirement_admission;
 
@@ -975,34 +986,40 @@ mod tests {
         // Arrange
         let mut manifest = Manifest::default();
         manifest
-            .apply_edit(&crate::metadata::ManifestEdit::CreateColumnFamily {
-                id: 1,
-                name: "retired-family".into(),
-                created_at: 7,
-            })
+            .apply_edit(
+                &cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily {
+                    id: 1,
+                    name: "retired-family".into(),
+                    created_at: 7,
+                },
+            )
             .unwrap();
         for sequence in 1..=64 {
-            manifest.files.push(crate::metadata::FileMeta {
-                name: crate::cloud_layout::file_name(1, 0, sequence),
-                cf_id: 1,
-                ..crate::metadata::FileMeta::default()
-            });
-            let retired = crate::metadata::FileMeta {
-                name: crate::cloud_layout::file_name(0, 0, sequence),
-                ..crate::metadata::FileMeta::default()
+            manifest
+                .files
+                .push(cntryl_midge_durability::metadata::FileMeta {
+                    name: cntryl_midge_core::cloud_layout::file_name(1, 0, sequence),
+                    cf_id: 1,
+                    ..cntryl_midge_durability::metadata::FileMeta::default()
+                });
+            let retired = cntryl_midge_durability::metadata::FileMeta {
+                name: cntryl_midge_core::cloud_layout::file_name(0, 0, sequence),
+                ..cntryl_midge_durability::metadata::FileMeta::default()
             };
             manifest.retired_ssts.insert(retired.name.clone(), retired);
         }
         manifest
-            .apply_edit(&crate::metadata::ManifestEdit::DropColumnFamilyAt {
-                id: 1,
-                drop_sequence: 9,
-                dropped_sst_names: manifest
-                    .files
-                    .iter()
-                    .map(|file| file.name.clone())
-                    .collect(),
-            })
+            .apply_edit(
+                &cntryl_midge_durability::metadata::ManifestEdit::DropColumnFamilyAt {
+                    id: 1,
+                    drop_sequence: 9,
+                    dropped_sst_names: manifest
+                        .files
+                        .iter()
+                        .map(|file| file.name.clone())
+                        .collect(),
+                },
+            )
             .unwrap();
         manifest.next_sst_seqs.insert(1, 65);
         manifest.edit_checkpoint_id = 17;
@@ -1039,12 +1056,16 @@ mod tests {
 
         fn with_cloud(cloud: Arc<CloudStorage>) -> Self {
             let directory = tempfile::tempdir().unwrap();
-            let fs = crate::io::real::test_root(directory.path());
-            crate::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+            let fs = cntryl_midge_core::io::real::test_root(directory.path());
+            cntryl_midge_durability::metadata::ensure_or_create_format_marker(
+                &fs,
+                directory.path(),
+            )
+            .unwrap();
             ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
             let store = Arc::new(FsLeaderStore::new(
                 Arc::clone(&fs),
-                crate::lease::LeaseClock::default(),
+                cntryl_midge_durability::lease::LeaseClock::default(),
             ));
             store.acquire_leadership("writer").unwrap();
             Self {
@@ -1102,15 +1123,17 @@ mod tests {
         // Arrange: replace the local metadata authority with a validated
         // FORMAT 10 HEAD and immutable manifest/intent bases.
         let fixture = Fixture::new();
-        let manifest =
-            crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &Manifest::default())?;
-        crate::metadata::local_authority::LocalMetadataAuthority::initialize(
+        let manifest = cntryl_midge_durability::metadata::codec::encode(
+            cntryl_midge_durability::metadata::codec::MANIFEST,
+            &Manifest::default(),
+        )?;
+        cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::initialize(
             Arc::clone(&fixture.fs),
             "runtime-selected-generation",
             &manifest,
             b"[]",
         )?;
-        crate::io::staging::stage_bytes_typed(
+        cntryl_midge_core::io::staging::stage_bytes_typed(
             &fixture.fs,
             &FsPath::new("FORMAT.tmp"),
             &FsPath::new(files::FORMAT),
@@ -1163,18 +1186,20 @@ mod tests {
 
         // Act
         for sequence in 1..=20 {
-            crate::runtime::IntentPersistence::save_with_fs(
+            cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_with_fs(
                 &fixture.fs,
-                &[crate::runtime::IntentLogEntry::SeqnoAllocated {
-                    seqno: sequence,
-                    cf_id: 0,
-                }],
+                &[
+                    cntryl_midge_durability::metadata::intent::IntentLogEntry::SeqnoAllocated {
+                        seqno: sequence,
+                        cf_id: 0,
+                    },
+                ],
             )
             .unwrap();
             fixture.mirror().unwrap();
             assert!(
                 fixture.generation().objects.len()
-                    <= crate::metadata::cloud_manifest::MAX_CHAIN_OBJECTS
+                    <= cntryl_midge_durability::metadata::cloud_manifest::MAX_CHAIN_OBJECTS
             );
         }
         let generation = fixture.generation();
@@ -1191,12 +1216,16 @@ mod tests {
         assert!(generation.objects.len() < 16);
         assert_eq!(
             bodies[files::MANIFEST_SNAPSHOT],
-            crate::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::MANIFEST_SNAPSHOT))
-                .unwrap()
+            cntryl_midge_core::io::read_all(
+                fixture.fs.as_ref(),
+                &FsPath::new(files::MANIFEST_SNAPSHOT)
+            )
+            .unwrap()
         );
         assert_eq!(
             bodies[files::INTENT_LOG],
-            crate::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG)).unwrap()
+            cntryl_midge_core::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG))
+                .unwrap()
         );
     }
 
@@ -1247,7 +1276,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.mirror().unwrap();
         let previous = fixture.generation();
-        crate::io::staging::stage_bytes(
+        cntryl_midge_core::io::staging::stage_bytes(
             &fixture.fs,
             &FsPath::new("intent.tmp"),
             &FsPath::new(files::INTENT_LOG),
@@ -1290,7 +1319,7 @@ mod tests {
         assert_eq!(authority.generation_id(), SharedGenerationId::FIRST);
         assert_eq!(
             authority.frontiers().get(0).unwrap(),
-            crate::metadata::frontiers::FamilyFrontier::Live {
+            cntryl_midge_durability::metadata::frontiers::FamilyFrontier::Live {
                 through_sequence: 0
             }
         );
@@ -1394,7 +1423,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.mirror().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        let root = crate::io::real::test_root(cache.path());
+        let root = cntryl_midge_core::io::real::test_root(cache.path());
         // Act
         let result =
             crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata_within(
@@ -1402,7 +1431,7 @@ mod tests {
                 fixture.store.as_ref(),
                 &root,
                 cache.path(),
-                crate::config::RecoveryPolicy::Salvage,
+                cntryl_midge_durability::RecoveryPolicy::Salvage,
                 SharedGenerationId::FIRST.checked_next().unwrap(),
                 &DeadlineScope::new(OperationDeadline::from_budget(
                     std::time::Duration::from_secs(5),

@@ -1,9 +1,9 @@
 use super::*;
-use crate::lease::PrimaryLease;
-use crate::storage::cloud::{
+use cntryl_midge_durability::lease::PrimaryLease;
+use cntryl_midge_storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudOutcome, CloudRequestOptions, MockCloudBackend,
 };
-use crate::storage::cloud::{CloudReadCapability, CloudWriteCapability};
+use cntryl_midge_storage::cloud::{CloudReadCapability, CloudWriteCapability};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -33,7 +33,7 @@ impl CloudReadCapability for ReceiptBackend {
         key: &str,
         start: u64,
         end: u64,
-        expected: crate::storage::StorageObjectMetadata,
+        expected: cntryl_midge_storage::StorageObjectMetadata,
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
@@ -108,8 +108,8 @@ impl CloudWriteCapability for ReceiptBackend {
                     .expect("successful mock PUT has a generation");
                 let _ = callback.send(CloudEvent::PutReceipt {
                     key: key.into(),
-                    result: CloudOutcome::Ok(Some(crate::storage::StorageWriteReceipt {
-                        metadata: crate::storage::StorageObjectMetadata {
+                    result: CloudOutcome::Ok(Some(cntryl_midge_storage::StorageWriteReceipt {
+                        metadata: cntryl_midge_storage::StorageObjectMetadata {
                             size: bytes.len() as u64,
                             etag: format!("mock-gen-{generation}"),
                             generation: None,
@@ -124,19 +124,19 @@ impl CloudWriteCapability for ReceiptBackend {
         }
     }
 }
-impl crate::storage::cloud::CloudDeleteCapability for ReceiptBackend {
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for ReceiptBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.writes.fetch_add(1, Ordering::Relaxed);
         self.inner.submit_delete(key, headers, callback);
     }
 }
-impl crate::storage::cloud::CloudListCapability for ReceiptBackend {
+impl cntryl_midge_storage::cloud::CloudListCapability for ReceiptBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.inner.submit_list(prefix, callback);
     }
 }
-impl crate::storage::cloud::CloudHeadCapability for ReceiptBackend {
+impl cntryl_midge_storage::cloud::CloudHeadCapability for ReceiptBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.inner.submit_head(key, callback);
@@ -192,18 +192,21 @@ fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_c
         put_requests: std::sync::Mutex::new(Vec::new()),
     });
     let cloud = Arc::new(CloudStorage::new(backend.clone(), "metadata-cache".into()));
-    let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-        crate::lease::CloudLeaseConfig {
-            bucket: "midge".into(),
-            prefix: "metadata-cache".into(),
-        },
-        directory.path().to_path_buf(),
-        Arc::clone(&cloud),
-    ));
+    let lease = Arc::new(
+        cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+            cntryl_midge_durability::lease::CloudLeaseConfig {
+                bucket: "midge".into(),
+                prefix: "metadata-cache".into(),
+            },
+            directory.path().to_path_buf(),
+            Arc::clone(&cloud),
+        ),
+    );
     let _guard = Arc::clone(&lease).try_acquire().unwrap();
     let store = lease.get_leader_store().unwrap();
-    let fs = crate::io::real::test_root(directory.path());
-    crate::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+    let fs = cntryl_midge_core::io::real::test_root(directory.path());
+    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())
+        .unwrap();
     ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
     let lock = crate::runtime::MetadataPublicationLock::default();
     let mirror = || {
@@ -224,12 +227,14 @@ fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_c
         )
     };
     mirror().unwrap();
-    crate::runtime::IntentPersistence::save_with_fs(
+    cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::save_with_fs(
         &fs,
-        &[crate::runtime::IntentLogEntry::SeqnoAllocated {
-            seqno: 11,
-            cf_id: 0,
-        }],
+        &[
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::SeqnoAllocated {
+                seqno: 11,
+                cf_id: 0,
+            },
+        ],
     )
     .unwrap();
     backend.inner.clear_history();
@@ -260,6 +265,6 @@ fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_c
     .unwrap();
     assert_eq!(
         bodies[files::INTENT_LOG],
-        crate::io::read_all(fs.as_ref(), &FsPath::new(files::INTENT_LOG)).unwrap()
+        cntryl_midge_core::io::read_all(fs.as_ref(), &FsPath::new(files::INTENT_LOG)).unwrap()
     );
 }

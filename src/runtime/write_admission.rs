@@ -18,14 +18,14 @@ pub(crate) struct WriteAdmission {
     pub(crate) slowdown_ns: AtomicU64,
     pub(crate) slowdown_count: AtomicU64,
     pub(crate) limited_bytes: Arc<AtomicU64>,
-    limiter: OnceLock<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+    limiter: OnceLock<Arc<cntryl_midge_core::common::write_rate::BackgroundWriteLimiter>>,
 }
 
 impl WriteAdmission {
     pub(crate) fn configure(&self, config: &WriteBackpressureConfig) {
         if let Some(rate) = config.background_write_bytes_per_second {
             let _ = self.limiter.set(Arc::new(
-                crate::common::write_rate::BackgroundWriteLimiter::new(
+                cntryl_midge_core::common::write_rate::BackgroundWriteLimiter::new(
                     rate,
                     self.urgent.clone(),
                     self.limited_bytes.clone(),
@@ -35,7 +35,9 @@ impl WriteAdmission {
         let _ = self.config.set(config.clone());
     }
 
-    pub(crate) fn limiter(&self) -> Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>> {
+    pub(crate) fn limiter(
+        &self,
+    ) -> Option<Arc<cntryl_midge_core::common::write_rate::BackgroundWriteLimiter>> {
         self.limiter.get().cloned()
     }
 

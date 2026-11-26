@@ -1,6 +1,6 @@
 //! Accepted flush outputs retain their owner while capture admission waits.
 use super::{EventLoop, FlushIdentity, FlushMirrorTask};
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use std::time::{Duration, Instant};
 
 const CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(10);

@@ -1,6 +1,6 @@
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::actors::wal::{MemtableApplyAuthority, MemtableApplyJob};
 use crate::runtime::RuntimeMsg;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crossbeam::channel::{Receiver, Sender, TrySendError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -34,7 +34,7 @@ impl ApplyPool {
         };
         for ordinal in 0..2 {
             let incoming = incoming.clone();
-            let gate = crate::failpoints::worker_gate();
+            let gate = cntryl_midge_core::failpoints::worker_gate();
             let handle = std::thread::Builder::new()
                 .name(format!("midge-memtable-apply-{ordinal}"))
                 .spawn(move || gate.run(|| Self::run(&incoming)))

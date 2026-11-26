@@ -10,7 +10,7 @@ pub(super) struct GcCoordinator;
 impl GcCoordinator {
     pub(super) fn retry_within(
         event_loop: &mut EventLoop,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) -> HandleOutcome {
         if event_loop.local_ddl_requires_restart() {
             event_loop
@@ -59,7 +59,7 @@ impl GcCoordinator {
             let covered = event_loop.actors.gc_actor.manifest_reclamation_snapshot();
             let published = crate::runtime::actors::ManifestActor::persist_for(
                 &mut event_loop.state,
-                crate::metadata::accounting::Origin::Administration,
+                cntryl_midge_durability::metadata::accounting::Origin::Administration,
             )
             .and_then(|()| {
                 // Reclamation cannot use salvage-mode best effort. Until
@@ -108,7 +108,7 @@ impl GcCoordinator {
 
     pub(super) fn finish_manifest_reclamation(
         event_loop: &mut EventLoop,
-        result: crate::common::MidgeResult<()>,
+        result: cntryl_midge_core::common::MidgeResult<()>,
         covered: &[String],
     ) {
         if let Err(error) = result {

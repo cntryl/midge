@@ -1,13 +1,13 @@
 //! Shared immutable read resources for runtime snapshots.
 
-use crate::common::resource_budget::ResourceBudget;
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::Fs;
-use crate::metadata::FileMeta;
-use crate::sst::cache::{BlockCache, CachePolicyType};
-use crate::sst::fs::SstFileIo;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::Fs;
 #[cfg(test)]
-use crate::types::EntryType;
+use cntryl_midge_core::types::EntryType;
+use cntryl_midge_durability::metadata::FileMeta;
+use cntryl_midge_table::sst::cache::{BlockCache, CachePolicyType};
+use cntryl_midge_table::sst::fs::SstFileIo;
 use dashmap::DashMap;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 mod admission;
-use crate::sst::read_path_metrics::SstReadObserver as _;
 use admission::{OpenAdmission, OpenAttempt};
+use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 
 pub(crate) struct ReadResources {
     sst_fs: Arc<dyn Fs>,
@@ -389,18 +389,20 @@ mod concurrency_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::FsError;
-    use crate::sst::traits::{SstFactory, SstStateReader};
+    use cntryl_midge_core::io::FsError;
+    use cntryl_midge_table::sst::traits::{SstFactory, SstStateReader};
 
     pub(super) fn write_test_sst(
         temp_dir: &tempfile::TempDir,
         name: &str,
     ) -> MidgeResult<FileMeta> {
-        let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
-        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let fs = Arc::new(
+            cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
+        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)?;
-        crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
 
         Ok(FileMeta {
             name: name.to_string(),
@@ -420,7 +422,9 @@ mod tests {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+            ),
             PathBuf::new(),
             64 * 1024,
             CachePolicyType::Lru,
@@ -432,7 +436,12 @@ mod tests {
             let reader = resources.reader_for(&meta)?;
             assert!(matches!(
                 reader.get_state_at(b"key", u64::MAX)?,
-                crate::types::KeyState::Value(_, 7, None, crate::types::EntryType::Put)
+                cntryl_midge_core::types::KeyState::Value(
+                    _,
+                    7,
+                    None,
+                    cntryl_midge_core::types::EntryType::Put
+                )
             ));
         }
 
@@ -447,7 +456,9 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let file_meta = write_test_sst(&temp_dir, "reader-cache.sst")?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+            ),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,
@@ -471,7 +482,9 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let file_meta = write_test_sst(&temp_dir, "pruned-cache.sst")?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+            ),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,
@@ -480,7 +493,12 @@ mod tests {
         let block_cache = resources.block_cache();
         assert!(matches!(
             reader.get_state_at(b"key", u64::MAX)?,
-            crate::types::KeyState::Value(_, 7, None, crate::types::EntryType::Put)
+            cntryl_midge_core::types::KeyState::Value(
+                _,
+                7,
+                None,
+                cntryl_midge_core::types::EntryType::Put
+            )
         ));
         assert!(
             !block_cache.is_empty(),
@@ -507,7 +525,9 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let file_meta = write_test_sst(&temp_dir, "evicted-then-deleted.sst")?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+            ),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,
@@ -515,7 +535,12 @@ mod tests {
         let reader = resources.reader_for(&file_meta)?;
         assert!(matches!(
             reader.get_state_at(b"key", u64::MAX)?,
-            crate::types::KeyState::Value(_, 7, None, crate::types::EntryType::Put)
+            cntryl_midge_core::types::KeyState::Value(
+                _,
+                7,
+                None,
+                cntryl_midge_core::types::EntryType::Put
+            )
         ));
         drop(reader);
         let block_cache = resources.block_cache();
@@ -574,7 +599,9 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let meta = write_test_sst(&temp_dir, "evicted.sst")?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+            ),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,
@@ -598,7 +625,9 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let meta = write_test_sst(&temp_dir, "reopen.sst")?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+            ),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,
@@ -626,7 +655,9 @@ mod tests {
             ..first.clone()
         };
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+            ),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,
@@ -651,7 +682,9 @@ mod tests {
             ..first_meta.clone()
         };
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            Arc::new(
+                cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+            ),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,

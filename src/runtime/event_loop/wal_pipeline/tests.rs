@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::{ConflictPolicy, TestRuntimeMsg};
-use crate::sst::read_path_metrics::SstReadObserver as _;
 use bytes::Bytes;
+use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 use crossbeam::channel::{Receiver, Sender};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -110,9 +110,9 @@ pub(in crate::runtime::event_loop) fn write(
             .collect(),
         assertions: Vec::new(),
         durability_policy: Some(if strict {
-            crate::wal::DurabilityPolicy::Strict
+            cntryl_midge_durability::wal::DurabilityPolicy::Strict
         } else {
-            crate::wal::DurabilityPolicy::BestEffort
+            cntryl_midge_durability::wal::DurabilityPolicy::BestEffort
         }),
         start_sequence: None,
         conflict_policy: ConflictPolicy::LastWriteWins,
@@ -128,7 +128,7 @@ fn spill_write(
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
     let mut intents = crate::runtime::transaction_spill::TransactionWriteSet::new(
         pool,
-        &crate::io::real::test_root(&event_loop.state.db_path),
+        &cntryl_midge_core::io::real::test_root(&event_loop.state.db_path),
         false,
         request_id,
     );
@@ -145,7 +145,7 @@ fn spill_write(
         request_id,
         source: intents.take_source(),
         assertions: Vec::new(),
-        durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+        durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict),
         start_sequence: 0,
         conflict_policy: ConflictPolicy::LastWriteWins,
         response_tx: None,
@@ -201,7 +201,7 @@ fn should_preserve_ordered_visibility_when_strict_fsync_is_held() -> MidgeResult
 #[test]
 fn should_record_later_write_latency_when_strict_fsync_is_delayed() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at("midge::wal::before_physical_sync");
@@ -256,7 +256,7 @@ fn should_record_later_write_latency_when_strict_fsync_is_delayed() -> MidgeResu
 #[test]
 fn should_read_cold_sst_at_applied_cut_while_strict_fsync_is_held() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let seed =
@@ -324,7 +324,7 @@ fn should_preserve_ordered_visibility_when_writer_encoding_is_held() -> MidgeRes
 #[test]
 fn should_return_retryable_create_when_drain_starts_strict_group() -> MidgeResult<()> {
     // Arrange: the create barrier drains a strict write that has not started yet.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at("midge::wal::before_physical_sync");
@@ -353,7 +353,7 @@ fn should_return_retryable_create_when_drain_starts_strict_group() -> MidgeResul
         matches!(
             response,
             RuntimeResponse::Error {
-                error: crate::common::MidgeError::WriteStall(_),
+                error: cntryl_midge_core::common::MidgeError::WriteStall(_),
                 ..
             }
         ),
@@ -387,7 +387,7 @@ fn should_return_retryable_create_when_drain_starts_strict_group() -> MidgeResul
 #[test]
 fn should_drain_in_flight_group_before_rotate_given_pending_group() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at("midge::wal::before_physical_sync");
@@ -425,7 +425,7 @@ fn should_drain_in_flight_group_before_rotate_given_pending_group() -> MidgeResu
 #[test]
 fn should_reject_direct_rotation_when_strict_group_owns_writer_root() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at("midge::wal::before_physical_sync");
@@ -447,7 +447,10 @@ fn should_reject_direct_rotation_when_strict_group_owns_writer_root() -> MidgeRe
     // Assert: reject without moving or fencing the WAL, then allow it after
     // the group completion has been processed.
     assert!(
-        matches!(rotation, Err(crate::common::MidgeError::WriteStall(_))),
+        matches!(
+            rotation,
+            Err(cntryl_midge_core::common::MidgeError::WriteStall(_))
+        ),
         "unexpected rotation result while a strict group owns the writer: {rotation:?}"
     );
     assert_eq!(event_loop.state.wal.open_segment(), segment);
@@ -466,22 +469,23 @@ fn should_reject_direct_rotation_when_strict_group_owns_writer_root() -> MidgeRe
 #[test]
 fn should_defer_direct_cloud_seal_until_pending_seal_completes() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let mut cloud_write = write(97_802, &[b"cloud-rotation-barrier"], false);
     if let RuntimeMsg::ApplyTransaction {
         durability_policy, ..
     } = &mut cloud_write
     {
-        *durability_policy = Some(crate::wal::DurabilityPolicy::CloudAsync);
+        *durability_policy = Some(cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync);
     }
     event_loop.process_one(cloud_write, &crossbeam::channel::never());
     let sequence = event_loop.state.sequence;
     let held = HeldSync::at("midge::wal::before_physical_sync");
     let segment = event_loop.state.wal.open_segment();
-    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(10));
+    let deadline =
+        cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(10));
     assert!(event_loop.start_cloud_seal_for_request(&deadline, 97_803, sequence, false)?);
     wait_for_hold(&mut event_loop, &held);
     assert!(event_loop.pipeline.pending_cloud_seal.is_some());
@@ -492,7 +496,10 @@ fn should_defer_direct_cloud_seal_until_pending_seal_completes() -> MidgeResult<
 
     // Assert: preserve the current segment and its retry obligation.
     assert!(
-        matches!(rotation, Err(crate::common::MidgeError::WriteStall(_))),
+        matches!(
+            rotation,
+            Err(cntryl_midge_core::common::MidgeError::WriteStall(_))
+        ),
         "unexpected cloud rotation result while an async seal is in flight: {rotation:?}"
     );
     assert_eq!(event_loop.state.wal.open_segment(), segment);
@@ -533,7 +540,7 @@ fn should_defer_direct_cloud_seal_until_pending_seal_completes() -> MidgeResult<
 fn should_reject_conflicting_follower_after_held_strict_group_applies() -> MidgeResult<()> {
     // Arrange: a follower observes the original cut and conflicts with a
     // point write whose strict group is still waiting for physical fsync.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at("midge::wal::before_physical_sync");
@@ -572,7 +579,7 @@ fn should_reject_conflicting_follower_after_held_strict_group_applies() -> Midge
                 },
             ],
             assertions: Vec::new(),
-            durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+            durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict),
             start_sequence: Some(observed_cut),
             conflict_policy: ConflictPolicy::AbortOnWriteConflict,
             response_tx: None,
@@ -599,7 +606,7 @@ fn should_reject_conflicting_follower_after_held_strict_group_applies() -> Midge
         follower_result,
         RuntimeResponse::Error {
             request_id: 94_006,
-            error: crate::common::MidgeError::WriteConflict(_),
+            error: cntryl_midge_core::common::MidgeError::WriteConflict(_),
         }
     ));
 
@@ -651,7 +658,7 @@ fn wait_for_sync_hold(event_loop: &mut EventLoop, held: &HeldSyncs, expected: us
 fn assert_ordered_progress_when_held(hook: &'static str) -> MidgeResult<()> {
     // Arrange: construct the !Send loop on its owning thread. The physical
     // writer inherits this test's failpoint gate and owns the native effect.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at(hook);
@@ -730,7 +737,7 @@ fn assert_ordered_progress_when_held(hook: &'static str) -> MidgeResult<()> {
 fn should_preserve_unchanged_append_failure_when_writer_proves_durable_rollback() -> MidgeResult<()>
 {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let path = event_loop.state.db_path.clone();
@@ -763,7 +770,7 @@ fn should_preserve_unchanged_append_failure_when_writer_proves_durable_rollback(
     let recovered = crate::runtime::state::RuntimeState::try_new(
         path,
         false,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     assert_eq!(
         recovered.get_cf(0).unwrap().memtable.get(b"not-appended")?,
@@ -775,7 +782,7 @@ fn should_preserve_unchanged_append_failure_when_writer_proves_durable_rollback(
 #[test]
 fn should_keep_wal_runtime_state_unchanged_until_owner_drains_completion() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at("midge::wal::before_physical_sync");
@@ -831,7 +838,7 @@ fn should_keep_wal_runtime_state_unchanged_until_owner_drains_completion() -> Mi
 fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group() -> MidgeResult<()>
 {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSyncs::first_two("midge::wal::before_physical_sync");
@@ -848,7 +855,7 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
         .routing
         .router
         .register(94_022, "queued third unit");
-    let wal_path = crate::wal::segment_key(event_loop.state.wal.open_segment());
+    let wal_path = cntryl_midge_durability::wal::segment_key(event_loop.state.wal.open_segment());
     event_loop.process_one(
         write(94_020, &[b"first-group"], true),
         &crossbeam::channel::never(),
@@ -858,7 +865,7 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
         .state
         .fs
         .metadata(&wal_path)
-        .map_err(crate::io::FsError::into_midge)?
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
 
     // Act: both later writers enter the bounded deferred queue before the
@@ -882,7 +889,7 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
         .state
         .fs
         .metadata(&wal_path)
-        .map_err(crate::io::FsError::into_midge)?
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
     let durable_bytes = event_loop
         .state
@@ -935,7 +942,7 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
                 .state
                 .fs
                 .metadata(&wal_path)
-                .map_err(crate::io::FsError::into_midge)?
+                .map_err(cntryl_midge_core::io::FsError::into_midge)?
                 .len
         )
     );
@@ -949,7 +956,7 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
 #[test]
 fn should_preserve_lookahead_rotation_before_newer_deferred_writers() -> MidgeResult<()> {
     // Arrange: coalescing observes the rotation before either later write.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at("midge::wal::before_physical_sync");
@@ -996,7 +1003,7 @@ fn should_preserve_lookahead_rotation_before_newer_deferred_writers() -> MidgeRe
 #[test]
 fn should_preserve_prefix_order_when_spill_separates_resident_groups() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at("midge::wal::before_physical_sync");
@@ -1052,7 +1059,7 @@ fn should_preserve_prefix_order_when_spill_separates_resident_groups() -> MidgeR
 fn should_fence_every_family_after_partial_spill_without_advancing_global_visible_cut(
 ) -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.state.column_families.insert(
         1,
@@ -1121,7 +1128,7 @@ fn should_fence_every_family_after_partial_spill_without_advancing_global_visibl
     let recovered = crate::runtime::state::RuntimeState::try_new(
         path,
         false,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     for key in [b"partial-first".as_slice(), b"partial-second"] {
         assert_eq!(
@@ -1136,7 +1143,7 @@ fn should_fence_every_family_after_partial_spill_without_advancing_global_visibl
 fn should_drain_earlier_group_before_applying_oversized_resident_transaction() -> MidgeResult<()> {
     // Arrange: raw+encoded retention exceeds the asynchronous group budget,
     // while the existing resident WAL/replay envelope still accepts the unit.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldSync::at("midge::wal::before_physical_sync");
@@ -1187,7 +1194,7 @@ fn should_record_receipt_end_when_amortized_threshold_edit_runs_behind_a_queued_
 ) -> MidgeResult<()> {
     // Arrange: a one-byte window makes every completed sync cross the
     // threshold, so each group records its own floor.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     event_loop
@@ -1206,7 +1213,7 @@ fn should_record_receipt_end_when_amortized_threshold_edit_runs_behind_a_queued_
         .routing
         .router
         .register(95_201, "queued second unit");
-    let wal_path = crate::wal::segment_key(event_loop.state.wal.open_segment());
+    let wal_path = cntryl_midge_durability::wal::segment_key(event_loop.state.wal.open_segment());
     event_loop.process_one(
         write(95_200, &[b"first-group"], true),
         &crossbeam::channel::never(),
@@ -1216,7 +1223,7 @@ fn should_record_receipt_end_when_amortized_threshold_edit_runs_behind_a_queued_
         .state
         .fs
         .metadata(&wal_path)
-        .map_err(crate::io::FsError::into_midge)?
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
 
     // Act: the second group is appended while the first group's sync is held.
@@ -1233,7 +1240,7 @@ fn should_record_receipt_end_when_amortized_threshold_edit_runs_behind_a_queued_
         .state
         .fs
         .metadata(&wal_path)
-        .map_err(crate::io::FsError::into_midge)?
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
     let floor = || {
         event_loop
@@ -1278,7 +1285,7 @@ fn assert_timer_abstains_while_group_is_held(hook: &'static str) -> MidgeResult<
     // Arrange: the first group's floor is deferred; the second group is held
     // at `hook` after the delay has elapsed.
     const DELAY: Duration = Duration::from_millis(30);
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     event_loop
@@ -1329,10 +1336,10 @@ fn assert_timer_abstains_while_group_is_held(hook: &'static str) -> MidgeResult<
     let len = event_loop
         .state
         .fs
-        .metadata(&crate::wal::segment_key(
+        .metadata(&cntryl_midge_durability::wal::segment_key(
             event_loop.state.wal.open_segment(),
         ))
-        .map_err(crate::io::FsError::into_midge)?
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
     assert_eq!(
         event_loop

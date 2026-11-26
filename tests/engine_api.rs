@@ -5225,9 +5225,16 @@ mod consistent_cut_backup {
             }
         }
         engine.flush_cf(&default).expect("flush simulated SST");
+        let staging_object = "cloud_store/wal/.publication-catalog.v1.json.tmp.0.0";
+        std::fs::write(source.join(staging_object), b"partial WAL catalog")
+            .expect("create an in-flight publication file");
         let inventory = engine
             .backup_to(&artifact, std::time::Duration::from_secs(10))
             .expect("capture backup");
+        assert!(inventory
+            .objects
+            .iter()
+            .all(|object| object.path != staging_object));
         assert!(inventory
             .objects
             .iter()

@@ -1,8 +1,8 @@
 //! Intents for logical moves never confer physical deletion authority.
 use super::RuntimeState;
-use crate::common::{MidgeError, MidgeResult};
-use crate::metadata::FileMeta;
 use crate::runtime::{IntentLogEntry, PublicationPhase};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::metadata::FileMeta;
 
 impl RuntimeState {
     pub(crate) fn record_sst_move_intent(
@@ -10,7 +10,7 @@ impl RuntimeState {
         captured: Vec<FileMeta>,
         target_level: u32,
     ) -> MidgeResult<()> {
-        crate::metadata::manifest::validate_sst_move(
+        cntryl_midge_durability::metadata::manifest::validate_sst_move(
             &self.manifest.files,
             &captured,
             target_level,

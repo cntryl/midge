@@ -1,6 +1,6 @@
 use super::*;
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::event_loop::tests::create_test_local_event_loop;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::sync::Arc;
 
 const LOCAL_BUDGET: u64 = 1_000;
@@ -25,7 +25,9 @@ fn should_preserve_current_publication_when_another_job_reports_failure() -> Mid
     event_loop
         .state
         .record_compaction_publication_intent(0, vec![input.clone()], Vec::new())?;
-    let intent_path = directory.path().join(crate::metadata::files::INTENT_LOG);
+    let intent_path = directory
+        .path()
+        .join(cntryl_midge_durability::metadata::files::INTENT_LOG);
     let before = std::fs::read(&intent_path)?;
     let token = CompactionPublicationToken {
         request_id: 41,
@@ -104,7 +106,7 @@ fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
         crate::runtime::RuntimeConfig::default(),
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
-    let file = |name: &str, start: &[u8], end: &[u8]| crate::metadata::FileMeta {
+    let file = |name: &str, start: &[u8], end: &[u8]| cntryl_midge_durability::metadata::FileMeta {
         name: name.to_string(),
         cf_id: 0,
         level: 1,
@@ -135,7 +137,8 @@ fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
     // Act: one equality neighbor is safe; changed identity and a replacement
     // creating a three-way boundary are rejected.
     CompactionCoordinator::validate_captured_target_span(&event_loop, &selected, 0, 1)?;
-    let good = crate::runtime::FileMeta::from(&file("new.sst", b"a", b"z"));
+    let good =
+        cntryl_midge_durability::metadata::intent::FileMeta::from(&file("new.sst", b"a", b"z"));
     CompactionCoordinator::validate_repair_replacement_level(
         &event_loop,
         &selected,
@@ -144,8 +147,8 @@ fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
         1,
     )?;
     let bad = [
-        crate::runtime::FileMeta::from(&file("new-a.sst", b"a", b"z")),
-        crate::runtime::FileMeta::from(&file("new-b.sst", b"z", b"zz")),
+        cntryl_midge_durability::metadata::intent::FileMeta::from(&file("new-a.sst", b"a", b"z")),
+        cntryl_midge_durability::metadata::intent::FileMeta::from(&file("new-b.sst", b"z", b"zz")),
     ];
     // Assert
     assert!(CompactionCoordinator::validate_repair_replacement_level(
@@ -176,9 +179,9 @@ fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
 
 struct UnknownScratchFactory;
 
-impl crate::sst::SstFactory for UnknownScratchFactory {
-    fn output_fs(&self) -> Arc<dyn crate::io::Fs> {
-        Arc::new(crate::io::MockFs::new())
+impl cntryl_midge_table::sst::SstFactory for UnknownScratchFactory {
+    fn output_fs(&self) -> Arc<dyn cntryl_midge_core::io::Fs> {
+        Arc::new(cntryl_midge_core::io::MockFs::new())
     }
 
     fn compaction_scratch_cleanup_verified(&self) -> bool {
@@ -187,27 +190,27 @@ impl crate::sst::SstFactory for UnknownScratchFactory {
 
     fn create_for_compaction(
         &self,
-        _budget: crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+        _budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
         unreachable!("completion fixture already ran its worker")
     }
 
     fn open_for_compaction(
         &self,
         _path: &std::path::Path,
-        _budget: crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+        _budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
         unreachable!("completion fixture does not read inputs")
     }
 
     #[cfg(test)]
-    fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+    fn create(&self) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
         unreachable!("completion fixture already ran its worker")
     }
     fn open(
         &self,
         _path: &std::path::Path,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+    ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
         unreachable!("completion fixture does not read inputs")
     }
 }
@@ -266,14 +269,14 @@ fn should_retain_failed_compaction_admission_when_anonymous_scratch_cleanup_is_u
 fn event_loop_with_storage(
     directory: &tempfile::TempDir,
     ephemeral: bool,
-) -> MidgeResult<(EventLoop, Arc<crate::storage::HybridStorage>)> {
+) -> MidgeResult<(EventLoop, Arc<cntryl_midge_storage::HybridStorage>)> {
     let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
-    let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
+    let cloud = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
         directory.path().join("cloud_store"),
     )?);
-    let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::new(LOCAL_BUDGET),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::new(LOCAL_BUDGET),
     ));
     if ephemeral {
         hybrid.enable_ephemeral_sst_cache(LOCAL_BUDGET);
@@ -292,8 +295,8 @@ fn event_loop_with_storage(
 }
 
 fn published_output(event_loop: &mut EventLoop) -> String {
-    let output_name = crate::cloud_layout::compaction_file_name(0, 1, 42, 0);
-    let metadata = crate::metadata::FileMeta {
+    let output_name = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 42, 0);
+    let metadata = cntryl_midge_durability::metadata::FileMeta {
         name: output_name.clone(),
         level: 1,
         cf_id: 0,
@@ -306,14 +309,12 @@ fn published_output(event_loop: &mut EventLoop) -> String {
         .test_mut()
         .files
         .push(metadata.clone());
-    event_loop
-        .state
-        .intent_log
-        .push(crate::runtime::IntentLogEntry::CompactionPublish {
-            phase: crate::runtime::PublicationPhase::ManifestPublished,
+    event_loop.state.intent_log.push(
+        cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+            phase: cntryl_midge_durability::metadata::intent::PublicationPhase::ManifestPublished,
             cf_id: 0,
             removed: Vec::new(),
-            added: vec![crate::runtime::FileMeta {
+            added: vec![cntryl_midge_durability::metadata::intent::FileMeta {
                 name: metadata.name,
                 level: metadata.level,
                 cf_id: metadata.cf_id,
@@ -326,14 +327,15 @@ fn published_output(event_loop: &mut EventLoop) -> String {
                 key_bounds_complete: false,
                 earliest_expiration_millis: None,
             }],
-        });
+        },
+    );
     output_name
 }
 
 fn settle_publication(
     event_loop: &mut EventLoop,
     output: &str,
-    reservation: crate::storage::hybrid::actor::StorageReservationToken,
+    reservation: cntryl_midge_storage::hybrid::actor::StorageReservationToken,
     complete: bool,
 ) {
     let outputs = vec![output.to_string()];
@@ -364,17 +366,14 @@ fn should_settle_async_compaction_failure_according_to_owned_scratch() -> MidgeR
             let (mut event_loop, hybrid) = event_loop_with_storage(&directory, ephemeral)?;
             let compaction_storage: Arc<dyn crate::runtime::actors::compaction::CompactionStorage> =
                 hybrid.clone();
-            let input = crate::cloud_layout::file_name(0, 0, 1);
-            event_loop
-                .state
-                .manifest
-                .test_mut()
-                .files
-                .push(crate::metadata::FileMeta {
+            let input = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
+            event_loop.state.manifest.test_mut().files.push(
+                cntryl_midge_durability::metadata::FileMeta {
                     name: input.clone(),
                     size_bytes: 100,
                     ..Default::default()
-                });
+                },
+            );
             hybrid.reconcile_local_disk_usage(100, 0);
             event_loop
                 .actors
@@ -438,12 +437,8 @@ fn should_defer_failed_repair_until_the_next_maintenance_backoff() -> MidgeResul
         (&inputs[0], b"a".as_slice(), b"m".as_slice()),
         (&inputs[1], b"g".as_slice(), b"z".as_slice()),
     ] {
-        event_loop
-            .state
-            .manifest
-            .test_mut()
-            .files
-            .push(crate::metadata::FileMeta {
+        event_loop.state.manifest.test_mut().files.push(
+            cntryl_midge_durability::metadata::FileMeta {
                 name: name.clone(),
                 cf_id: 0,
                 level: 1,
@@ -452,7 +447,8 @@ fn should_defer_failed_repair_until_the_next_maintenance_backoff() -> MidgeResul
                 key_bounds_complete: true,
                 earliest_expiration_millis: None,
                 ..Default::default()
-            });
+            },
+        );
     }
     event_loop
         .actors
@@ -625,18 +621,26 @@ fn should_account_resident_outputs_when_compaction_publication_retains_inputs() 
 
 struct NewerHolderLeaderStore;
 
-impl crate::lease::LeaderStore for NewerHolderLeaderStore {
+impl cntryl_midge_durability::lease::LeaderStore for NewerHolderLeaderStore {
     fn acquire_leadership(
         &self,
         _holder_id: &str,
-    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
-        Err(crate::lease::LeaseError::Internal(
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaderRecord,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
+        Err(cntryl_midge_durability::lease::LeaseError::Internal(
             "test leader store does not acquire leadership".to_string(),
         ))
     }
 
-    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
-        Ok(Some(crate::lease::LeaderRecord {
+    fn read_current(
+        &self,
+    ) -> Result<
+        Option<cntryl_midge_durability::lease::LeaderRecord>,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
+        Ok(Some(cntryl_midge_durability::lease::LeaderRecord {
             epoch: 2,
             holder_id: "new-writer".to_string(),
             acquired_at: "test".to_string(),
@@ -646,7 +650,8 @@ impl crate::lease::LeaderStore for NewerHolderLeaderStore {
 
 fn stale_writer_event_loop(directory: &tempfile::TempDir) -> MidgeResult<EventLoop> {
     let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
-    let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(NewerHolderLeaderStore);
+    let leader_store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> =
+        Arc::new(NewerHolderLeaderStore);
     let config = crate::runtime::RuntimeConfig {
         writer_epoch: 1,
         lease_healthy: Some(Arc::new(std::sync::atomic::AtomicBool::new(false))),
@@ -675,7 +680,7 @@ fn should_reject_compaction_publication_when_writer_lease_moved_to_newer_holder(
         .manifest
         .test_mut()
         .files
-        .push(crate::metadata::FileMeta {
+        .push(cntryl_midge_durability::metadata::FileMeta {
             name: input.clone(),
             level: 0,
             cf_id: 0,
@@ -717,7 +722,7 @@ fn should_retain_compaction_inputs_when_writer_lease_moved_before_input_gc() -> 
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut event_loop = stale_writer_event_loop(&directory)?;
-    let input_name = crate::cloud_layout::compaction_file_name(0, 1, 1, 0);
+    let input_name = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 1, 0);
     let input_path = event_loop.state.host_sst_dir().join(&input_name);
     std::fs::create_dir_all(event_loop.state.host_sst_dir())?;
     std::fs::write(&input_path, b"still read by the new holder")?;
@@ -744,7 +749,7 @@ fn should_retain_compaction_inputs_when_writer_lease_moved_before_input_gc() -> 
 fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeResult<()> {
     for before_gc in [true, false] {
         // Arrange
-        let _guard = crate::failpoints::test_failpoint_guard();
+        let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
@@ -759,10 +764,12 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
         let input_path = event_loop.state.host_sst_dir().join(&input);
         std::fs::write(&input_path, b"retained predecessor input")?;
         record_published_empty_compaction(&mut event_loop, &input)?;
-        let intent_path = directory.path().join(crate::metadata::files::INTENT_LOG);
+        let intent_path = directory
+            .path()
+            .join(cntryl_midge_durability::metadata::files::INTENT_LOG);
         let before = std::fs::read(&intent_path)?;
         let epoch = event_loop.authority.fencing.writer_epoch;
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
         validity
             .activate(
                 epoch,
@@ -842,7 +849,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
 #[cfg(feature = "failpoints")]
 fn expire_validity_at_publication_boundary(
     before_gc: bool,
-    validity: Arc<crate::lease::LeaseValidity>,
+    validity: Arc<cntryl_midge_durability::lease::LeaseValidity>,
 ) {
     let boundary = if before_gc {
         "slice6::after_manifest_persist_before_sst_gc"
@@ -860,7 +867,7 @@ fn record_published_empty_compaction(event_loop: &mut EventLoop, input: &str) ->
     event_loop.state.transition_compaction_publication_intent(
         &[input.to_owned()],
         &[],
-        crate::runtime::PublicationPhase::ManifestPublished,
+        cntryl_midge_durability::metadata::intent::PublicationPhase::ManifestPublished,
     )
 }
 
@@ -929,7 +936,7 @@ fn should_preserve_snapshot_horizon_when_retained_wal_no_longer_pins_tombstone_g
 ) -> MidgeResult<()> {
     // Arrange
     let mut el = crate::runtime::event_loop::tests::create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let plan =
         crate::compaction::CompactionPlan::new(0, 0, 1).with_tombstone_gc_eligibility(true, true);

@@ -1,6 +1,6 @@
 //! Scoped scheduling and owner observations for timed-open regression tests.
 
-use crate::common::{DeadlineScope, MidgeError, MidgeResult};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult};
 use crossbeam::channel::{self, Receiver, Sender};
 use std::cell::RefCell;
 use std::time::Duration;

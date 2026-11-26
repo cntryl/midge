@@ -1,6 +1,6 @@
 use super::*;
-use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs};
+use cntryl_midge_core::io::traits::{DirEntry, Metadata};
+use cntryl_midge_core::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -15,9 +15,9 @@ struct ControlledFs {
 }
 
 impl ReadFs for ControlledFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -34,11 +34,14 @@ impl ReadFs for ControlledFs {
 }
 
 impl Fs for ControlledFs {
-    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+    fn try_lock_exclusive(
+        &self,
+        path: &FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+    fn host_addressing(&self) -> Option<cntryl_midge_core::io::HostAddressing<'_>> {
         self.inner.host_addressing()
     }
 
@@ -51,7 +54,7 @@ impl Fs for ControlledFs {
             }
             match self.next_failure.swap(0, Ordering::SeqCst) {
                 1 => {
-                    return Err(crate::io::FsError::Unavailable(
+                    return Err(cntryl_midge_core::io::FsError::Unavailable(
                         "injected open failure".into(),
                     ))
                 }
@@ -91,7 +94,7 @@ fn controlled(
     let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
     let (release_tx, release_rx) = crossbeam::channel::bounded(1);
     let fs = Arc::new(ControlledFs {
-        inner: Arc::new(crate::io::RealFs::new(directory.path()).expect("filesystem")),
+        inner: Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).expect("filesystem")),
         blocked_name: "slow.sst".into(),
         block_next: AtomicBool::new(true),
         next_failure: AtomicU8::new(0),

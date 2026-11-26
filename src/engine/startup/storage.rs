@@ -3,22 +3,24 @@ use super::{
     CloudStartupRecovery, RuntimeState, RuntimeStorageMaterialization, StartupLease,
     StartupStoragePath,
 };
-use crate::common::{DeadlineScope, MidgeError, MidgeResult};
-use crate::config::{RecoveryPolicy, Storage};
+use crate::config::Storage;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::LeaseError;
+use cntryl_midge_durability::RecoveryPolicy;
 use std::sync::Arc;
 
 struct CloudClassStores {
-    wal: Arc<crate::storage::cloud::CloudStorage>,
-    sst: Arc<crate::storage::cloud::CloudStorage>,
-    metadata: Arc<crate::storage::cloud::CloudStorage>,
+    wal: Arc<cntryl_midge_storage::cloud::CloudStorage>,
+    sst: Arc<cntryl_midge_storage::cloud::CloudStorage>,
+    metadata: Arc<cntryl_midge_storage::cloud::CloudStorage>,
 }
 
 #[derive(Clone, Copy)]
 struct CloudWalRecoveryMetadata<'a> {
-    catalog: &'a crate::wal::cloud_catalog::WalPublicationCatalog,
-    hydrated_generation: Option<crate::lease::SharedGenerationId>,
+    catalog: &'a cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog,
+    hydrated_generation: Option<cntryl_midge_durability::lease::SharedGenerationId>,
 }
 
 /// Local budgets below this are entirely working space: the remote block cache
@@ -40,13 +42,15 @@ pub(crate) fn remote_block_cache_share(local_budget_bytes: u64) -> u64 {
 fn remote_block_cache(
     local_budget_bytes: u64,
     path: &StartupStoragePath,
-) -> Option<Arc<crate::storage::remote_block_cache::RemoteBlockCache>> {
+) -> Option<Arc<cntryl_midge_storage::remote_block_cache::RemoteBlockCache>> {
     let share = remote_block_cache_share(local_budget_bytes);
     if share == 0 {
         return None;
     }
-    match crate::storage::remote_block_cache::RemoteBlockCache::open(Arc::clone(&path.root), share)
-    {
+    match cntryl_midge_storage::remote_block_cache::RemoteBlockCache::open(
+        Arc::clone(&path.root),
+        share,
+    ) {
         Ok(cache) => Some(Arc::new(cache)),
         Err(error) => {
             // Advisory: a database without the cache works, it just pays
@@ -62,18 +66,18 @@ fn remote_block_cache(
 fn remote_sst_read_fs(
     opts: &OpenOptions,
     path: &StartupStoragePath,
-    backend: Arc<dyn crate::storage::StorageBackend>,
+    backend: Arc<dyn cntryl_midge_storage::StorageBackend>,
     scope: Option<&DeadlineScope>,
 ) -> (
-    Arc<dyn crate::io::Fs>,
-    Option<Arc<crate::storage::remote_block_cache::RemoteBlockCache>>,
+    Arc<dyn cntryl_midge_core::io::Fs>,
+    Option<Arc<cntryl_midge_storage::remote_block_cache::RemoteBlockCache>>,
 ) {
     let cache = remote_block_cache(
         opts.simulated_cloud_local_storage_budget_bytes()
             .unwrap_or_else(|| opts.local_storage_budget_bytes()),
         path,
     );
-    let mut remote = crate::storage::remote_sst::RemoteSstFs::new(
+    let mut remote = cntryl_midge_storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&path.root),
         backend,
         opts.storage_io_timeout(),
@@ -81,18 +85,18 @@ fn remote_sst_read_fs(
     if let Some(cache) = &cache {
         remote = remote.with_block_cache(Arc::clone(cache));
     }
-    let fs: Arc<dyn crate::io::Fs> = Arc::new(remote);
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(remote);
     let fs = scope.map_or_else(
         || Arc::clone(&fs),
-        |scope| crate::io::scope_fs(Arc::clone(&fs), scope.clone()),
+        |scope| cntryl_midge_core::io::scope_fs(Arc::clone(&fs), scope.clone()),
     );
     (fs, cache)
 }
 
 fn scope_cloud_store(
-    store: Arc<crate::storage::cloud::CloudStorage>,
+    store: Arc<cntryl_midge_storage::cloud::CloudStorage>,
     scope: Option<&DeadlineScope>,
-) -> Arc<crate::storage::cloud::CloudStorage> {
+) -> Arc<cntryl_midge_storage::cloud::CloudStorage> {
     if let Some(scope) = scope {
         Arc::new(store.with_startup_scope(scope.clone()))
     } else {
@@ -105,15 +109,15 @@ fn check_startup_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeRes
 }
 
 pub(super) fn reconcile_cloud_format_before_mutations(
-    metadata_storage: &crate::storage::cloud::CloudStorage,
-    store: &dyn crate::lease::LeaderStore,
+    metadata_storage: &cntryl_midge_storage::cloud::CloudStorage,
+    store: &dyn cntryl_midge_durability::lease::LeaderStore,
     holder_id: &str,
     epoch: u64,
     timeout: std::time::Duration,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<()> {
     let deadline = scope.map_or_else(
-        || crate::common::OperationDeadline::from_budget(timeout.saturating_mul(16)),
+        || cntryl_midge_core::common::OperationDeadline::from_budget(timeout.saturating_mul(16)),
         DeadlineScope::deadline,
     );
     super::cloud_format_upgrade::reconcile_cloud_format_gate(
@@ -127,15 +131,15 @@ pub(super) fn reconcile_cloud_format_before_mutations(
 }
 
 fn hydrate_metadata(
-    storage: &crate::storage::cloud::CloudStorage,
-    authority: &dyn crate::lease::LeaderStore,
+    storage: &cntryl_midge_storage::cloud::CloudStorage,
+    authority: &dyn cntryl_midge_durability::lease::LeaderStore,
     path: &StartupStoragePath,
     policy: RecoveryPolicy,
-    retired_by: crate::lease::SharedGenerationId,
+    retired_by: cntryl_midge_durability::lease::SharedGenerationId,
     scope: Option<&DeadlineScope>,
-) -> MidgeResult<Option<crate::lease::SharedGenerationId>> {
+) -> MidgeResult<Option<cntryl_midge_durability::lease::SharedGenerationId>> {
     let scope = scope.cloned().unwrap_or_else(|| {
-        DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+        DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::from_budget(
             storage.callback_timeout().saturating_mul(16),
         ))
     });
@@ -183,10 +187,13 @@ fn load_cloud_wal_history(
     // bounding once startup completes.
     let root = &scope.map_or_else(
         || Arc::clone(&path.root),
-        |scope| crate::io::scope_fs(Arc::clone(&path.root), scope.clone()),
+        |scope| cntryl_midge_core::io::scope_fs(Arc::clone(&path.root), scope.clone()),
     );
-    crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
-    let wal = crate::io::subdirectory(Arc::clone(root), crate::wal::WAL_DIR);
+    cntryl_midge_durability::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
+    let wal = cntryl_midge_core::io::subdirectory(
+        Arc::clone(root),
+        cntryl_midge_durability::wal::WAL_DIR,
+    );
     Ok(
         match crate::runtime::wal_history::WalHistory::load_with_fence(
             Arc::clone(&wal),
@@ -207,8 +214,8 @@ fn load_cloud_wal_history(
 fn recover_cloud_wal(
     opts: &OpenOptions,
     storage_path: &StartupStoragePath,
-    backend: &Arc<dyn crate::storage::StorageBackend>,
-    storage: &Arc<crate::storage::HybridStorage>,
+    backend: &Arc<dyn cntryl_midge_storage::StorageBackend>,
+    storage: &Arc<cntryl_midge_storage::HybridStorage>,
     metadata: CloudWalRecoveryMetadata<'_>,
     lease: &StartupLease,
     scope: Option<&DeadlineScope>,
@@ -219,7 +226,7 @@ fn recover_cloud_wal(
     let catalog = metadata.catalog;
     let hydrated = metadata
         .hydrated_generation
-        .unwrap_or(crate::lease::SharedGenerationId::NONE);
+        .unwrap_or(cntryl_midge_durability::lease::SharedGenerationId::NONE);
     if hydrated < catalog.retired_by() {
         return Err(MidgeError::Corruption(
             "hydrated metadata predates authoritative WAL retirement".into(),
@@ -259,14 +266,14 @@ fn recover_cloud_wal(
 
 #[allow(clippy::too_many_arguments)]
 fn build_wal_plan(
-    root: &Arc<dyn crate::io::Fs>,
-    ledger: Option<&crate::wal::ledger::WalLedger>,
-    remote: &Arc<dyn crate::storage::StorageBackend>,
-    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    root: &Arc<dyn cntryl_midge_core::io::Fs>,
+    ledger: Option<&cntryl_midge_durability::wal::ledger::WalLedger>,
+    remote: &Arc<dyn cntryl_midge_storage::StorageBackend>,
+    catalog: &cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog,
     policy: RecoveryPolicy,
     timeout: std::time::Duration,
     read_window: usize,
-    limits: crate::wal::recovery::streaming::StreamingReplayLimits,
+    limits: cntryl_midge_durability::wal::recovery::streaming::StreamingReplayLimits,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery> {
     use crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery;
@@ -297,10 +304,10 @@ fn build_wal_plan(
 }
 
 fn commit_wal_plan(
-    plan: &crate::wal::planner::RecoveryPlan,
+    plan: &cntryl_midge_durability::wal::planner::RecoveryPlan,
     persistence: &CloudPersistence,
     lease: &StartupLease,
-    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    catalog: &cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog,
     cache: crate::runtime::cloud_startup::CacheHistory,
     wal_fence: Option<&crate::runtime::wal_history::WalHistoryFence>,
     scope: Option<&DeadlineScope>,
@@ -309,7 +316,7 @@ fn commit_wal_plan(
     let scope = if let Some(scope) = scope {
         scope
     } else {
-        unbounded = DeadlineScope::new(crate::common::OperationDeadline::unbounded());
+        unbounded = DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded());
         &unbounded
     };
     crate::runtime::cloud_startup::commit_recovery_plan_within(
@@ -337,7 +344,7 @@ fn provider_ddl_authority(lease: &StartupLease) -> MidgeResult<DdlLeaseAuthority
 impl StartupLease {
     fn reconcile_cloud_format(
         &self,
-        storage: &crate::storage::cloud::CloudStorage,
+        storage: &cntryl_midge_storage::cloud::CloudStorage,
         timeout: std::time::Duration,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<()> {
@@ -369,21 +376,21 @@ impl StartupLease {
 }
 
 fn fence_provider_ddl(
-    storage: &crate::storage::HybridStorage,
+    storage: &cntryl_midge_storage::HybridStorage,
     lease: &StartupLease,
     timeout: std::time::Duration,
 ) -> MidgeResult<()> {
     fence_provider_ddl_within(
         storage,
         lease,
-        &crate::common::OperationDeadline::from_budget(timeout),
+        &cntryl_midge_core::common::OperationDeadline::from_budget(timeout),
     )
 }
 
 fn fence_provider_ddl_within(
-    storage: &crate::storage::HybridStorage,
+    storage: &cntryl_midge_storage::HybridStorage,
     lease: &StartupLease,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<()> {
     lease.install_storage_write_authority(storage)?;
     let authority = provider_ddl_authority(lease)?;
@@ -393,7 +400,7 @@ fn fence_provider_ddl_within(
 
 fn fence_cloud_ddl_scoped(
     opts: &OpenOptions,
-    storage: &crate::storage::HybridStorage,
+    storage: &cntryl_midge_storage::HybridStorage,
     lease: &StartupLease,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<()> {
@@ -414,7 +421,7 @@ fn require_empty_local_cache_for_cloud_bootstrap(
         check_startup_scope(scope, "bootstrap cache discovery")?;
         let entries = path
             .root
-            .list_dir(&crate::io::FsPath::new(directory.as_str()))
+            .list_dir(&cntryl_midge_core::io::FsPath::new(directory.as_str()))
             .map_err(|error| MidgeError::Io(error.into_io()))?;
         for entry in entries {
             check_startup_scope(scope, "bootstrap cache entry")?;
@@ -471,7 +478,7 @@ impl StartupLease {
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
         let storage = opts.storage();
-        let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
+        let created = super::lease_selection::create_lease_with_validity_and_timeout_and_ttl(
             storage,
             &path.root,
             opts.injected_object_store(),
@@ -503,8 +510,8 @@ impl StartupLease {
 
     #[cfg(test)]
     pub(super) fn acquire_for_test(
-        lease: Arc<dyn crate::lease::PrimaryLease>,
-        validity: Option<Arc<crate::lease::LeaseValidity>>,
+        lease: Arc<dyn cntryl_midge_durability::lease::PrimaryLease>,
+        validity: Option<Arc<cntryl_midge_durability::lease::LeaseValidity>>,
     ) -> MidgeResult<Self> {
         Self::acquire_created(
             lease,
@@ -513,13 +520,13 @@ impl StartupLease {
             None,
             0,
             None,
-            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
         )
     }
 
     fn acquire_created(
-        lease: Arc<dyn crate::lease::PrimaryLease>,
-        lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
+        lease: Arc<dyn cntryl_midge_durability::lease::PrimaryLease>,
+        lease_validity: Option<Arc<cntryl_midge_durability::lease::LeaseValidity>>,
         storage: Option<&Storage>,
         lease_loss_hook: Option<Arc<dyn Fn() + Send + Sync>>,
         minimum_epoch: u64,
@@ -542,27 +549,37 @@ impl StartupLease {
                     let _ = lease.release();
                 }
                 return Err(match error {
-                    crate::lease::LeaseError::AcquisitionFailed(message) => {
+                    cntryl_midge_durability::lease::LeaseError::AcquisitionFailed(message) => {
                         MidgeError::LeaseHeld(format!(
                         "another Midge instance is already running against this storage: {message}"
                     ))
                     }
                     // A store that did not answer in time is unavailable for
                     // acquisition, as before the timeout had its own variant.
-                    crate::lease::LeaseError::Timeout(message) if scope.is_some() => {
+                    cntryl_midge_durability::lease::LeaseError::Timeout(message)
+                        if scope.is_some() =>
+                    {
                         MidgeError::Timeout(message)
                     }
-                    crate::lease::LeaseError::IoError(message)
-                    | crate::lease::LeaseError::Timeout(message) => {
+                    cntryl_midge_durability::lease::LeaseError::IoError(message)
+                    | cntryl_midge_durability::lease::LeaseError::Timeout(message) => {
                         MidgeError::LeaseUnavailable(message)
                     }
-                    crate::lease::LeaseError::RenewalFailed(message) => MidgeError::Fenced(message),
-                    crate::lease::LeaseError::Indeterminate(message) => {
+                    cntryl_midge_durability::lease::LeaseError::RenewalFailed(message) => {
+                        MidgeError::Fenced(message)
+                    }
+                    cntryl_midge_durability::lease::LeaseError::Indeterminate(message) => {
                         MidgeError::LeaseIndeterminate(message)
                     }
-                    crate::lease::LeaseError::EpochExhausted => MidgeError::LeaseEpochExhausted,
-                    crate::lease::LeaseError::AlreadyAcquired(message) => MidgeError::Busy(message),
-                    crate::lease::LeaseError::Internal(message) => MidgeError::Internal(message),
+                    cntryl_midge_durability::lease::LeaseError::EpochExhausted => {
+                        MidgeError::LeaseEpochExhausted
+                    }
+                    cntryl_midge_durability::lease::LeaseError::AlreadyAcquired(message) => {
+                        MidgeError::Busy(message)
+                    }
+                    cntryl_midge_durability::lease::LeaseError::Internal(message) => {
+                        MidgeError::Internal(message)
+                    }
                 });
             }
         };
@@ -580,7 +597,11 @@ impl StartupLease {
             scope.map_or_else(
                 || store.clone(),
                 |scope| {
-                    crate::lease::scoped_leader_store(store.clone(), scope.clone(), per_io_timeout)
+                    cntryl_midge_durability::lease::scoped_leader_store(
+                        store.clone(),
+                        scope.clone(),
+                        per_io_timeout,
+                    )
                 },
             )
         });
@@ -609,11 +630,12 @@ impl StartupLease {
         &mut self,
         lease_loss_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> MidgeResult<()> {
-        let mut lease_heartbeat = crate::lease::LeaseHeartbeat::new_with_healthy_and_validity(
-            Arc::clone(&self.lease),
-            Arc::clone(&self.lease_healthy),
-            self.lease_validity.as_ref().map(Arc::clone),
-        );
+        let mut lease_heartbeat =
+            cntryl_midge_durability::lease::LeaseHeartbeat::new_with_healthy_and_validity(
+                Arc::clone(&self.lease),
+                Arc::clone(&self.lease_healthy),
+                self.lease_validity.as_ref().map(Arc::clone),
+            );
         if let Some(hook) = lease_loss_hook {
             lease_heartbeat.set_loss_hook(hook);
         }
@@ -630,7 +652,7 @@ impl StartupLease {
 
     fn prepare_wal_catalog(
         &self,
-        storage: &Arc<crate::storage::HybridStorage>,
+        storage: &Arc<cntryl_midge_storage::HybridStorage>,
     ) -> MidgeResult<crate::runtime::hybrid_persistence::AdmittedCatalog> {
         let catalog = CloudPersistence::new(Arc::clone(storage))
             .fence_cloud_wal_catalog(self.writer_epoch)?;
@@ -640,7 +662,7 @@ impl StartupLease {
 
     fn prepare_wal_catalog_within(
         &self,
-        storage: &Arc<crate::storage::HybridStorage>,
+        storage: &Arc<cntryl_midge_storage::HybridStorage>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<crate::runtime::hybrid_persistence::AdmittedCatalog> {
         if let Some(scope) = scope {
@@ -657,7 +679,7 @@ impl StartupLease {
 
     fn install_storage_write_authority(
         &self,
-        storage: &crate::storage::HybridStorage,
+        storage: &cntryl_midge_storage::HybridStorage,
     ) -> MidgeResult<()> {
         let validity = self.lease_validity.clone();
         let healthy = Arc::clone(&self.lease_healthy);
@@ -696,7 +718,9 @@ impl StartupLease {
         }
     }
 
-    pub(super) fn take_heartbeat(&mut self) -> MidgeResult<crate::lease::LeaseHeartbeat> {
+    pub(super) fn take_heartbeat(
+        &mut self,
+    ) -> MidgeResult<cntryl_midge_durability::lease::LeaseHeartbeat> {
         self.lease_heartbeat.take().ok_or_else(|| {
             MidgeError::Internal("startup lease heartbeat was already transferred".to_string())
         })
@@ -725,11 +749,11 @@ impl RuntimeStorageMaterialization {
     /// leaves the cache reusable, while a committed CAS hydrates on retry.
     #[cfg(test)]
     pub(super) fn bootstrap_provider_metadata_if_uncommitted(
-        metadata_storage: &crate::storage::cloud::CloudStorage,
-        sst_storage: &crate::storage::cloud::CloudStorage,
-        hybrid_storage: &crate::storage::HybridStorage,
+        metadata_storage: &cntryl_midge_storage::cloud::CloudStorage,
+        sst_storage: &cntryl_midge_storage::cloud::CloudStorage,
+        hybrid_storage: &cntryl_midge_storage::HybridStorage,
         authority: &DdlLeaseAuthority,
-        wal_catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        wal_catalog: &cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog,
         db_path: &std::path::Path,
         timeout: std::time::Duration,
     ) -> MidgeResult<()> {
@@ -742,7 +766,7 @@ impl RuntimeStorageMaterialization {
             &StartupStoragePath {
                 db_path: db_path.to_path_buf(),
                 memory_mode: false,
-                root: crate::io::real::test_root(db_path),
+                root: cntryl_midge_core::io::real::test_root(db_path),
             },
             timeout,
             None,
@@ -751,52 +775,53 @@ impl RuntimeStorageMaterialization {
         .map(|_| ())
     }
 
-    fn bootstrap_staging_fs() -> MidgeResult<Arc<dyn crate::io::Fs>> {
+    fn bootstrap_staging_fs() -> MidgeResult<Arc<dyn cntryl_midge_core::io::Fs>> {
         // In-memory staging keeps failed first opens retryable independently
         // of temporary-directory permissions and local cache authority.
-        let staging_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
-        crate::io::staging::stage_bytes(
+        let staging_fs: Arc<dyn cntryl_midge_core::io::Fs> =
+            Arc::new(cntryl_midge_core::io::MockFs::new());
+        cntryl_midge_core::io::staging::stage_bytes(
             &staging_fs,
-            &crate::io::FsPath::new("FORMAT.tmp"),
-            &crate::io::FsPath::new(crate::metadata::files::FORMAT),
-            &crate::metadata::format::current_format_marker_bytes(),
+            &cntryl_midge_core::io::FsPath::new("FORMAT.tmp"),
+            &cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::FORMAT),
+            &cntryl_midge_durability::metadata::format::current_format_marker_bytes(),
             MidgeError::RecoveryFailed,
         )?;
-        crate::metadata::store::ManifestStore::new_with_accounting(
+        cntryl_midge_durability::metadata::store::ManifestStore::new_with_accounting(
             Arc::clone(&staging_fs),
-            crate::metadata::accounting::Owner::new(),
-            crate::metadata::accounting::Medium::MemoryOnly,
+            cntryl_midge_durability::metadata::accounting::Owner::new(),
+            cntryl_midge_durability::metadata::accounting::Medium::MemoryOnly,
         )
         .save_snapshot_for(
-            crate::metadata::accounting::Origin::Bootstrap,
-            &crate::metadata::Manifest::default(),
+            cntryl_midge_durability::metadata::accounting::Origin::Bootstrap,
+            &cntryl_midge_durability::metadata::Manifest::default(),
         )?;
         Ok(staging_fs)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn bootstrap_provider_metadata_scoped(
-        metadata_storage: &crate::storage::cloud::CloudStorage,
-        sst_storage: &crate::storage::cloud::CloudStorage,
-        hybrid_storage: &crate::storage::HybridStorage,
+        metadata_storage: &cntryl_midge_storage::cloud::CloudStorage,
+        sst_storage: &cntryl_midge_storage::cloud::CloudStorage,
+        hybrid_storage: &cntryl_midge_storage::HybridStorage,
         authority: &DdlLeaseAuthority,
-        wal_catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        wal_catalog: &cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog,
         path: &StartupStoragePath,
         timeout: std::time::Duration,
         shared_store_directory: Option<&str>,
         scope: Option<&DeadlineScope>,
-    ) -> MidgeResult<Option<crate::lease::SharedGenerationId>> {
+    ) -> MidgeResult<Option<cntryl_midge_durability::lease::SharedGenerationId>> {
         check_startup_scope(scope, "cloud metadata bootstrap")?;
         let leader_store = authority.store.as_ref();
         let head = leader_store
             .read_committed_metadata(scope.map_or(timeout, |scope| scope.clamp(timeout)))
             .map_err(|error| {
-                if scope.is_some() && matches!(error, crate::lease::LeaseError::Timeout(_)) {
+                if scope.is_some() && matches!(error, LeaseError::Timeout(_)) {
                     return MidgeError::Timeout(format!(
                         "cloud metadata authority bootstrap: {error}"
                     ));
                 }
-                if scope.is_some() && matches!(error, crate::lease::LeaseError::Indeterminate(_)) {
+                if scope.is_some() && matches!(error, LeaseError::Indeterminate(_)) {
                     return MidgeError::LeaseIndeterminate(format!(
                         "cloud metadata authority bootstrap: {error}"
                     ));
@@ -806,12 +831,12 @@ impl RuntimeStorageMaterialization {
                 ))
             })?;
         match head {
-            crate::lease::CloudMetadataHead::MissingLease => {
+            cntryl_midge_durability::lease::CloudMetadataHead::MissingLease => {
                 return Err(MidgeError::RecoveryFailed(
                     "cloud metadata lease disappeared before bootstrap".into(),
                 ));
             }
-            crate::lease::CloudMetadataHead::Committed(_) => {
+            cntryl_midge_durability::lease::CloudMetadataHead::Committed(_) => {
                 return hydrate_metadata(
                     metadata_storage,
                     leader_store,
@@ -821,7 +846,7 @@ impl RuntimeStorageMaterialization {
                     scope,
                 );
             }
-            crate::lease::CloudMetadataHead::Uncommitted => {}
+            cntryl_midge_durability::lease::CloudMetadataHead::Uncommitted => {}
         }
 
         // The uncommitted lease is not proof that a copied local cache or a
@@ -844,7 +869,7 @@ impl RuntimeStorageMaterialization {
             ));
         }
         let deadline = scope.map_or_else(
-            || crate::common::OperationDeadline::from_budget(timeout.saturating_mul(16)),
+            || OperationDeadline::from_budget(timeout.saturating_mul(16)),
             DeadlineScope::deadline,
         );
         crate::runtime::ddl::require_empty_registry_for_metadata_bootstrap(
@@ -852,8 +877,8 @@ impl RuntimeStorageMaterialization {
             authority,
             &deadline,
         )?;
-        if !crate::storage::cloud::BlockingCloud::new(sst_storage, &deadline)
-            .list(crate::cloud_layout::CloudObjectLayout::SST_PREFIX)?
+        if !cntryl_midge_storage::cloud::BlockingCloud::new(sst_storage, &deadline)
+            .list(cntryl_midge_core::cloud_layout::CloudObjectLayout::SST_PREFIX)?
             .is_empty()
         {
             return Err(MidgeError::RecoveryFailed(
@@ -891,10 +916,10 @@ impl RuntimeStorageMaterialization {
 
     fn build_cloud_class_stores(
         opts: &OpenOptions,
-        topology: &crate::config::CloudStorageTopology,
+        topology: &cntryl_midge_storage::config::CloudStorageTopology,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<CloudClassStores> {
-        let wal = crate::storage::providers::build_class_store(
+        let wal = cntryl_midge_storage::providers::build_class_store(
             topology.wal().provider(),
             topology.wal().prefix(),
             opts.storage_io_timeout(),
@@ -905,7 +930,7 @@ impl RuntimeStorageMaterialization {
             wal.clone()
         } else {
             scope_cloud_store(
-                crate::storage::providers::build_class_store(
+                cntryl_midge_storage::providers::build_class_store(
                     topology.sst().provider(),
                     topology.sst().prefix(),
                     opts.storage_io_timeout(),
@@ -920,7 +945,7 @@ impl RuntimeStorageMaterialization {
             sst.clone()
         } else {
             scope_cloud_store(
-                crate::storage::providers::build_class_store(
+                cntryl_midge_storage::providers::build_class_store(
                     topology.control().provider(),
                     topology.control().prefix(),
                     opts.storage_io_timeout(),
@@ -995,7 +1020,7 @@ impl RuntimeStorageMaterialization {
             write_backpressure: opts.write_backpressure().clone(),
             compaction_levels: opts.compaction_levels().clone(),
             ttl_clock: opts.ttl_clock(),
-            wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+            wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync,
             storage_io_timeout: opts.storage_io_timeout(),
             runtime_response_timeout: opts.runtime_response_timeout(),
             startup_observer: opts.startup_observer(),
@@ -1024,9 +1049,9 @@ impl RuntimeStorageMaterialization {
 
     fn build_simulated_cloud_stores(
         opts: &OpenOptions,
-        store: &Arc<dyn crate::storage::inventory::ObjectStore>,
-    ) -> crate::storage::simulated::SimulatedCloudStores {
-        let cloud = crate::storage::simulated::build_simulated_cloud_stores(
+        store: &Arc<dyn cntryl_midge_storage::inventory::ObjectStore>,
+    ) -> cntryl_midge_storage::simulated::SimulatedCloudStores {
+        let cloud = cntryl_midge_storage::simulated::build_simulated_cloud_stores(
             Arc::clone(store),
             opts.simulated_cloud_local_storage_budget_bytes(),
         );
@@ -1042,11 +1067,11 @@ impl RuntimeStorageMaterialization {
 
     fn simulated_metadata_storage(
         opts: &OpenOptions,
-        store: &Arc<dyn crate::storage::inventory::ObjectStore>,
+        store: &Arc<dyn cntryl_midge_storage::inventory::ObjectStore>,
         startup_lease: &StartupLease,
         scope: Option<&DeadlineScope>,
-    ) -> MidgeResult<Arc<crate::storage::cloud::CloudStorage>> {
-        let storage = crate::storage::cloud::CloudStorage::from_object_store(
+    ) -> MidgeResult<Arc<cntryl_midge_storage::cloud::CloudStorage>> {
+        let storage = cntryl_midge_storage::cloud::CloudStorage::from_object_store(
             Arc::clone(store),
             opts.storage_io_timeout(),
         );
@@ -1061,7 +1086,7 @@ impl RuntimeStorageMaterialization {
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
-        let location = crate::storage::simulated::SimulatedCloud::locate(
+        let location = cntryl_midge_storage::simulated::SimulatedCloud::locate(
             storage_path.root.as_ref(),
             opts.injected_object_store(),
             opts.storage_io_timeout(),
@@ -1070,7 +1095,7 @@ impl RuntimeStorageMaterialization {
         let cloud = Self::build_simulated_cloud_stores(opts, &store);
         let metadata_storage =
             Self::simulated_metadata_storage(opts, &store, startup_lease, scope)?;
-        let backend: Arc<dyn crate::storage::StorageBackend> = Arc::clone(&store) as _;
+        let backend: Arc<dyn cntryl_midge_storage::StorageBackend> = Arc::clone(&store) as _;
         let (sst_read_fs, remote_block_cache) =
             remote_sst_read_fs(opts, storage_path, Arc::clone(&backend), scope);
         CloudStartupRecovery::reject_cloud_wal_without_catalog(store.as_ref(), scope)?;
@@ -1163,26 +1188,27 @@ impl RuntimeStorageMaterialization {
 
     fn build_hybrid_storage(
         opts: &OpenOptions,
-        wal_storage: &Arc<crate::storage::cloud::CloudStorage>,
-        sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
-        metadata_storage: &Arc<crate::storage::cloud::CloudStorage>,
+        wal_storage: &Arc<cntryl_midge_storage::cloud::CloudStorage>,
+        sst_storage: &Arc<cntryl_midge_storage::cloud::CloudStorage>,
+        metadata_storage: &Arc<cntryl_midge_storage::cloud::CloudStorage>,
     ) -> (
-        Arc<crate::storage::HybridStorage>,
-        crossbeam::channel::Receiver<crate::storage::StorageEvent>,
+        Arc<cntryl_midge_storage::HybridStorage>,
+        crossbeam::channel::Receiver<cntryl_midge_storage::StorageEvent>,
     ) {
-        let wal_backend: Arc<dyn crate::storage::StorageBackend> = wal_storage.clone();
-        let sst_backend: Arc<dyn crate::storage::StorageBackend> = sst_storage.clone();
-        let control_backend: Arc<dyn crate::storage::StorageBackend> = metadata_storage.clone();
+        let wal_backend: Arc<dyn cntryl_midge_storage::StorageBackend> = wal_storage.clone();
+        let sst_backend: Arc<dyn cntryl_midge_storage::StorageBackend> = sst_storage.clone();
+        let control_backend: Arc<dyn cntryl_midge_storage::StorageBackend> =
+            metadata_storage.clone();
 
-        let (tx, rx) = crossbeam::channel::bounded::<crate::storage::StorageEvent>(
-            crate::storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
+        let (tx, rx) = crossbeam::channel::bounded::<cntryl_midge_storage::StorageEvent>(
+            cntryl_midge_storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
         );
         let retry = opts.cloud_write_policy_value().transient_retry;
         for storage in [wal_storage, sst_storage, metadata_storage] {
             storage.set_retry_policy(retry);
         }
         let mut hybrid_storage =
-            crate::storage::HybridStorage::new_with_class_stores_upload_policy_and_event_sender(
+            cntryl_midge_storage::HybridStorage::new_with_class_stores_upload_policy_and_event_sender(
                 wal_backend,
                 sst_backend,
                 control_backend,
@@ -1205,13 +1231,13 @@ impl RuntimeStorageMaterialization {
     fn build_provider_sst_read_fs(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
-        sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
+        sst_storage: &Arc<cntryl_midge_storage::cloud::CloudStorage>,
     ) -> (
-        Arc<dyn crate::io::Fs>,
-        Option<Arc<crate::storage::remote_block_cache::RemoteBlockCache>>,
+        Arc<dyn cntryl_midge_core::io::Fs>,
+        Option<Arc<cntryl_midge_storage::remote_block_cache::RemoteBlockCache>>,
     ) {
         let cache = remote_block_cache(opts.local_storage_budget_bytes(), storage_path);
-        let mut remote = crate::storage::remote_sst::RemoteSstFs::new(
+        let mut remote = cntryl_midge_storage::remote_sst::RemoteSstFs::new(
             Arc::clone(&storage_path.root),
             sst_storage.clone(),
             opts.storage_io_timeout(),
@@ -1227,7 +1253,7 @@ impl RuntimeStorageMaterialization {
         storage_path: &StartupStoragePath,
         startup_lease: &StartupLease,
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
-        topology: &crate::config::CloudStorageTopology,
+        topology: &cntryl_midge_storage::config::CloudStorageTopology,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
         let stores = Self::build_cloud_class_stores(opts, topology, scope)?;
@@ -1247,7 +1273,7 @@ impl RuntimeStorageMaterialization {
             Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage);
         let sst_read_fs = scope.map_or_else(
             || sst_read_fs.clone(),
-            |scope| crate::io::scope_fs(sst_read_fs.clone(), scope.clone()),
+            |scope| cntryl_midge_core::io::scope_fs(sst_read_fs.clone(), scope.clone()),
         );
         let wal_catalog = startup_lease.prepare_wal_catalog_within(&hybrid_storage, scope)?;
 
@@ -1267,7 +1293,7 @@ impl RuntimeStorageMaterialization {
         let (streaming, history) = recover_cloud_wal(
             opts,
             storage_path,
-            &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
+            &(wal_storage.clone() as Arc<dyn cntryl_midge_storage::StorageBackend>),
             &hybrid_storage,
             CloudWalRecoveryMetadata {
                 catalog: &wal_catalog,
@@ -1345,7 +1371,7 @@ impl RuntimeStorageMaterialization {
             compaction_levels: opts.compaction_levels().clone(),
             wal_sync_floor: opts.amortized_sync_floor(),
             ttl_clock: opts.ttl_clock(),
-            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::Batched,
             wal_batch_config: batch_config,
             startup_observer: opts.startup_observer(),
             startup_scope: scope.cloned(),
@@ -1403,28 +1429,30 @@ mod authority_tests {
     #[test]
     fn should_preserve_registry_when_startup_validity_expires_before_ddl_cas() {
         // Arrange
-        let _guard = crate::failpoints::test_failpoint_guard();
+        let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let _scenario = fail::FailScenario::setup();
         let directory = tempfile::tempdir().unwrap();
-        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+            Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
             "startup-ddl-expiry".into(),
         ));
-        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
-                bucket: "startup-ddl-expiry".into(),
-                prefix: "test/".into(),
-            },
-            directory.path().join("lease"),
-            Arc::clone(&cloud),
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "startup-ddl-expiry".into(),
+                    prefix: "test/".into(),
+                },
+                directory.path().join("lease"),
+                Arc::clone(&cloud),
+            ),
+        );
         let validity = lease.lease_validity();
-        let lease_object: Arc<dyn crate::lease::PrimaryLease> = lease;
+        let lease_object: Arc<dyn cntryl_midge_durability::lease::PrimaryLease> = lease;
         let startup =
             StartupLease::acquire_for_test(lease_object, Some(Arc::clone(&validity))).unwrap();
-        let storage = crate::storage::HybridStorage::with_policy(
+        let storage = cntryl_midge_storage::HybridStorage::with_policy(
             cloud,
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
         let registry_key = crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY;
         assert!(storage
@@ -1451,18 +1479,18 @@ mod authority_tests {
 #[cfg(test)]
 mod bootstrap_cache_tests {
     use super::*;
-    use crate::io::{Fs, FsPath};
+    use cntryl_midge_core::io::{Fs, FsPath};
 
     fn cache(files: &[&str], directories: &[&str]) -> StartupStoragePath {
-        let root = Arc::new(crate::io::MockFs::new());
+        let root = Arc::new(cntryl_midge_core::io::MockFs::new());
         for directory in directories {
             root.create_dir_all(&FsPath::new(*directory)).unwrap();
         }
         for file in files {
             root.open(
                 &FsPath::new(*file),
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
+                cntryl_midge_core::io::OpenOptions {
+                    mode: cntryl_midge_core::io::OpenMode::ReadWrite,
                     create: true,
                     create_new: true,
                     truncate: false,
@@ -1519,8 +1547,8 @@ mod bootstrap_cache_tests {
         path.root
             .open(
                 &FsPath::new("wal/copied.wal"),
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
+                cntryl_midge_core::io::OpenOptions {
+                    mode: cntryl_midge_core::io::OpenMode::ReadWrite,
                     create: true,
                     create_new: true,
                     truncate: false,
@@ -1567,8 +1595,8 @@ mod shared_simulated_authority_tests {
         // Arrange
         let first_cache = tempfile::tempdir()?;
         let second_cache = tempfile::tempdir()?;
-        let backend: Arc<dyn crate::storage::cloud::CloudBackend> =
-            Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let backend: Arc<dyn cntryl_midge_storage::cloud::CloudBackend> =
+            Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new());
         let options = |path: &std::path::Path, millis| {
             OpenOptions::cloud_simulated(path, "shared", "takeover")
                 .object_store_for_testing(Arc::clone(&backend))

@@ -5,18 +5,18 @@ use super::merge::{
     CompactionEvent, CompactionStreamInputs, EventMergeIterator, TombstoneGcPolicy,
 };
 use super::{tombstone_is_obsolete, CompactionVersion};
-use crate::common::MidgeResult;
-use crate::io::FsError;
+use cntryl_midge_core::common::MidgeResult;
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_core::types::RangeTombstone;
 #[cfg(test)]
-use crate::sst::traits::RawSstVersionCursor;
-use crate::sst::traits::SstFactory;
-use crate::types::RangeTombstone;
+use cntryl_midge_core::types::{EntryType, KeyState};
 #[cfg(test)]
-use crate::types::{EntryType, KeyState};
+use cntryl_midge_table::sst::traits::RawSstVersionCursor;
+use cntryl_midge_table::sst::traits::SstFactory;
 use std::path::Path;
 
 struct OutputSetCleanup {
-    fs: std::sync::Arc<dyn crate::io::Fs>,
+    fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs>,
     paths: Vec<std::path::PathBuf>,
     armed: bool,
 }
@@ -24,11 +24,11 @@ struct OutputSetCleanup {
 struct FinishedPartition {
     name: String,
     path: std::path::PathBuf,
-    summary: Option<crate::sst::traits::FinalizedSst>,
+    summary: Option<cntryl_midge_table::sst::traits::FinalizedSst>,
 }
 
 impl OutputSetCleanup {
-    fn new(fs: std::sync::Arc<dyn crate::io::Fs>) -> Self {
+    fn new(fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs>) -> Self {
         Self {
             fs,
             paths: Vec::new(),
@@ -44,7 +44,7 @@ impl OutputSetCleanup {
         &mut self,
         finished: Option<FinishedPartition>,
         names: &mut Vec<String>,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
         sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
     ) -> MidgeResult<()> {
         if let Some(FinishedPartition {
@@ -75,10 +75,10 @@ impl Drop for OutputSetCleanup {
             return;
         }
         for path in &self.paths {
-            let result = crate::sst::fs::fs_relative_sst_path(&self.fs, path)
+            let result = cntryl_midge_table::sst::fs::fs_relative_sst_path(&self.fs, path)
                 .and_then(|fs_path| self.fs.remove_file(&fs_path).map_err(FsError::into_midge));
             match result {
-                Ok(()) | Err(crate::common::MidgeError::NotFound) => {}
+                Ok(()) | Err(cntryl_midge_core::common::MidgeError::NotFound) => {}
                 Err(error) => tracing::warn!(
                     file = %path.display(),
                     %error,
@@ -90,7 +90,7 @@ impl Drop for OutputSetCleanup {
 }
 
 fn add_partition_range_tombstones(
-    writer: &mut dyn crate::sst::traits::DynSstWriter,
+    writer: &mut dyn cntryl_midge_table::sst::traits::DynSstWriter,
     tombstones: &[&RangeTombstone],
     lower_bound: Option<&[u8]>,
     upper_bound: Option<&[u8]>,
@@ -126,7 +126,7 @@ struct PartitionIdentity {
 
 #[allow(clippy::too_many_arguments)]
 fn finish_partition(
-    mut writer: Box<dyn crate::sst::traits::DynSstWriter>,
+    mut writer: Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>,
     point_count: usize,
     retained_range_tombstones: &[&RangeTombstone],
     lower_bound: Option<&[u8]>,
@@ -135,7 +135,7 @@ fn finish_partition(
     output_dir: &Path,
     abort_check: Option<&dyn Fn() -> bool>,
     output_size_limit: Option<usize>,
-    output_fs: &std::sync::Arc<dyn crate::io::Fs>,
+    output_fs: &std::sync::Arc<dyn cntryl_midge_core::io::Fs>,
 ) -> MidgeResult<Option<FinishedPartition>> {
     ensure_compaction_not_aborted(abort_check)?;
     let tombstone_count = add_partition_range_tombstones(
@@ -150,7 +150,7 @@ fn finish_partition(
     }
     ensure_output_fits_local_staging(writer.as_ref(), output_size_limit)?;
     ensure_compaction_not_aborted(abort_check)?;
-    let name = crate::cloud_layout::compaction_file_name(
+    let name = cntryl_midge_core::cloud_layout::compaction_file_name(
         identity.cf_id,
         identity.target_level,
         identity.generation,
@@ -158,7 +158,7 @@ fn finish_partition(
     );
     let path = output_dir.join(&name);
     let summary = writer.finish_to_path_with_summary(&path)?;
-    let fs_path = crate::sst::fs::fs_relative_sst_path(output_fs, &path)?;
+    let fs_path = cntryl_midge_table::sst::fs::fs_relative_sst_path(output_fs, &path)?;
     let size = match output_fs.metadata(&fs_path) {
         Ok(metadata) => metadata.len,
         Err(error) => {
@@ -172,7 +172,7 @@ fn finish_partition(
         output_fs
             .remove_file(&fs_path)
             .map_err(FsError::into_midge)?;
-        return Err(crate::common::MidgeError::ResourceLimit(
+        return Err(cntryl_midge_core::common::MidgeError::ResourceLimit(
             "encoded compaction partition exceeds its local staging limit".into(),
         ));
     }
@@ -185,13 +185,13 @@ fn finish_partition(
 
 struct BudgetedEvent {
     event: CompactionEvent,
-    _reservation: crate::common::resource_budget::ResourceReservation,
+    _reservation: cntryl_midge_core::common::resource_budget::ResourceReservation,
 }
 
 impl BudgetedEvent {
     fn new(
         event: CompactionEvent,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Self> {
         let reservation = budget.reserve(event.retained_bytes(), "same-key event group")?;
         Ok(Self {
@@ -203,9 +203,9 @@ impl BudgetedEvent {
 
 fn reserve_tombstone(
     tombstone: &RangeTombstone,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     label: &'static str,
-) -> MidgeResult<crate::common::resource_budget::ResourceReservation> {
+) -> MidgeResult<cntryl_midge_core::common::resource_budget::ResourceReservation> {
     let retained_bytes = std::mem::size_of::<RangeTombstone>()
         .saturating_add(tombstone.start.capacity())
         .saturating_add(tombstone.end.capacity());
@@ -264,7 +264,7 @@ impl PartialOrd for ActiveTombstoneKey {
 /// the partition currently being encoded.
 #[derive(Clone, Copy)]
 struct PendingTombstoneBound<'a> {
-    writer: &'a dyn crate::sst::traits::DynSstWriter,
+    writer: &'a dyn cntryl_midge_table::sst::traits::DynSstWriter,
     lower_bound: Option<&'a [u8]>,
 }
 
@@ -276,7 +276,7 @@ struct PendingTombstoneBound<'a> {
 struct PartitionTombstones {
     entries: std::collections::BTreeMap<
         PartitionTombstoneKey,
-        crate::common::resource_budget::ResourceReservation,
+        cntryl_midge_core::common::resource_budget::ResourceReservation,
     >,
     encoded_bytes: usize,
     pending_bytes: usize,
@@ -326,7 +326,7 @@ impl PartitionTombstones {
     fn insert(
         &mut self,
         tombstone: &RangeTombstone,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
         label: &'static str,
         pending: Option<PendingTombstoneBound<'_>>,
     ) -> MidgeResult<()> {
@@ -355,11 +355,11 @@ impl PartitionTombstones {
 struct ActiveTombstones {
     live: std::collections::BTreeMap<
         ActiveTombstoneKey,
-        crate::common::resource_budget::ResourceReservation,
+        cntryl_midge_core::common::resource_budget::ResourceReservation,
     >,
     obsolete: std::collections::BTreeMap<
         ActiveTombstoneKey,
-        crate::common::resource_budget::ResourceReservation,
+        cntryl_midge_core::common::resource_budget::ResourceReservation,
     >,
 }
 
@@ -386,7 +386,7 @@ impl ActiveTombstones {
         &mut self,
         tombstone: &RangeTombstone,
         obsolete: bool,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<()> {
         if self.contains(tombstone) {
             return Ok(());
@@ -471,12 +471,12 @@ impl RangeTombstoneTracker {
         &mut self,
         tombstones: impl Iterator<Item = &'a RangeTombstone>,
         policy: TombstoneGcPolicy,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
         pending: Option<PendingTombstoneBound<'_>>,
     ) -> MidgeResult<()> {
         for tombstone in tombstones {
             if tombstone.start >= tombstone.end {
-                return Err(crate::common::MidgeError::Corruption(
+                return Err(cntryl_midge_core::common::MidgeError::Corruption(
                     "compaction observed an empty or inverted range tombstone".to_string(),
                 ));
             }
@@ -496,7 +496,7 @@ impl RangeTombstoneTracker {
     /// size accounting remain unchanged.
     fn carry_live_tombstones(
         &mut self,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
         pending: Option<PendingTombstoneBound<'_>>,
     ) -> MidgeResult<()> {
         let (active, partition) = (&self.active, &mut self.partition);
@@ -565,20 +565,20 @@ fn select_newest_version<'a>(
         if newer.seq != older.seq {
             continue;
         }
-        crate::types::resolve_same_sequence(
-            crate::types::VersionContent {
+        cntryl_midge_core::types::resolve_same_sequence(
+            cntryl_midge_core::types::VersionContent {
                 is_tombstone: newer.is_tombstone,
                 value: newer.value.as_deref(),
                 expiration: newer.expiration,
             },
-            crate::types::VersionContent {
+            cntryl_midge_core::types::VersionContent {
                 is_tombstone: older.is_tombstone,
                 value: older.value.as_deref(),
                 expiration: older.expiration,
             },
         )
-        .map_err(|()| {
-            crate::common::MidgeError::Corruption(format!(
+        .map_err(|_| {
+            cntryl_midge_core::common::MidgeError::Corruption(format!(
                 "conflicting compaction versions for key {:?} at sequence {}",
                 String::from_utf8_lossy(&older.key),
                 older.seq
@@ -625,17 +625,17 @@ fn encoded_tombstone_upper_bound(tombstone: &RangeTombstone) -> usize {
 }
 
 fn ensure_output_fits_local_staging(
-    writer: &dyn crate::sst::traits::DynSstWriter,
+    writer: &dyn cntryl_midge_table::sst::traits::DynSstWriter,
     limit: Option<usize>,
 ) -> MidgeResult<()> {
     if let Some(limit) = limit {
         let encoded_bound = writer.encoded_size_upper_bound().ok_or_else(|| {
-            crate::common::MidgeError::ResourceLimit(
+            cntryl_midge_core::common::MidgeError::ResourceLimit(
                 "compaction writer cannot bound its local output size".into(),
             )
         })?;
         if encoded_bound > limit {
-            return Err(crate::common::MidgeError::ResourceLimit(format!(
+            return Err(cntryl_midge_core::common::MidgeError::ResourceLimit(format!(
                 "compaction partition requires {encoded_bound} encoded bytes, exceeding local staging limit {limit}"
             )));
         }
@@ -644,7 +644,7 @@ fn ensure_output_fits_local_staging(
 }
 
 fn prospective_partition_size(
-    writer: &dyn crate::sst::traits::DynSstWriter,
+    writer: &dyn cntryl_midge_table::sst::traits::DynSstWriter,
     next_version: Option<&CompactionVersion>,
     pending_tombstone_bytes: usize,
 ) -> MidgeResult<usize> {
@@ -654,7 +654,7 @@ fn prospective_partition_size(
         None => writer.encoded_size_upper_bound(),
     }
     .ok_or_else(|| {
-        crate::common::MidgeError::ResourceLimit(
+        cntryl_midge_core::common::MidgeError::ResourceLimit(
             "compaction writer cannot bound its next local output".into(),
         )
     })?;
@@ -662,7 +662,7 @@ fn prospective_partition_size(
 }
 
 fn pending_tombstone_size<'a>(
-    writer: &dyn crate::sst::traits::DynSstWriter,
+    writer: &dyn cntryl_midge_table::sst::traits::DynSstWriter,
     tombstones: impl Iterator<Item = &'a RangeTombstone>,
     lower_bound: Option<&[u8]>,
 ) -> MidgeResult<usize> {
@@ -677,7 +677,7 @@ fn pending_tombstone_size<'a>(
         let growth = writer
             .additional_range_tombstone_size_upper_bound(start, &tombstone.end)
             .ok_or_else(|| {
-                crate::common::MidgeError::ResourceLimit(
+                cntryl_midge_core::common::MidgeError::ResourceLimit(
                     "compaction writer cannot bound pending range tombstones".into(),
                 )
             })?;
@@ -697,10 +697,13 @@ struct PartitionRoller<'a> {
     output_dir: &'a Path,
     identity: PartitionIdentity,
     target_sst_size: usize,
-    budget: &'a crate::common::resource_budget::ResourceBudget,
+    budget: &'a cntryl_midge_core::common::resource_budget::ResourceBudget,
     output_size_limit: Option<usize>,
-    writer: Option<Box<dyn crate::sst::traits::DynSstWriter>>,
-    partition_lower_bound: Option<(Vec<u8>, crate::common::resource_budget::ResourceReservation)>,
+    writer: Option<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>>,
+    partition_lower_bound: Option<(
+        Vec<u8>,
+        cntryl_midge_core::common::resource_budget::ResourceReservation,
+    )>,
     partition_point_count: usize,
 }
 
@@ -710,7 +713,7 @@ impl<'a> PartitionRoller<'a> {
         output_dir: &'a Path,
         identity: PartitionIdentity,
         target_sst_size: usize,
-        budget: &'a crate::common::resource_budget::ResourceBudget,
+        budget: &'a cntryl_midge_core::common::resource_budget::ResourceBudget,
         output_size_limit: Option<usize>,
     ) -> MidgeResult<Self> {
         Ok(Self {
@@ -726,7 +729,7 @@ impl<'a> PartitionRoller<'a> {
         })
     }
 
-    fn writer(&self) -> &dyn crate::sst::traits::DynSstWriter {
+    fn writer(&self) -> &dyn cntryl_midge_table::sst::traits::DynSstWriter {
         self.writer
             .as_deref()
             .expect("partition roller always owns a writer before finalization")
@@ -814,9 +817,9 @@ impl<'a> PartitionRoller<'a> {
                 version.value.as_deref(),
                 version.seq,
                 if version.is_tombstone {
-                    crate::types::EntryType::Delete
+                    cntryl_midge_core::types::EntryType::Delete
                 } else {
-                    crate::types::EntryType::Put
+                    cntryl_midge_core::types::EntryType::Put
                 },
                 version.expiration,
             )?;
@@ -835,7 +838,7 @@ impl<'a> PartitionRoller<'a> {
                 tombstones.partition_pending_bytes(),
             )?;
             if bound > limit {
-                return Err(crate::common::MidgeError::ResourceLimit(format!(
+                return Err(cntryl_midge_core::common::MidgeError::ResourceLimit(format!(
                     "indivisible compaction key group requires {bound} encoded bytes, exceeding local staging limit {limit}",
                 )));
             }
@@ -880,7 +883,7 @@ impl<'a> PartitionRoller<'a> {
         abort_check: Option<&dyn Fn() -> bool>,
     ) -> MidgeResult<(
         Option<FinishedPartition>,
-        crate::common::resource_budget::ResourceReservation,
+        cntryl_midge_core::common::resource_budget::ResourceReservation,
     )> {
         let boundary_reservation = self
             .budget
@@ -895,13 +898,13 @@ impl<'a> PartitionRoller<'a> {
     fn start_next_partition(
         &mut self,
         boundary_key: Vec<u8>,
-        boundary_reservation: crate::common::resource_budget::ResourceReservation,
+        boundary_reservation: cntryl_midge_core::common::resource_budget::ResourceReservation,
         tombstones: &mut RangeTombstoneTracker,
         partition_emitted: bool,
     ) -> MidgeResult<()> {
         if partition_emitted {
             self.identity.ordinal = self.identity.ordinal.checked_add(1).ok_or_else(|| {
-                crate::common::MidgeError::ResourceLimit(
+                cntryl_midge_core::common::MidgeError::ResourceLimit(
                     "compaction partition ordinal space exhausted".to_string(),
                 )
             })?;
@@ -929,7 +932,7 @@ impl<'a> PartitionRoller<'a> {
 fn collect_fragment_key_events(
     first: CompactionEvent,
     merged: &mut EventMergeIterator<'_>,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<Vec<BudgetedEvent>> {
     let mut events = vec![BudgetedEvent::new(first, budget)?];
     while merged
@@ -1017,14 +1020,14 @@ pub(crate) fn write_fragmented_compaction_outputs(
     plan: &crate::compaction::CompactionPlan,
     target_sst_size: usize,
     inputs: CompactionStreamInputs<'_>,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     abort_check: Option<&dyn Fn() -> bool>,
     output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
     output_size_limit: Option<usize>,
 ) -> MidgeResult<Vec<String>> {
     let crate::compaction::strategy::CompactionPurpose::Fragment { split_key } = &plan.purpose
     else {
-        return Err(crate::common::MidgeError::Corruption(
+        return Err(cntryl_midge_core::common::MidgeError::Corruption(
             "fragmentation requires a split boundary".into(),
         ));
     };
@@ -1038,7 +1041,7 @@ pub(crate) fn write_fragmented_compaction_outputs(
         .peek_event()
         .is_none_or(|first| first.key() >= split_key.as_slice())
     {
-        return Err(crate::common::MidgeError::Corruption(
+        return Err(cntryl_midge_core::common::MidgeError::Corruption(
             "fragment boundary is not inside its source bounds".into(),
         ));
     }
@@ -1097,7 +1100,7 @@ pub(crate) fn write_fragmented_compaction_outputs(
         )?;
     }
     if !has_key_after_cut {
-        return Err(crate::common::MidgeError::Corruption(
+        return Err(cntryl_midge_core::common::MidgeError::Corruption(
             "fragment boundary is not inside its source bounds".into(),
         ));
     }
@@ -1119,7 +1122,7 @@ fn collect_same_key_events(
     merged: &mut EventMergeIterator<'_>,
     first: CompactionEvent,
     key: &[u8],
-    budget: &crate::common::resource_budget::ResourceBudget,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     seen: &mut usize,
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<Vec<BudgetedEvent>> {
@@ -1164,7 +1167,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
     sst_factory: &dyn SstFactory,
     output_dir: &Path,
     inputs: CompactionStreamInputs<'_>,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     config: &PartitionOutputConfig<'_>,
     abort_check: Option<&dyn Fn() -> bool>,
     output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
@@ -1298,7 +1301,7 @@ fn finish_partitioned_outputs(
     tombstones: &RangeTombstoneTracker,
     mut cleanup: OutputSetCleanup,
     mut output_names: Vec<String>,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     abort_check: Option<&dyn Fn() -> bool>,
     output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
 ) -> MidgeResult<Vec<String>> {
@@ -1316,7 +1319,7 @@ fn finish_partitioned_outputs(
 
 fn require_compaction_input(merged: &EventMergeIterator<'_>) -> MidgeResult<()> {
     if merged.peek_event().is_none() {
-        return Err(crate::common::MidgeError::Internal(
+        return Err(cntryl_midge_core::common::MidgeError::Internal(
             "compaction produced no output; inputs were not replaced".to_string(),
         ));
     }
@@ -1330,7 +1333,7 @@ struct VersionMergeIterator<'a>(EventMergeIterator<'a>);
 impl VersionMergeIterator<'_> {
     fn new(
         cursors: Vec<RawSstVersionCursor>,
-        budget: crate::common::resource_budget::ResourceBudget,
+        budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Self> {
         let cursors = cursors
             .into_iter()
@@ -1349,7 +1352,7 @@ impl VersionMergeIterator<'_> {
                 CompactionEvent::RangeEnd(_)
                 | CompactionEvent::RangeStart(_)
                 | CompactionEvent::Boundary(_),
-            ) => Err(crate::common::MidgeError::Internal(
+            ) => Err(cntryl_midge_core::common::MidgeError::Internal(
                 "version-only test merge observed a range event".to_string(),
             )),
             None => Ok(None),

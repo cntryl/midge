@@ -16,7 +16,7 @@ pub(in crate::runtime::event_loop) struct PendingCloudSeal {
     ticket: crate::runtime::wal_transition::WalSealTicket,
     stage: Option<CloudSealStage>,
     plan: CloudSealPlan,
-    deadline: crate::common::OperationDeadline,
+    deadline: cntryl_midge_core::common::OperationDeadline,
     started: Instant,
     failed: bool,
     waiters: Vec<CloudSealWaiter>,
@@ -24,16 +24,16 @@ pub(in crate::runtime::event_loop) struct PendingCloudSeal {
 
 enum CloudSealStage {
     PrefixSync {
-        physical: crate::wal::traits::WalPendingSync,
-        expected: crate::wal::traits::WalSyncPrefix,
+        physical: cntryl_midge_durability::wal::traits::WalPendingSync,
+        expected: cntryl_midge_durability::wal::traits::WalSyncPrefix,
     },
     FooterAppend {
-        physical: crate::wal::footer_completion::WalPendingFooter,
+        physical: cntryl_midge_durability::wal::footer_completion::WalPendingFooter,
         prepared: crate::runtime::wal_history::PreparedRotation,
     },
     FooterSync {
-        physical: crate::wal::traits::WalPendingSync,
-        expected: crate::wal::traits::WalSyncPrefix,
+        physical: cntryl_midge_durability::wal::traits::WalPendingSync,
+        expected: cntryl_midge_durability::wal::traits::WalSyncPrefix,
         prepared: crate::runtime::wal_history::PreparedRotation,
     },
 }
@@ -47,8 +47,8 @@ struct CloudSealWaiter {
 impl EventLoop {
     pub(in crate::runtime::event_loop) fn start_cloud_seal_within(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<bool> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<bool> {
         let result = self.try_start_cloud_seal_within(deadline);
         if result.is_err() && self.pipeline.durability.cloud_seal_retry_needed() {
             self.pipeline.durability.defer_cloud_seal_retry();
@@ -58,8 +58,8 @@ impl EventLoop {
 
     fn try_start_cloud_seal_within(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<bool> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<bool> {
         if self.pipeline.pending_cloud_seal.is_some() {
             return Ok(true);
         }
@@ -83,7 +83,7 @@ impl EventLoop {
             }
         };
         if submitted_max != plan.expected_max_sequence {
-            let error = crate::common::MidgeError::Internal(
+            let error = cntryl_midge_core::common::MidgeError::Internal(
                 "CloudAsync seal prefix changed during sync admission".into(),
             );
             self.fence_wal_transition(&error, None);
@@ -103,11 +103,11 @@ impl EventLoop {
 
     pub(in crate::runtime::event_loop) fn start_cloud_seal_for_request(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
         request_id: u64,
         sequence: u64,
         wait_for_ack: bool,
-    ) -> crate::common::MidgeResult<bool> {
+    ) -> cntryl_midge_core::common::MidgeResult<bool> {
         let started = self.start_cloud_seal_within(deadline)?;
         if started {
             if let Some(pending) = self.pipeline.pending_cloud_seal.as_mut() {
@@ -141,7 +141,7 @@ impl EventLoop {
             return;
         };
         if !pending.failed && pending.deadline.is_expired() {
-            let error = crate::common::MidgeError::OutcomeUnknown(
+            let error = cntryl_midge_core::common::MidgeError::OutcomeUnknown(
                 "CloudAsync WAL seal deadline expired; admitted sync remains owned until completion".into(),
             );
             self.fence_wal_transition(&error, None);
@@ -201,8 +201,8 @@ impl EventLoop {
     fn progress_cloud_seal_prefix(
         &mut self,
         mut pending: PendingCloudSeal,
-        physical: crate::wal::traits::WalPendingSync,
-        expected: crate::wal::traits::WalSyncPrefix,
+        physical: cntryl_midge_durability::wal::traits::WalPendingSync,
+        expected: cntryl_midge_durability::wal::traits::WalSyncPrefix,
     ) {
         let Some(completion) = physical.try_complete() else {
             pending.stage = Some(CloudSealStage::PrefixSync { physical, expected });
@@ -266,7 +266,7 @@ impl EventLoop {
     fn progress_cloud_seal_footer_append(
         &mut self,
         mut pending: PendingCloudSeal,
-        physical: crate::wal::footer_completion::WalPendingFooter,
+        physical: cntryl_midge_durability::wal::footer_completion::WalPendingFooter,
         prepared: crate::runtime::wal_history::PreparedRotation,
     ) {
         let Some(completion) = physical.try_complete() else {
@@ -316,8 +316,8 @@ impl EventLoop {
     fn progress_cloud_seal_footer_sync(
         &mut self,
         mut pending: PendingCloudSeal,
-        physical: crate::wal::traits::WalPendingSync,
-        expected: crate::wal::traits::WalSyncPrefix,
+        physical: cntryl_midge_durability::wal::traits::WalPendingSync,
+        expected: cntryl_midge_durability::wal::traits::WalSyncPrefix,
         prepared: crate::runtime::wal_history::PreparedRotation,
     ) {
         let Some(completion) = physical.try_complete() else {
@@ -361,7 +361,7 @@ impl EventLoop {
     fn fail_cloud_seal_waiters(
         &mut self,
         waiters: Vec<CloudSealWaiter>,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         for waiter in waiters {
             self.respond(
@@ -377,19 +377,20 @@ impl EventLoop {
     fn finish_cloud_seal_upload(
         &mut self,
         plan: &CloudSealPlan,
-        deadline: crate::common::OperationDeadline,
+        deadline: cntryl_midge_core::common::OperationDeadline,
         started: Instant,
         waiters: Vec<CloudSealWaiter>,
     ) {
-        if crate::failpoints::is_active("midge::cloud::inject_fail_after_wal_rotate_before_enqueue")
-        {
+        if cntryl_midge_core::failpoints::is_active(
+            "midge::cloud::inject_fail_after_wal_rotate_before_enqueue",
+        ) {
             self.state.mark_persistence_anomaly();
             for waiter in waiters {
                 self.respond(
                     waiter.request_id,
                     crate::runtime::RuntimeResponse::Error {
                         request_id: waiter.request_id,
-                        error: crate::common::MidgeError::Internal(
+                        error: cntryl_midge_core::common::MidgeError::Internal(
                             "failpoint: cloud seal failed after WAL rotate before enqueue".into(),
                         ),
                     },
@@ -423,7 +424,7 @@ impl EventLoop {
                     waiter.request_id,
                     crate::runtime::RuntimeResponse::Error {
                         request_id: waiter.request_id,
-                        error: crate::common::MidgeError::Internal(format!(
+                        error: cntryl_midge_core::common::MidgeError::Internal(format!(
                         "sealed WAL segment through sequence {}, requested cloud durability for {}",
                         plan.expected_max_sequence, waiter.sequence
                     )),
@@ -460,15 +461,15 @@ impl EventLoop {
     #[cfg(test)]
     pub(crate) fn seal_current_cloud_segment(
         &mut self,
-    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+    ) -> cntryl_midge_core::common::MidgeResult<Option<(u64, u64)>> {
         let deadline = self.event_loop_cloud_deadline();
         self.seal_current_cloud_segment_within(&deadline)
     }
 
     pub(in crate::runtime::event_loop) fn seal_current_cloud_segment_within(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<Option<(u64, u64)>> {
         let result = self.try_seal_current_cloud_segment(deadline);
         if result.is_err() && self.pipeline.durability.cloud_seal_retry_needed() {
             self.pipeline.durability.defer_cloud_seal_retry();
@@ -478,8 +479,8 @@ impl EventLoop {
 
     fn try_seal_current_cloud_segment(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<Option<(u64, u64)>> {
         let Some(plan) = self.prepare_cloud_seal(deadline)? else {
             return Ok(None);
         };
@@ -507,7 +508,7 @@ impl EventLoop {
             }
         };
         if max_sequence != expected_max_sequence {
-            let error = crate::common::MidgeError::Internal(format!(
+            let error = cntryl_midge_core::common::MidgeError::Internal(format!(
                 "cloud WAL accounting changed during seal: expected max sequence {expected_max_sequence}, flushed {max_sequence}"
             ));
             self.fence_wal_transition(&error, None);
@@ -534,9 +535,9 @@ impl EventLoop {
 
         // From this point on the sealed file is a tracked obligation. Even a
         // lease or queue failure cannot make a later segment skip it.
-        crate::failpoints::fail_point!(
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::cloud::inject_fail_after_wal_rotate_before_enqueue",
-            |_| Err(crate::common::MidgeError::Internal(
+            |_| Err(cntryl_midge_core::common::MidgeError::Internal(
                 "failpoint: cloud seal failed after WAL rotate before enqueue".to_string(),
             ))
         );
@@ -554,14 +555,14 @@ impl EventLoop {
 
     fn prepare_cloud_seal(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<Option<CloudSealPlan>> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<Option<CloudSealPlan>> {
         if !self.actors.wal_actor.is_cloud_async() {
             return Ok(None);
         }
         if self.wal_group_in_flight() && !self.pipeline.wal_transition.is_fenced() {
             self.pipeline.durability.mark_cloud_seal_retry_needed();
-            return Err(crate::common::MidgeError::WriteStall(
+            return Err(cntryl_midge_core::common::MidgeError::WriteStall(
                 "CloudAsync WAL sealing is deferred while WAL work is in flight".into(),
             ));
         }
@@ -569,7 +570,7 @@ impl EventLoop {
         // already have recorded the rotation that fenced it.
         self.pipeline.wal_transition.ensure_ready()?;
         let Some(storage) = self.actors.cloud_coordinator.hybrid_storage.clone() else {
-            return Err(crate::common::MidgeError::Internal(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(
                 "CloudAsync requires HybridStorage".to_string(),
             ));
         };
@@ -577,7 +578,7 @@ impl EventLoop {
             return Ok(None);
         }
         if !self.actors.cloud_coordinator.cloud_wal.backlog().is_empty() {
-            return Err(crate::common::MidgeError::WriteStall(
+            return Err(cntryl_midge_core::common::MidgeError::WriteStall(
                 "older CloudAsync WAL segments are still awaiting upload admission".to_string(),
             ));
         }
@@ -588,7 +589,7 @@ impl EventLoop {
         let next_segment_id = self.state.wal.history.ledger().next_segment_id();
         let expected_max_sequence = self.actors.wal_actor.open_segment_max_sequence();
         if self.pipeline.durability.current_key() != segment_id {
-            let error = crate::common::MidgeError::Internal(format!(
+            let error = cntryl_midge_core::common::MidgeError::Internal(format!(
                 "durability generation drift: expected current key {segment_id}"
             ));
             self.fence_wal_transition(&error, None);
@@ -599,7 +600,7 @@ impl EventLoop {
         let existing_bytes = self
             .state
             .fs
-            .metadata(&crate::wal::segment_key(segment_id))
+            .metadata(&cntryl_midge_durability::wal::segment_key(segment_id))
             .map_or(0, |metadata| metadata.len);
         storage.ensure_wal_upload_capacity(existing_bytes.max(bytes_buffered))?;
         Ok(Some(CloudSealPlan {
@@ -620,7 +621,7 @@ impl EventLoop {
         &mut self,
         ticket: crate::runtime::wal_transition::WalSealTicket,
         receipt: crate::runtime::actors::wal::WalRotationReceipt,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if let Err(error) = self.try_commit_rotated_cloud_seal(&ticket, receipt) {
             self.finish_failed_cloud_seal_transition(receipt, &error);
             return Err(error);
@@ -636,16 +637,17 @@ impl EventLoop {
         &mut self,
         ticket: &crate::runtime::wal_transition::WalSealTicket,
         receipt: crate::runtime::actors::wal::WalRotationReceipt,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let segment_id = receipt.sealed_segment();
         let max_sequence = receipt.max_sequence();
         self.pipeline.wal_transition.note_sealed(ticket, receipt)?;
         WalTransitionBoundary::BeforeCoordinatorCommit.check()?;
         #[cfg(feature = "failpoints")]
-        if crate::failpoints::is_active("midge::cloud::inject_coordinator_drift_after_wal_rotation")
-        {
+        if cntryl_midge_core::failpoints::is_active(
+            "midge::cloud::inject_coordinator_drift_after_wal_rotation",
+        ) {
             let Some(drifted_generation) = receipt.next_segment().checked_add(100) else {
-                return Err(crate::common::MidgeError::ResourceLimit(
+                return Err(cntryl_midge_core::common::MidgeError::ResourceLimit(
                     "injected WAL coordinator generation overflow".to_string(),
                 ));
             };
@@ -685,7 +687,7 @@ impl EventLoop {
     pub(in crate::runtime::event_loop) fn finish_failed_cloud_seal_transition(
         &mut self,
         receipt: crate::runtime::actors::wal::WalRotationReceipt,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         let segment_id = receipt.sealed_segment();
         let max_sequence = receipt.max_sequence();
@@ -717,8 +719,8 @@ impl EventLoop {
     fn cancel_reversible_cloud_seal(
         &mut self,
         ticket: crate::runtime::wal_transition::WalSealTicket,
-        original_error: crate::common::MidgeError,
-    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        original_error: cntryl_midge_core::common::MidgeError,
+    ) -> cntryl_midge_core::common::MidgeResult<Option<(u64, u64)>> {
         if let Err(cancel_error) = self.actors.wal_actor.cancel_reversible_cloud_flush(&ticket) {
             let segment_id = ticket.segment_id();
             self.fence_wal_transition(&cancel_error, None);
@@ -732,10 +734,10 @@ impl EventLoop {
     // The failpoint expands to an early return only with the `failpoints`
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
-    fn after_cloud_flush_boundary() -> crate::common::MidgeResult<()> {
-        crate::failpoints::fail_point!(
+    fn after_cloud_flush_boundary() -> cntryl_midge_core::common::MidgeResult<()> {
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::cloud::inject_fail_after_wal_flush_before_rotate",
-            |_| Err(crate::common::MidgeError::Internal(
+            |_| Err(cntryl_midge_core::common::MidgeError::Internal(
                 "failpoint: cloud seal failed after WAL flush before rotate".to_string(),
             ))
         );
@@ -744,13 +746,13 @@ impl EventLoop {
 
     pub(in crate::runtime::event_loop) fn try_drain_cloud_wal_upload_backlog_within(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let Some(storage) = self.actors.cloud_coordinator.hybrid_storage.clone() else {
             if self.actors.cloud_coordinator.cloud_wal.backlog().is_empty() {
                 return Ok(());
             }
-            return Err(crate::common::MidgeError::Internal(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(
                 "CloudAsync WAL upload backlog requires HybridStorage".to_string(),
             ));
         };
@@ -778,13 +780,13 @@ impl EventLoop {
             else {
                 return Ok(());
             };
-            let source = crate::io::FsLocation::new(
+            let source = cntryl_midge_core::io::FsLocation::new(
                 std::sync::Arc::clone(&self.state.fs),
-                crate::wal::segment_key(segment_id),
+                cntryl_midge_durability::wal::segment_key(segment_id),
             );
             let resource = match storage.enqueue_wal_segment(&source, segment_id, max_sequence) {
                 Ok(resource) => resource,
-                Err(crate::common::MidgeError::WriteStall(_)) => {
+                Err(cntryl_midge_core::common::MidgeError::WriteStall(_)) => {
                     // Capacity remains owned by already admitted uploads. Keep
                     // this segment in the runtime backlog and avoid repeatedly
                     // paying lease validation and WAL readback while the queue
@@ -812,17 +814,17 @@ impl EventLoop {
     /// writer owes the cloud fills the upload queue's limits.
     pub(in crate::runtime::event_loop) fn check_cloud_wal_admission(
         &self,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if !self.actors.wal_actor.is_cloud_async() {
             return Ok(());
         }
         let Some(storage) = &self.actors.cloud_coordinator.hybrid_storage else {
-            return Err(crate::common::MidgeError::Internal(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(
                 "CloudAsync requires HybridStorage".to_string(),
             ));
         };
         if !self.actors.cloud_coordinator.cloud_wal.backlog().is_empty() {
-            return Err(crate::common::MidgeError::WriteStall(
+            return Err(cntryl_midge_core::common::MidgeError::WriteStall(
                 "CloudAsync WAL recovery uploads are still draining".to_string(),
             ));
         }
@@ -830,14 +832,15 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog(&mut self) {
-        let deadline =
-            crate::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout);
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+            self.routing.runtime_response_timeout,
+        );
         self.drain_cloud_wal_upload_backlog_within(&deadline);
     }
 
     pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog_within(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) {
         if let Err(error) = self.try_drain_cloud_wal_upload_backlog_within(deadline) {
             self.actors

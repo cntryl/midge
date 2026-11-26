@@ -1,0 +1,253 @@
+use super::{KeyState, SstFileIo, SstPointReadStats};
+#[cfg(any(test, feature = "internal-testing"))]
+use bytes::Bytes;
+use cntryl_midge_core::common::MidgeResult;
+
+impl SstFileIo {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub(crate) fn get_state_at_with_time_and_stats(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+        now_millis: u64,
+    ) -> MidgeResult<(cntryl_midge_core::types::KeyState, SstPointReadStats)> {
+        let (raw_state, read_stats) = self.get_raw_state_at_with_stats(key, snapshot_seq)?;
+        let visible_state = match raw_state {
+            KeyState::Value(_, sequence, expiration, _)
+                if cntryl_midge_core::common::time::is_expired_at(expiration, now_millis) =>
+            {
+                KeyState::Tombstone(sequence)
+            }
+            other_state => other_state,
+        };
+        Ok((visible_state, read_stats))
+    }
+
+    pub fn get_raw_state_at_with_stats(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> MidgeResult<(cntryl_midge_core::types::KeyState, SstPointReadStats)> {
+        if self.key_outside_persisted_range(key) {
+            return Ok((KeyState::Absent, SstPointReadStats::default()));
+        }
+
+        let mut best_state = KeyState::Absent;
+        let index = self.index_entries()?;
+        let mut blocks_read = 1u64;
+        let mut entries_decoded = 0_u64;
+
+        let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
+        self.diagnostics
+            .sst_metrics()
+            .record_candidate_blocks_checked(candidate_blocks.len());
+
+        for (idx, handle) in candidate_blocks {
+            if !self.check_block_bloom(idx, key) {
+                continue;
+            }
+
+            blocks_read = blocks_read.saturating_add(1);
+            let block_data = self.read_cached_data_block(&handle)?;
+            let (decoded, complete) =
+                self.merge_key_run_from_block(&block_data, key, snapshot_seq, &mut best_state)?;
+            entries_decoded += decoded;
+            // Later candidate blocks hold only older versions or other keys.
+            if complete {
+                break;
+            }
+        }
+
+        Ok((
+            best_state,
+            SstPointReadStats {
+                sst_touched: true,
+                blocks_read,
+                entries_decoded,
+            },
+        ))
+    }
+}
+
+impl crate::sst::SstStateReader for SstFileIo {
+    fn raw_version_cursor_with_budget(
+        self: Box<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        budget: Option<cntryl_midge_core::common::resource_budget::ResourceBudget>,
+    ) -> MidgeResult<crate::sst::traits::RawSstVersionCursor> {
+        let reader: std::sync::Arc<Self> = self.into();
+        Ok(Box::new(super::SstRawVersionScan::new(
+            reader, start, end, budget,
+        )?))
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn scan_range_raw_state(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<Vec<(Bytes, cntryl_midge_core::types::KeyState)>> {
+        if self.range_outside_persisted_bounds(start, end) {
+            return Ok(Vec::new());
+        }
+        let index = self.index_entries()?;
+        let mut result = Vec::new();
+        let Some(span) = self.block_span(index.as_ref(), start, end) else {
+            return Ok(result);
+        };
+        for handle in span.map(|block| index.handle(block)) {
+            let block_data = self.read_cached_data_block(&handle)?;
+            let decoded = self.decode_scan_block(&block_data)?;
+            for index in 0..decoded.len() {
+                let entry = decoded.entry(index);
+                if start.is_some_and(|bound| entry.key.as_ref() < bound)
+                    || end.is_some_and(|bound| entry.key.as_ref() >= bound)
+                {
+                    continue;
+                }
+                let key = entry.key.clone();
+                result.push((key, Self::state_from_scan_entry(entry)));
+            }
+        }
+        Ok(result)
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn get_state(&self, key: &[u8]) -> MidgeResult<cntryl_midge_core::types::KeyState> {
+        if self.key_outside_persisted_range(key) {
+            return Ok(cntryl_midge_core::types::KeyState::Absent);
+        }
+
+        let mut best_state = KeyState::Absent;
+        let index = self.index_entries()?;
+
+        let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
+        self.diagnostics
+            .sst_metrics()
+            .record_candidate_blocks_checked(candidate_blocks.len());
+
+        for (_idx, handle) in candidate_blocks {
+            let block_data = self.read_cached_data_block(&handle)?;
+            let candidate = self.key_state_from_encoded_block(&block_data, key, u64::MAX)?;
+            Self::merge_newer_state(&mut best_state, candidate)?;
+        }
+
+        let now_millis = cntryl_midge_core::common::time::unix_time_millis();
+        Ok(match best_state {
+            KeyState::Value(_, sequence, expiration, _)
+                if cntryl_midge_core::common::time::is_expired_at(expiration, now_millis) =>
+            {
+                KeyState::Tombstone(sequence)
+            }
+            state => state,
+        })
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn get_state_at_with_time(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+        now_millis: u64,
+    ) -> MidgeResult<cntryl_midge_core::types::KeyState> {
+        self.get_state_at_with_time_and_stats(key, snapshot_seq, now_millis)
+            .map(|(state, _stats)| state)
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn get_state_at(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> MidgeResult<cntryl_midge_core::types::KeyState> {
+        let now_millis = cntryl_midge_core::common::time::unix_time_millis();
+        self.get_state_at_with_time(key, snapshot_seq, now_millis)
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn scan_range_state_with_time(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        now_millis: u64,
+    ) -> MidgeResult<Vec<(Bytes, cntryl_midge_core::types::KeyState)>> {
+        if self.range_outside_persisted_bounds(start, end) {
+            return Ok(Vec::new());
+        }
+
+        let index = self.index_entries()?;
+        let mut result = Vec::new();
+
+        let Some(span) = self.block_span(index.as_ref(), start, end) else {
+            return Ok(Vec::new());
+        };
+
+        self.diagnostics
+            .sst_metrics()
+            .record_candidate_blocks_checked(span.clone().count());
+
+        for handle in span.map(|block| index.handle(block)) {
+            let block_data = self.read_cached_data_block(&handle)?;
+            let decoded = self.decode_scan_block(&block_data)?;
+            for index in 0..decoded.len() {
+                let entry = decoded.entry(index);
+                if start.is_some_and(|bound| entry.key.as_ref() < bound)
+                    || end.is_some_and(|bound| entry.key.as_ref() >= bound)
+                {
+                    continue;
+                }
+                let key = entry.key.clone();
+                let state =
+                    if cntryl_midge_core::common::time::is_expired_at(entry.expiration, now_millis)
+                    {
+                        KeyState::Tombstone(entry.sequence)
+                    } else {
+                        Self::state_from_scan_entry(entry)
+                    };
+                result.push((key, state));
+            }
+        }
+
+        Ok(result)
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn scan_range_state(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<Vec<(Bytes, cntryl_midge_core::types::KeyState)>> {
+        let now_millis = cntryl_midge_core::common::time::unix_time_millis();
+        self.scan_range_state_with_time(start, end, now_millis)
+    }
+
+    fn range_tombstones(&self) -> Vec<cntryl_midge_core::types::RangeTombstone> {
+        self.range_tombstones.clone()
+    }
+
+    fn max_covering_tombstone_seq(&self, key: &[u8], snapshot_seq: u64) -> Option<u64> {
+        match &self.range_tombstone_index {
+            Some(index) => index.max_covering_seq(key, snapshot_seq),
+            None => crate::memtable::max_covering_seq(&self.range_tombstones, key, snapshot_seq),
+        }
+    }
+
+    fn range_tombstone_memory_usage(&self) -> usize {
+        let index_bytes = self.range_tombstone_index.as_ref().map_or(
+            0,
+            crate::memtable::range_tombstone_index::FragmentedRangeTombstones::memory_usage,
+        );
+        self.range_tombstones.iter().fold(
+            self.range_tombstones
+                .len()
+                .saturating_mul(std::mem::size_of::<cntryl_midge_core::types::RangeTombstone>())
+                .saturating_add(index_bytes),
+            |total, tombstone| {
+                total
+                    .saturating_add(tombstone.start.capacity())
+                    .saturating_add(tombstone.end.capacity())
+            },
+        )
+    }
+}

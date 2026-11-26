@@ -1,8 +1,8 @@
 //! Production Background owners sharing one real conditional metadata provider.
 
 use super::*;
-use crate::lease::PrimaryLease as _;
-use crate::storage::cloud::{CloudBackend, CloudCallback, CloudStorage, MockCloudBackend};
+use cntryl_midge_durability::lease::PrimaryLease as _;
+use cntryl_midge_storage::cloud::{CloudBackend, CloudCallback, CloudStorage, MockCloudBackend};
 
 struct HeldPut {
     entered: crossbeam::channel::Sender<Instant>,
@@ -28,10 +28,10 @@ struct MetadataProvider {
     held: AtomicBool,
 }
 
-impl crate::storage::cloud::CloudReadCapability for MetadataProvider {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+impl cntryl_midge_storage::cloud::CloudReadCapability for MetadataProvider {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
 }
-impl crate::storage::cloud::CloudWriteCapability for MetadataProvider {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for MetadataProvider {
     fn submit_put(
         &self,
         key: &str,
@@ -61,7 +61,7 @@ impl crate::storage::cloud::CloudWriteCapability for MetadataProvider {
             let actual = received.recv_timeout(Duration::from_secs(5)).unwrap();
             assert!(matches!(
                 actual,
-                crate::storage::cloud::CloudEvent::Put { result: Ok(()), .. }
+                cntryl_midge_storage::cloud::CloudEvent::Put { result: Ok(()), .. }
             ));
             self.held.store(true, Ordering::Release);
             pointer.gate.entered.send(Instant::now()).unwrap();
@@ -78,14 +78,14 @@ impl crate::storage::cloud::CloudWriteCapability for MetadataProvider {
         self.inner.submit_put(key, bytes, headers, callback);
     }
 }
-impl crate::storage::cloud::CloudDeleteCapability for MetadataProvider {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for MetadataProvider {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_delete);
 }
-impl crate::storage::cloud::CloudListCapability for MetadataProvider {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+impl cntryl_midge_storage::cloud::CloudListCapability for MetadataProvider {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_list);
 }
-impl crate::storage::cloud::CloudHeadCapability for MetadataProvider {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+impl cntryl_midge_storage::cloud::CloudHeadCapability for MetadataProvider {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_head);
 }
 impl CloudBackend for MetadataProvider {}
 
@@ -109,8 +109,8 @@ struct Fixture {
     messages: crossbeam::channel::Receiver<RuntimeMsg>,
     provider: Arc<MetadataProvider>,
     metadata: Arc<CloudStorage>,
-    lease: Arc<crate::lease::CloudStorageLease>,
-    _guard: crate::lease::LeaseGuard,
+    lease: Arc<cntryl_midge_durability::lease::CloudStorageLease>,
+    _guard: cntryl_midge_durability::lease::LeaseGuard,
 }
 
 impl Fixture {
@@ -148,14 +148,14 @@ impl Fixture {
         self.el.handle_flush_worker_result(published);
         fail::remove("midge::manifest::inject_no_space_on_append_edit_batch");
         self.el.state.retry_metadata_reload()?;
-        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+        let intents = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
             &self.el.state.fs,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
         assert!(intents.iter().any(|intent| matches!(
             intent,
-            crate::runtime::IntentLogEntry::FlushPublish {
-                phase: crate::runtime::PublicationPhase::OutputDurable,
+            cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish {
+                phase: cntryl_midge_durability::metadata::intent::PublicationPhase::OutputDurable,
                 ..
             }
         )));
@@ -173,7 +173,7 @@ impl Fixture {
             .retain(|file| file.cf_id == 0);
         original.state.sequence = test_flush_frontier(&original.state.manifest, 0);
         original.state.applied_sequence = original.state.sequence;
-        crate::metadata::ManifestPersistence::save_with_fs(
+        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
             &original.state.fs,
             &original.state.manifest,
         )
@@ -195,14 +195,16 @@ impl Fixture {
             String::new(),
             Duration::from_secs(5),
         ));
-        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: "overlap".into(),
-            },
-            original.state.db_path.clone(),
-            Arc::clone(&metadata),
-        ));
+        let lease = Arc::new(
+            cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+                cntryl_midge_durability::lease::CloudLeaseConfig {
+                    bucket: "test".into(),
+                    prefix: "overlap".into(),
+                },
+                original.state.db_path.clone(),
+                Arc::clone(&metadata),
+            ),
+        );
         let guard = Arc::clone(&lease)
             .try_acquire()
             .map_err(|error| error.into_validation_error("overlap lease"))?;
@@ -226,14 +228,16 @@ impl Fixture {
             _guard: guard,
             ..
         } = Self::new()?;
-        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        let deadline =
+            cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
         original.drain_metadata_mirror_within(&deadline)?;
-        let root: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
-        root.create_dir_all(&crate::io::FsPath::new("sst"))
+        let root: Arc<dyn cntryl_midge_core::io::Fs> =
+            Arc::new(cntryl_midge_core::io::MockFs::new());
+        root.create_dir_all(&cntryl_midge_core::io::FsPath::new("sst"))
             .map_err(FsError::into_midge)?;
-        for name in crate::metadata::files::CLOUD_MIRRORED {
-            let path = crate::io::FsPath::new(*name);
-            match crate::io::read_all(original.state.fs.as_ref(), &path) {
+        for name in cntryl_midge_durability::metadata::files::CLOUD_MIRRORED {
+            let path = cntryl_midge_core::io::FsPath::new(*name);
+            match cntryl_midge_core::io::read_all(original.state.fs.as_ref(), &path) {
                 Ok(bytes) => write_controlled_file(&root, &path, bytes)?,
                 Err(FsError::NotFound(_)) => {}
                 Err(error) => return Err(error.into_midge()),
@@ -244,10 +248,10 @@ impl Fixture {
             let bytes = read_remote_sst(&original, &file.name)?.expect("seeded authoritative SST");
             write_controlled_file(
                 &root,
-                &crate::sst::fs::sst_key(&file.name),
+                &cntryl_midge_table::sst::fs::sst_key(&file.name),
                 bytes.clone().into(),
             )?;
-            crate::storage::cloud::BlockingCloud::new(&data, &deadline).put_with_headers(
+            cntryl_midge_storage::cloud::BlockingCloud::new(&data, &deadline).put_with_headers(
                 &format!("sst/{}", file.name),
                 bytes,
                 Vec::new(),
@@ -257,7 +261,7 @@ impl Fixture {
             std::path::Path::new(""),
             false,
             root,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
             crate::runtime::state::RecoveryWal::Replay {
                 writer_epoch: lease.epoch(),
             },
@@ -269,9 +273,9 @@ impl Fixture {
             "durable publication paths stay enabled"
         );
         drop(original);
-        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+        let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
             data,
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::clone(&hybrid))
             .fence_cloud_wal_catalog(lease.epoch())?;
@@ -280,13 +284,13 @@ impl Fixture {
 
     fn from_parts(
         state: crate::runtime::RuntimeState,
-        hybrid: Arc<crate::storage::HybridStorage>,
+        hybrid: Arc<cntryl_midge_storage::HybridStorage>,
         provider: Arc<MetadataProvider>,
         metadata: Arc<CloudStorage>,
-        lease: Arc<crate::lease::CloudStorageLease>,
-        guard: crate::lease::LeaseGuard,
+        lease: Arc<cntryl_midge_durability::lease::CloudStorageLease>,
+        guard: cntryl_midge_durability::lease::LeaseGuard,
     ) -> MidgeResult<Self> {
-        let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        let reads = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
             Arc::clone(&state.fs),
             hybrid.remote_sst_backend(),
             Duration::from_secs(5),
@@ -343,7 +347,8 @@ impl Fixture {
         );
         families.sort_unstable();
         families.dedup();
-        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        let deadline =
+            cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
         for cf_id in families {
             while self
                 .el
@@ -355,7 +360,8 @@ impl Fixture {
                 .unwrap_or(0)
                 <= 1024
             {
-                crate::common::DeadlineScope::new(deadline).check("fixture name coverage")?;
+                cntryl_midge_core::common::DeadlineScope::new(deadline)
+                    .check("fixture name coverage")?;
                 if !self
                     .el
                     .actors
@@ -497,14 +503,14 @@ impl Fixture {
         pending_compaction: bool,
     ) -> MidgeResult<std::collections::BTreeSet<String>> {
         let names = if pending_compaction {
-            crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+            cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
                 &self.el.state.fs,
-                crate::config::RecoveryPolicy::Strict,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
             )?
             .into_iter()
             .filter_map(|intent| match intent {
-                crate::runtime::IntentLogEntry::CompactionPublish {
-                    phase: crate::runtime::PublicationPhase::OutputDurable,
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish {
+                    phase: cntryl_midge_durability::metadata::intent::PublicationPhase::OutputDurable,
                     added,
                     ..
                 } => Some(added),
@@ -528,20 +534,21 @@ impl Fixture {
     fn assert_cloud_restart(&self, pending_compaction: bool) -> MidgeResult<()> {
         let held_outputs = self.held_output_names(pending_compaction)?;
         let cold = tempfile::tempdir()?;
-        let fs = crate::io::real::test_root(cold.path());
+        let fs = cntryl_midge_core::io::real::test_root(cold.path());
         let store = self.lease.get_leader_store().unwrap();
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             &self.metadata,
             store.as_ref(),
             &fs,
             cold.path(),
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
-        let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-            &fs,
-            crate::config::RecoveryPolicy::Strict,
-        )
-        .map_err(MidgeError::Internal)?;
+        let manifest =
+            cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
+                &fs,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
+            )
+            .map_err(MidgeError::Internal)?;
         assert!(
             manifest
                 .files
@@ -549,15 +556,15 @@ impl Fixture {
                 .all(|file| !held_outputs.contains(&file.name)),
             "unselected compaction outputs cannot become authoritative during hydration"
         );
-        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+        let intents = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy(
             &fs,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )
         .map_err(MidgeError::Internal)?;
         assert_eq!(
             intents.iter().any(|intent| matches!(
                 intent,
-                crate::runtime::IntentLogEntry::CompactionPublish { .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish { .. }
             )),
             pending_compaction
         );
@@ -582,11 +589,12 @@ impl Fixture {
                 .background_compaction(false)
                 .build()?,
         )?;
-        let recovered = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-            &fs,
-            crate::config::RecoveryPolicy::Strict,
-        )
-        .map_err(MidgeError::Internal)?;
+        let recovered =
+            cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
+                &fs,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
+            )
+            .map_err(MidgeError::Internal)?;
         assert!(
             recovered
                 .files
@@ -621,14 +629,14 @@ impl Fixture {
 }
 
 fn write_controlled_file(
-    root: &Arc<dyn crate::io::Fs>,
-    path: &crate::io::FsPath,
+    root: &Arc<dyn cntryl_midge_core::io::Fs>,
+    path: &cntryl_midge_core::io::FsPath,
     bytes: Bytes,
 ) -> MidgeResult<()> {
     root.open(
         path,
-        crate::io::OpenOptions {
-            mode: crate::io::OpenMode::ReadWrite,
+        cntryl_midge_core::io::OpenOptions {
+            mode: cntryl_midge_core::io::OpenMode::ReadWrite,
             create: true,
             create_new: true,
             truncate: false,
@@ -649,9 +657,9 @@ fn read_remote_sst(el: &EventLoop, name: &str) -> MidgeResult<Option<Vec<u8>>> {
         .remote_sst_backend();
     let (sent, received) = std::sync::mpsc::channel();
     backend.submit_metadata_read_request(
-        crate::storage::StorageRequest::new(
+        cntryl_midge_storage::StorageRequest::new(
             format!("sst/{name}"),
-            crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+            cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5)),
             Duration::from_secs(5),
         ),
         sent,
@@ -669,17 +677,15 @@ fn read_remote_sst(el: &EventLoop, name: &str) -> MidgeResult<Option<Vec<u8>>> {
 #[test]
 fn should_finish_flush_retry_when_earlier_capture_retains_its_failed_manifest_intent(
 ) -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let _scenario = fail::FailScenario::setup();
     // Arrange: an actual upload succeeds, but its manifest journal append
     // fails. A different admitted metadata owner captures that durable intent.
     let mut fixture = Fixture::new()?;
     let flush_id = fixture.fail_flush_manifest_after_actual_upload()?;
-    fixture
-        .el
-        .drain_metadata_mirror_within(&crate::common::OperationDeadline::from_budget(
-            Duration::from_secs(5),
-        ))?;
+    fixture.el.drain_metadata_mirror_within(
+        &cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+    )?;
     let (entered, arrived) = crossbeam::channel::bounded(1);
     let (release, resumed) = crossbeam::channel::bounded(1);
     *fixture.provider.next_manifest.lock().unwrap() = Some(HeldPut {
@@ -691,7 +697,7 @@ fn should_finish_flush_retry_when_earlier_capture_retains_its_failed_manifest_in
         crate::runtime::event_loop::metadata_mirror::MirrorContinuation::Auxiliary {
             context: "captured failed flush publication".into(),
         },
-        crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+        cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5)),
     )?;
     arrived.recv_timeout(Duration::from_secs(2)).unwrap();
 
@@ -716,19 +722,19 @@ fn should_finish_flush_retry_when_earlier_capture_retains_its_failed_manifest_in
             .capture_control_cut(
                 &fixture.el.state.fs,
                 fixture.el.state.writer_epoch,
-                &crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+                &cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(1)),
             );
         if let Err(error) = capture {
             eprintln!("failed flush retry coverage: {error}");
         }
-        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+        let intents = cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy_typed(
             &fixture.el.state.fs,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
         assert!(
             !intents.iter().any(|intent| matches!(
                 intent,
-                crate::runtime::IntentLogEntry::FlushPublish { .. }
+                cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish { .. }
             )),
             "the retry actually cleared its original durable flush intent"
         );
@@ -740,11 +746,9 @@ fn should_finish_flush_retry_when_earlier_capture_retains_its_failed_manifest_in
     fixture.assert_rows()?;
     fixture.assert_cloud_restart(false)?;
     held.release();
-    fixture
-        .el
-        .drain_metadata_mirror_within(&crate::common::OperationDeadline::from_budget(
-            Duration::from_secs(5),
-        ))?;
+    fixture.el.drain_metadata_mirror_within(
+        &cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+    )?;
     fixture.assert_rows()?;
     Ok(())
 }
@@ -791,7 +795,7 @@ fn verify_held_publication(kind: HoldKind) -> MidgeResult<()> {
     let _fixture = LATENCY_FIXTURE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         let evidence = exercise_held_publication(Fixture::controlled()?, kind)?;
         assert!(
             evidence.acknowledged < Duration::from_millis(100),
@@ -804,7 +808,7 @@ fn verify_held_publication(kind: HoldKind) -> MidgeResult<()> {
 }
 
 fn verify_real_held_publication(kind: HoldKind) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         exercise_held_publication(Fixture::new()?, kind).map(|_| ())
     })
 }
@@ -829,7 +833,7 @@ struct FlushWork {
     build_ns: u64,
     publish_ns: u64,
     retries: u64,
-    metadata: crate::metadata::accounting::Snapshot,
+    metadata: cntryl_midge_durability::metadata::accounting::Snapshot,
 }
 
 impl FlushWork {
@@ -854,8 +858,8 @@ impl FlushWork {
             Ok(delta) => {
                 let counters = &delta
                     .bucket(
-                        crate::metadata::accounting::Origin::CloudFlush,
-                        crate::metadata::accounting::Medium::Persistent,
+                        cntryl_midge_durability::metadata::accounting::Origin::CloudFlush,
+                        cntryl_midge_durability::metadata::accounting::Medium::Persistent,
                     )
                     .counters;
                 eprintln!(
@@ -1025,16 +1029,16 @@ fn assert_settled_publication(
             .pending_captures(),
         0
     );
-    assert!(!crate::runtime::IntentPersistence::load_with_fs_and_policy(
+    assert!(!cntryl_midge_durability::metadata::intent_persistence::IntentPersistence::load_with_fs_and_policy(
         &fixture.el.state.fs,
-        crate::config::RecoveryPolicy::Strict
+        cntryl_midge_durability::RecoveryPolicy::Strict
     )
     .unwrap()
     .iter()
     .any(|intent| matches!(
         intent,
-        crate::runtime::IntentLogEntry::FlushPublish { .. }
-            | crate::runtime::IntentLogEntry::CompactionPublish { .. }
+        cntryl_midge_durability::metadata::intent::IntentLogEntry::FlushPublish { .. }
+            | cntryl_midge_durability::metadata::intent::IntentLogEntry::CompactionPublish { .. }
     )));
     fixture.assert_rows()?;
     fixture.assert_cloud_restart(false)?;

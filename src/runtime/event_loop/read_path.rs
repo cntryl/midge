@@ -14,13 +14,13 @@ impl EventLoop {
     /// Create an immutable read snapshot for a column family
     pub(super) fn create_read_snapshot(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> Option<super::super::ReadSnapshot> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
         let sst_view = self.state.manifest.read_view_for(cf_id);
 
-        let sst_path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
+        let sst_path_prefix = std::path::PathBuf::from(cntryl_midge_table::sst::fs::SST_DIR);
         let snapshot = super::super::ReadSnapshot::new_with_view_resources(
             cf_id,
             cf_state.memtable.clone(),
@@ -42,7 +42,7 @@ impl EventLoop {
     pub(super) fn is_sequence_durable(
         &self,
         sequence: u64,
-        requested_durability: crate::types::ReadDurability,
+        requested_durability: cntryl_midge_core::types::ReadDurability,
     ) -> bool {
         crate::runtime::durability::DurabilityCoordinator::is_durable(
             sequence,
@@ -57,10 +57,10 @@ impl EventLoop {
     pub(super) fn handle_msg_read(
         &self,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64,
-        requested_durability: crate::types::ReadDurability,
+        requested_durability: cntryl_midge_core::types::ReadDurability,
     ) {
         let visible_up_to = sequence;
 
@@ -88,11 +88,11 @@ impl EventLoop {
     pub(super) fn handle_msg_range_scan(
         &self,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64,
-        requested_durability: crate::types::ReadDurability,
+        requested_durability: cntryl_midge_core::types::ReadDurability,
     ) {
         let visible_up_to = sequence;
 
@@ -125,7 +125,7 @@ impl EventLoop {
     #[cfg(test)]
     pub(super) fn handle_read(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: &[u8],
         seq: u64,
     ) -> Option<Vec<u8>> {
@@ -153,16 +153,16 @@ mod tests {
     use super::super::tests::create_test_event_loop;
     use super::super::EventLoop;
     use crate::runtime::{state::RuntimeState, ResponseRouter};
-    use crate::sst::traits::SstFactory;
-    use crate::types::EntryType;
+    use cntryl_midge_core::types::EntryType;
+    use cntryl_midge_table::sst::traits::SstFactory;
     use std::sync::Arc;
 
     struct FakeReader;
 
-    impl crate::sst::traits::SstStateReader for FakeReader {
-        crate::sst::traits::test_reader_required_methods!();
+    impl cntryl_midge_table::sst::traits::SstStateReader for FakeReader {
+        cntryl_midge_table::sst::traits::test_reader_required_methods!();
 
-        fn range_tombstones(&self) -> Vec<crate::types::RangeTombstone> {
+        fn range_tombstones(&self) -> Vec<cntryl_midge_core::types::RangeTombstone> {
             Vec::new()
         }
 
@@ -170,16 +170,19 @@ mod tests {
             0
         }
 
-        fn get_state(&self, key: &[u8]) -> crate::common::MidgeResult<crate::types::KeyState> {
+        fn get_state(
+            &self,
+            key: &[u8],
+        ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_core::types::KeyState> {
             Ok(if key == b"a" {
-                crate::types::KeyState::Value(
+                cntryl_midge_core::types::KeyState::Value(
                     bytes::Bytes::copy_from_slice(b"va"),
                     10,
                     None,
-                    crate::types::EntryType::Put,
+                    cntryl_midge_core::types::EntryType::Put,
                 )
             } else {
-                crate::types::KeyState::Absent
+                cntryl_midge_core::types::KeyState::Absent
             })
         }
 
@@ -188,17 +191,19 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::types::KeyState)>> {
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Vec<(bytes::Bytes, cntryl_midge_core::types::KeyState)>,
+        > {
             let s = start.unwrap_or(&[]);
             let e = end.unwrap_or(&[255u8]);
             if s <= &b"a"[..] && &b"a"[..] < e {
                 Ok(vec![(
                     bytes::Bytes::copy_from_slice(b"a"),
-                    crate::types::KeyState::Value(
+                    cntryl_midge_core::types::KeyState::Value(
                         bytes::Bytes::copy_from_slice(b"va"),
                         10,
                         None,
-                        crate::types::EntryType::Put,
+                        cntryl_midge_core::types::EntryType::Put,
                     ),
                 )])
             } else {
@@ -211,16 +216,18 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::types::KeyState)>> {
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Vec<(bytes::Bytes, cntryl_midge_core::types::KeyState)>,
+        > {
             self.scan_range_state(start, end)
         }
     }
 
     struct TestFactory;
 
-    impl crate::sst::traits::SstFactory for TestFactory {
-        fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
-            std::sync::Arc::new(crate::io::MockFs::new())
+    impl cntryl_midge_table::sst::traits::SstFactory for TestFactory {
+        fn output_fs(&self) -> std::sync::Arc<dyn cntryl_midge_core::io::Fs> {
+            std::sync::Arc::new(cntryl_midge_core::io::MockFs::new())
         }
 
         fn compaction_scratch_cleanup_verified(&self) -> bool {
@@ -229,9 +236,11 @@ mod tests {
 
         fn create_for_compaction(
             &self,
-            _budget: crate::common::resource_budget::ResourceBudget,
-        ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
-            Err(crate::common::MidgeError::NotSupported(
+            _budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>,
+        > {
+            Err(cntryl_midge_core::common::MidgeError::NotSupported(
                 "create not supported in test".into(),
             ))
         }
@@ -239,14 +248,20 @@ mod tests {
         fn open_for_compaction(
             &self,
             path: &std::path::Path,
-            _budget: crate::common::resource_budget::ResourceBudget,
-        ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            _budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>,
+        > {
             self.open(path)
         }
 
         #[cfg(test)]
-        fn create(&self) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
-            Err(crate::common::MidgeError::NotSupported(
+        fn create(
+            &self,
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>,
+        > {
+            Err(cntryl_midge_core::common::MidgeError::NotSupported(
                 "create not supported in test".into(),
             ))
         }
@@ -254,13 +269,16 @@ mod tests {
         fn open(
             &self,
             _path: &std::path::Path,
-        ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>,
+        > {
             Ok(Box::new(FakeReader))
         }
     }
 
     fn create_event_loop_with_test_sst(
-    ) -> crate::common::MidgeResult<(tempfile::TempDir, EventLoop, std::path::PathBuf)> {
+    ) -> cntryl_midge_core::common::MidgeResult<(tempfile::TempDir, EventLoop, std::path::PathBuf)>
+    {
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
         std::fs::create_dir_all(state.host_sst_dir())?;
@@ -277,20 +295,21 @@ mod tests {
         let sst_name = "00000001.sst".to_string();
         let sst_path = el.state.host_sst_dir().join(&sst_name);
         let fs = std::sync::Arc::new(
-            crate::io::RealFs::new(el.state.host_sst_dir())
-                .map_err(crate::io::FsError::into_midge)?,
+            cntryl_midge_core::io::RealFs::new(el.state.host_sst_dir())
+                .map_err(cntryl_midge_core::io::FsError::into_midge)?,
         );
-        let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
+        let factory =
+            std::sync::Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, EntryType::Put, None)?;
         writer.add_range_tombstone(b"b", b"z", 9)?;
-        crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &sst_path)?;
 
         el.state
             .manifest
             .test_mut()
             .files
-            .push(crate::metadata::FileMeta {
+            .push(cntryl_midge_durability::metadata::FileMeta {
                 name: sst_name,
                 level: 0,
                 size_bytes: std::fs::metadata(&sst_path)?.len(),
@@ -358,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn should_range_scan_include_keys_from_ssts() -> crate::common::MidgeResult<()> {
+    fn should_range_scan_include_keys_from_ssts() -> cntryl_midge_core::common::MidgeResult<()> {
         // Arrange
         let (_tmp, el, sst_path) = create_event_loop_with_test_sst()?;
         let reader = el.actors.compaction_actor.open_sst_reader(&sst_path)?;
@@ -367,7 +386,7 @@ mod tests {
         // Assert
         assert!(sst_pairs
             .iter()
-            .any(|(k, state)| k.as_ref() == b"a" && matches!(state, crate::types::KeyState::Value(value, _, _, _) if value.as_ref() == b"va")));
+            .any(|(k, state)| k.as_ref() == b"a" && matches!(state, cntryl_midge_core::types::KeyState::Value(value, _, _, _) if value.as_ref() == b"va")));
 
         let results = el.handle_range_scan(0, b"a", b"b", u64::MAX);
 

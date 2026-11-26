@@ -1,7 +1,7 @@
 use super::super::*;
 use super::*;
-use crate::io::FsError;
-use crate::sst::traits::SstFactory;
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_table::sst::traits::SstFactory;
 
 #[test]
 fn should_not_open_older_ssts_when_checking_delete_range_conflict() -> MidgeResult<()> {
@@ -22,7 +22,7 @@ fn should_not_open_older_ssts_when_checking_delete_range_conflict() -> MidgeResu
         Arc::new(SkipListMemtable::new()),
         Vec::new(),
         vec![file.clone()],
-        Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
+        Arc::new(cntryl_midge_core::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
         std::path::PathBuf::new(),
         false,
         0,
@@ -40,7 +40,7 @@ fn should_not_open_older_ssts_when_checking_delete_range_conflict() -> MidgeResu
             key_bounds_complete: false,
             ..file
         }],
-        Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
+        Arc::new(cntryl_midge_core::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
         std::path::PathBuf::new(),
         false,
         0,
@@ -53,14 +53,15 @@ fn should_not_open_older_ssts_when_checking_delete_range_conflict() -> MidgeResu
 fn should_detect_range_conflict_from_newer_range_tombstone_in_sst() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let fs: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"m", Some(b"old"), 5, EntryType::Put, None)?;
     writer.add_range_tombstone(b"a", b"z", 15)?;
-    crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("range.sst"))?;
-    let summary = crate::sst::fs::SstFileIo::summarize_with_fs("range.sst", Arc::clone(&fs))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &dir.path().join("range.sst"))?;
+    let summary =
+        cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs("range.sst", Arc::clone(&fs))?;
     assert_eq!(summary.largest_seq, 15);
     let snapshot = ReadSnapshot::new(
         Arc::new(SkipListMemtable::new()),
@@ -92,12 +93,13 @@ fn should_detect_range_conflict_from_newer_range_tombstone_in_sst() -> MidgeResu
 }
 
 #[test]
-fn should_reject_conflicting_equal_sequence_ssts_across_reads() -> crate::common::MidgeResult<()> {
+fn should_reject_conflicting_equal_sequence_ssts_across_reads(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let fs: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
     let mut files = Vec::new();
     for (name, value, op) in [
         ("put.sst", Some(b"value".as_slice()), EntryType::Put),
@@ -105,7 +107,7 @@ fn should_reject_conflicting_equal_sequence_ssts_across_reads() -> crate::common
     ] {
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", value, 5, op, None)?;
-        crate::sst::fs::finish_writer_to_path(writer, &dir.path().join(name))?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &dir.path().join(name))?;
         files.push(FileMeta {
             name: name.to_string(),
             level: 0,
@@ -147,7 +149,7 @@ fn should_reject_conflicting_equal_sequence_ssts_across_reads() -> crate::common
     // Recovery can legitimately replay a delete at its original sequence.
     let mut writer = factory.create()?;
     writer.add_with_meta(b"key", None, 5, EntryType::Delete, None)?;
-    crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("duplicate.sst"))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &dir.path().join("duplicate.sst"))?;
     let mut duplicate = files[1].clone();
     duplicate.name = "duplicate.sst".to_string();
     duplicate.size_bytes = std::fs::metadata(dir.path().join("duplicate.sst"))?.len();
@@ -155,7 +157,7 @@ fn should_reject_conflicting_equal_sequence_ssts_across_reads() -> crate::common
         Arc::new(SkipListMemtable::new()),
         Vec::new(),
         vec![files[1].clone(), duplicate],
-        Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
+        Arc::new(cntryl_midge_core::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
         std::path::PathBuf::new(),
         false,
         0,
@@ -172,7 +174,7 @@ fn should_reject_conflicting_equal_sequence_ssts_across_reads() -> crate::common
     for (name, expiration) in [("expired-a.sst", 1), ("expired-b.sst", 2)] {
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 5, EntryType::Put, Some(expiration))?;
-        crate::sst::fs::finish_writer_to_path(writer, &dir.path().join(name))?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &dir.path().join(name))?;
         let mut file = files[0].clone();
         file.name = name.to_string();
         file.size_bytes = std::fs::metadata(dir.path().join(name))?.len();
@@ -182,7 +184,7 @@ fn should_reject_conflicting_equal_sequence_ssts_across_reads() -> crate::common
         Arc::new(SkipListMemtable::new()),
         Vec::new(),
         expired_files,
-        Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
+        Arc::new(cntryl_midge_core::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
         std::path::PathBuf::new(),
         false,
         0,
@@ -204,12 +206,12 @@ fn should_reject_conflicting_equal_sequence_ssts_across_reads() -> crate::common
 fn should_accept_identical_expired_value_replayed_in_memtable() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let fs: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"key", Some(b"value"), 5, EntryType::Put, Some(1))?;
-    crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("expired.sst"))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &dir.path().join("expired.sst"))?;
     let memtable = Arc::new(SkipListMemtable::new());
     memtable.put_bytes_with_seq(
         bytes::Bytes::from_static(b"key"),
@@ -252,15 +254,16 @@ fn should_accept_identical_expired_value_replayed_in_memtable() -> MidgeResult<(
 }
 
 #[test]
-fn should_use_shared_block_cache_for_snapshot_sst_reads() -> crate::common::MidgeResult<()> {
+fn should_use_shared_block_cache_for_snapshot_sst_reads(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"cache-key", Some(b"cache-value"), 10, EntryType::Put, None)?;
-    crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("cache.sst"))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("cache.sst"))?;
 
     let file_meta = FileMeta {
         name: "cache.sst".to_string(),
@@ -274,16 +277,16 @@ fn should_use_shared_block_cache_for_snapshot_sst_reads() -> crate::common::Midg
         ..Default::default()
     };
     let read_resources = Arc::new(ReadResources::new(
-        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+        Arc::new(cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
         std::path::PathBuf::new(),
         1024 * 1024,
-        crate::sst::cache::CachePolicyType::Lru,
+        cntryl_midge_table::sst::cache::CachePolicyType::Lru,
     ));
     let snapshot = ReadSnapshot::new_with_resources(
         Arc::new(SkipListMemtable::new()),
         Vec::new(),
         vec![file_meta],
-        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+        Arc::new(cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
         std::path::PathBuf::new(),
         false,
         0,
@@ -320,7 +323,7 @@ fn should_use_shared_block_cache_for_snapshot_sst_reads() -> crate::common::Midg
 fn should_share_indexed_sst_view_across_consecutive_snapshots() {
     // Arrange
     let sst_view = Arc::new(SstReadView::new(0, Vec::new()));
-    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
 
     // Act
     let first = ReadSnapshot::new_with_view_resources(
@@ -351,20 +354,20 @@ fn should_share_indexed_sst_view_across_consecutive_snapshots() {
 }
 
 #[test]
-fn should_open_only_adjacent_lower_level_readers_for_point_lookup() -> crate::common::MidgeResult<()>
-{
+fn should_open_only_adjacent_lower_level_readers_for_point_lookup(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
     let mut files = Vec::new();
     for index in 0..128_u64 {
         let name = format!("point-{index:04}.sst");
         let key = index.to_be_bytes();
         let mut writer = factory.create()?;
         writer.add_with_meta(&key, Some(key.as_slice()), index + 1, EntryType::Put, None)?;
-        crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
         let size_bytes = std::fs::metadata(temp_dir.path().join(&name))?.len();
         files.push(FileMeta {
             name,
@@ -384,7 +387,7 @@ fn should_open_only_adjacent_lower_level_readers_for_point_lookup() -> crate::co
         Arc::clone(&fs),
         std::path::PathBuf::new(),
         1024 * 1024,
-        crate::sst::cache::CachePolicyType::Lru,
+        cntryl_midge_table::sst::cache::CachePolicyType::Lru,
     ));
     let snapshot = ReadSnapshot::new_with_resources(
         Arc::new(SkipListMemtable::new()),
@@ -413,19 +416,19 @@ fn should_open_only_adjacent_lower_level_readers_for_point_lookup() -> crate::co
 
 #[test]
 fn should_use_one_sequential_cursor_per_complete_lower_level_in_both_directions(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
     let mut files = Vec::new();
     for index in 0..64_u64 {
         let name = format!("level-{index:04}.sst");
         let key = format!("key-{index:04}").into_bytes();
         let mut writer = factory.create()?;
         writer.add_with_meta(&key, Some(key.as_slice()), index + 1, EntryType::Put, None)?;
-        crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
         files.push(FileMeta {
             name,
             level: 1,
@@ -504,20 +507,27 @@ fn should_use_one_sequential_cursor_per_complete_lower_level_in_both_directions(
 }
 
 #[test]
-fn should_merge_equal_boundary_key_once_in_each_scan_direction() -> crate::common::MidgeResult<()> {
+fn should_merge_equal_boundary_key_once_in_each_scan_direction(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
     let mut first_writer = factory.create()?;
     first_writer.add_with_meta(b"a", Some(b"first-a"), 1, EntryType::Put, None)?;
     first_writer.add_with_meta(b"b", Some(b"old-b"), 2, EntryType::Put, None)?;
-    crate::sst::fs::finish_writer_to_path(first_writer, &temp_dir.path().join("first.sst"))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(
+        first_writer,
+        &temp_dir.path().join("first.sst"),
+    )?;
     let mut second_writer = factory.create()?;
     second_writer.add_with_meta(b"b", Some(b"new-b"), 3, EntryType::Put, None)?;
     second_writer.add_with_meta(b"c", Some(b"second-c"), 4, EntryType::Put, None)?;
-    crate::sst::fs::finish_writer_to_path(second_writer, &temp_dir.path().join("second.sst"))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(
+        second_writer,
+        &temp_dir.path().join("second.sst"),
+    )?;
     let files = vec![
         FileMeta {
             name: "first.sst".to_string(),
@@ -574,22 +584,25 @@ fn should_merge_equal_boundary_key_once_in_each_scan_direction() -> crate::commo
 
 #[test]
 fn should_not_skip_range_tombstone_when_manifest_bounds_are_narrow(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: model an older manifest whose second SST recorded only its
     // point key `m`, even though the SST itself contains [a, c) tombstone.
     let temp_dir = tempfile::tempdir()?;
-    let fs: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
 
     let mut old_writer = factory.create()?;
     old_writer.add_with_meta(b"b", Some(b"old"), 1, EntryType::Put, None)?;
-    crate::sst::fs::finish_writer_to_path(old_writer, &temp_dir.path().join("old.sst"))?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(
+        old_writer,
+        &temp_dir.path().join("old.sst"),
+    )?;
 
     let mut tombstone_writer = factory.create()?;
     tombstone_writer.add_with_meta(b"m", Some(b"new"), 3, EntryType::Put, None)?;
     tombstone_writer.add_range_tombstone(b"a", b"c", 2)?;
-    crate::sst::fs::finish_writer_to_path(
+    cntryl_midge_table::sst::fs::finish_writer_to_path(
         tombstone_writer,
         &temp_dir.path().join("tombstone.sst"),
     )?;
@@ -657,7 +670,7 @@ fn snapshot_with_ranges(
         Arc::new(memtable),
         Vec::new(),
         Vec::new(),
-        Arc::new(crate::io::MockFs::new()),
+        Arc::new(cntryl_midge_core::io::MockFs::new()),
         std::path::PathBuf::new(),
         true,
         0,
@@ -741,7 +754,7 @@ fn should_match_brute_force_oracle_when_scans_cross_overlapping_range_tombstones
             Arc::new(active),
             vec![Arc::new(immutable)],
             Vec::new(),
-            Arc::new(crate::io::MockFs::new()),
+            Arc::new(cntryl_midge_core::io::MockFs::new()),
             std::path::PathBuf::new(),
             true,
             0,
@@ -824,7 +837,7 @@ fn hundred_thousand_key_snapshot() -> (Arc<SkipListMemtable>, Arc<ReadSnapshot>)
         Arc::clone(&memtable),
         Vec::new(),
         Vec::new(),
-        Arc::new(crate::io::MockFs::new()),
+        Arc::new(cntryl_midge_core::io::MockFs::new()),
         std::path::PathBuf::new(),
         true,
         0,

@@ -1,0 +1,56 @@
+[package]
+name = "cntryl-midge-durability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "WAL, writer leases, and persisted metadata for Midge"
+license.workspace = true
+repository.workspace = true
+autobenches = false
+
+[lib]
+bench = false
+
+[dependencies]
+cntryl-midge-core.workspace = true
+cntryl-midge-storage.workspace = true
+cntryl-midge-table.workspace = true
+arc-swap.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+crc32c.workspace = true
+crossbeam.workspace = true
+fail = { workspace = true, optional = true }
+hex.workspace = true
+hostname = "0.4"
+parking_lot.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+cntryl-midge-core = { workspace = true, features = ["internal-testing"] }
+cntryl-midge-storage = { workspace = true, features = ["internal-testing"] }
+cntryl-midge-table = { workspace = true, features = ["internal-testing"] }
+cntryl-stress.workspace = true
+proptest.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+default = ["cloud-all"]
+cloud-common = ["cntryl-midge-storage/cloud-common"]
+cloud-all = ["cloud-common", "cntryl-midge-storage/cloud-all"]
+failpoints = ["dep:fail", "cntryl-midge-core/failpoints", "cntryl-midge-storage/failpoints"]
+internal-testing = ["cntryl-midge-core/internal-testing", "cntryl-midge-storage/internal-testing", "cntryl-midge-table/internal-testing"]
+
+[[bench]]
+name = "tier1_hotpath_wal"
+harness = false
+
+[lints]
+workspace = true

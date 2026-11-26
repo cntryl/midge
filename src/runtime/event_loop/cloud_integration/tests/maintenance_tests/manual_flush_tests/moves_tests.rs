@@ -1,14 +1,14 @@
 //! Cloud-backed metadata-only compaction moves.
 
 use super::*;
-use crate::common::resource_budget::ResourceBudget;
-use crate::sst::traits::{DynSstWriter, SstReaderExt};
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_table::sst::traits::{DynSstWriter, SstReaderExt};
 use std::path::Path;
 
-struct NoSstIoFactory(Arc<dyn crate::io::Fs>);
+struct NoSstIoFactory(Arc<dyn cntryl_midge_core::io::Fs>);
 
-impl crate::sst::SstFactory for NoSstIoFactory {
-    fn output_fs(&self) -> Arc<dyn crate::io::Fs> {
+impl cntryl_midge_table::sst::SstFactory for NoSstIoFactory {
+    fn output_fs(&self) -> Arc<dyn cntryl_midge_core::io::Fs> {
         Arc::clone(&self.0)
     }
 
@@ -52,7 +52,7 @@ fn should_preserve_cloud_sst_identity_without_upload_when_level_move_publishes()
     let remote_path = remote_sst_path_for_test(&el, &input);
     let original_bytes = std::fs::read(&remote_path)?;
     let (cloud, _release, _reached) = controlled_storage::install(&mut el, false, false)?;
-    let factory = Arc::new(NoSstIoFactory(crate::io::subdirectory(
+    let factory = Arc::new(NoSstIoFactory(cntryl_midge_core::io::subdirectory(
         Arc::clone(&el.state.fs),
         "sst",
     )));

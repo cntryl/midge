@@ -1,6 +1,6 @@
 //! WAL durability frontiers that only move forward.
 
-use crate::types::DurabilityFrontiersSnapshot;
+use cntryl_midge_core::types::DurabilityFrontiersSnapshot;
 use std::hint::spin_loop;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -183,7 +183,7 @@ impl WalFrontiers {
 #[cfg(test)]
 mod tests {
     use super::{ObservedDurabilityFrontiers, ObservedPendingCloudUploads, WalFrontiers};
-    use crate::types::DurabilityFrontiersSnapshot;
+    use cntryl_midge_core::types::DurabilityFrontiersSnapshot;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 

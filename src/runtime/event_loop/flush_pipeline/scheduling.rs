@@ -43,19 +43,19 @@ impl EventLoop {
 
     pub(in crate::runtime::event_loop) fn freeze_active_memtable(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
-    ) -> crate::common::MidgeResult<Option<u64>> {
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    ) -> cntryl_midge_core::common::MidgeResult<Option<u64>> {
         let origin = self.ordinary_flush_origin();
         self.freeze_active_memtable_for(cf_id, origin)
     }
 
     pub(in crate::runtime::event_loop) fn freeze_active_memtable_for(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         origin: Origin,
-    ) -> crate::common::MidgeResult<Option<u64>> {
+    ) -> cntryl_midge_core::common::MidgeResult<Option<u64>> {
         let cf = self.state.get_cf(cf_id).ok_or_else(|| {
-            crate::common::MidgeError::InvalidArgument(format!(
+            cntryl_midge_core::common::MidgeError::InvalidArgument(format!(
                 "column family {cf_id} does not exist"
             ))
         })?;
@@ -65,17 +65,19 @@ impl EventLoop {
         // A flush frontier at or past a partly applied unit's commit would
         // make restart skip the unit; only replay can apply it whole.
         if let Some(commit_seq) = cf.partially_applied_commit() {
-            return Err(crate::common::MidgeError::RecoveryFailed(format!(
-                "column family {cf_id} holds a partly applied transaction committed at \
+            return Err(cntryl_midge_core::common::MidgeError::RecoveryFailed(
+                format!(
+                    "column family {cf_id} holds a partly applied transaction committed at \
                  sequence {commit_seq}; restart before flushing it"
-            )));
+                ),
+            ));
         }
         if self.state.is_immutable_memtable_queue_full(cf_id) {
             self.state.diagnostics.record(|m| {
                 m.record_write_stall_memory();
             });
             self.refresh_write_stall_timing();
-            return Err(crate::common::MidgeError::WriteStall(format!(
+            return Err(cntryl_midge_core::common::MidgeError::WriteStall(format!(
                 "immutable memtable queue is full for column family {cf_id}"
             )));
         }
@@ -86,7 +88,7 @@ impl EventLoop {
         let sequence = self.state.sequence;
         let frozen = {
             let cf = self.state.get_cf(cf_id).ok_or_else(|| {
-                crate::common::MidgeError::Internal(format!(
+                cntryl_midge_core::common::MidgeError::Internal(format!(
                     "column family {cf_id} disappeared during freeze"
                 ))
             })?;
@@ -96,7 +98,7 @@ impl EventLoop {
             .state
             .track_new_immutable_flush_for(cf_id, Arc::clone(&frozen), sequence, origin)
             .ok_or_else(|| {
-                crate::common::MidgeError::ResourceLimit(
+                cntryl_midge_core::common::MidgeError::ResourceLimit(
                     "flush identity space exhausted".to_string(),
                 )
             })?;
@@ -106,10 +108,10 @@ impl EventLoop {
             .state
             .get_cf_mut(cf_id)
             .expect("tracked flush family exists");
-        cf.memtable = Arc::new(crate::memtable::SkipListMemtable::new());
+        cf.memtable = Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new());
         cf.active_memtable_started_in_segment = open_segment;
         cf.active_memtable_started_at_wal_bytes = appended_bytes;
-        crate::failpoints::fail_point!("midge::flush_worker::after_freeze");
+        cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::after_freeze");
         self.publish_snapshot();
         Ok(Some(flush.flush_id))
     }
@@ -171,7 +173,7 @@ impl EventLoop {
         };
         let (sst_name, sst_seq) = match self.ensure_flush_sst_identity(identity) {
             Ok(identity) => identity,
-            Err(crate::common::MidgeError::Busy(_))
+            Err(cntryl_midge_core::common::MidgeError::Busy(_))
                 if self.actors.cloud_coordinator.metadata_mirror.is_running() =>
             {
                 // Reservation owns its own completion. Retain the immutable
@@ -214,10 +216,11 @@ impl EventLoop {
             return;
         }
 
-        let staging_path = std::path::Path::new(crate::sst::fs::FLUSH_STAGING_DIR).join(format!(
-            "{}-{}.sst",
-            identity.writer_epoch, identity.flush_id
-        ));
+        let staging_path = std::path::Path::new(cntryl_midge_table::sst::fs::FLUSH_STAGING_DIR)
+            .join(format!(
+                "{}-{}.sst",
+                identity.writer_epoch, identity.flush_id
+            ));
         if let Err(error) = self.actors.flush_actor.submit_build(
             identity,
             Arc::clone(&flush.memtable),
@@ -237,7 +240,7 @@ impl EventLoop {
             self.fail_flush_pipeline(
                 flush.flush_id,
                 build.reservation,
-                &crate::common::MidgeError::Internal(
+                &cntryl_midge_core::common::MidgeError::Internal(
                     "built flush has no canonical SST identity".to_string(),
                 ),
             );
@@ -398,7 +401,7 @@ impl EventLoop {
             .is_some_and(|(_, flush)| Arc::ptr_eq(&flush.memtable, &completion.memtable));
         if !same_immutable {
             self.cleanup_failed_flush_build(&mut completion);
-            let error = crate::common::MidgeError::Fenced(format!(
+            let error = cntryl_midge_core::common::MidgeError::Fenced(format!(
                 "flush {} build completion no longer owns its immutable",
                 completion.identity.flush_id
             ));
@@ -442,7 +445,7 @@ impl EventLoop {
                 continue;
             };
             match self.state.fs.remove_file(&path) {
-                Ok(()) | Err(crate::io::FsError::NotFound(_)) => {}
+                Ok(()) | Err(cntryl_midge_core::io::FsError::NotFound(_)) => {}
                 Err(error) => {
                     // Keep the admission charged until startup can reconcile
                     // the residue. Failed deletion never returns capacity.

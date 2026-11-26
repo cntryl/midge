@@ -1,7 +1,7 @@
 use super::*;
-use crate::lease::PrimaryLease as _;
 use crate::runtime::actors::flush::{FlushActor, FlushWorkerResult};
-use crate::storage::cloud::{CloudStorage, MockCloudBackend};
+use cntryl_midge_durability::lease::PrimaryLease as _;
+use cntryl_midge_storage::cloud::{CloudStorage, MockCloudBackend};
 use std::path::Path;
 
 struct HeldRetryClock(Instant);
@@ -18,7 +18,7 @@ fn replace_flush_worker(el: &mut EventLoop, memory_bytes: usize) -> MidgeResult<
     el.actors.flush_actor = FlushActor::new_with_memory_limit(
         &el.state.fs,
         false,
-        &crate::codec::CompressionPolicy::default(),
+        &cntryl_midge_core::codec::CompressionPolicy::default(),
         &tx,
         memory_bytes,
     )?;
@@ -116,7 +116,7 @@ fn assert_compute_owner(el: &EventLoop, inputs: &[String], reserved_bytes: u64) 
 fn assert_committed_retry_row(
     el: &EventLoop,
     cloud: &CloudStorage,
-    lease: &crate::lease::CloudStorageLease,
+    lease: &cntryl_midge_durability::lease::CloudStorageLease,
     name: &str,
     sequence: u64,
 ) -> MidgeResult<()> {
@@ -127,11 +127,11 @@ fn assert_committed_retry_row(
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
         cloud,
         store.as_ref(),
-        &crate::io::real::test_root(directory.path()),
+        &cntryl_midge_core::io::real::test_root(directory.path()),
         directory.path(),
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
-    let committed = crate::metadata::ManifestPersistence::load(directory.path())
+    let committed = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path())
         .map_err(MidgeError::Internal)?;
     let file = committed
         .files

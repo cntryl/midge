@@ -1,4 +1,4 @@
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::time::Duration;
 
 /// Opt-in amortized WAL sync floor for local storage (#904).

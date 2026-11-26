@@ -9,25 +9,25 @@ struct PausedHead {
 }
 
 struct ExpiringCatalogRead {
-    inner: crate::storage::cloud::MockCloudBackend,
-    validity: Arc<crate::lease::LeaseValidity>,
+    inner: cntryl_midge_storage::cloud::MockCloudBackend,
+    validity: Arc<cntryl_midge_durability::lease::LeaseValidity>,
     expire_read_key: std::sync::Mutex<Option<String>>,
     writes_after_expiry: std::sync::atomic::AtomicUsize,
     paused_head: std::sync::Mutex<Option<PausedHead>>,
     delete_submissions: std::sync::atomic::AtomicUsize,
 }
 
-impl crate::storage::cloud::CloudReadCapability for ExpiringCatalogRead {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+impl cntryl_midge_storage::cloud::CloudReadCapability for ExpiringCatalogRead {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
 }
 
-impl crate::storage::cloud::CloudWriteCapability for ExpiringCatalogRead {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for ExpiringCatalogRead {
     fn submit_put(
         &self,
         key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
         if self.validity.remaining(7).is_err() {
             self.writes_after_expiry
@@ -37,12 +37,12 @@ impl crate::storage::cloud::CloudWriteCapability for ExpiringCatalogRead {
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for ExpiringCatalogRead {
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for ExpiringCatalogRead {
     fn submit_delete(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
         self.delete_submissions
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -50,12 +50,12 @@ impl crate::storage::cloud::CloudDeleteCapability for ExpiringCatalogRead {
     }
 }
 
-impl crate::storage::cloud::CloudListCapability for ExpiringCatalogRead {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+impl cntryl_midge_storage::cloud::CloudListCapability for ExpiringCatalogRead {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_list);
 }
 
-impl crate::storage::cloud::CloudHeadCapability for ExpiringCatalogRead {
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+impl cntryl_midge_storage::cloud::CloudHeadCapability for ExpiringCatalogRead {
+    fn submit_head(&self, key: &str, callback: cntryl_midge_storage::cloud::CloudCallback) {
         // The read begins while authorized and returns after expiry.
         let mut armed = self.expire_read_key.lock().unwrap();
         if armed.as_deref() == Some(key) {
@@ -82,30 +82,31 @@ impl crate::storage::cloud::CloudHeadCapability for ExpiringCatalogRead {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for ExpiringCatalogRead {}
+impl cntryl_midge_storage::cloud::CloudBackend for ExpiringCatalogRead {}
 
 /// Sealed segment `segment_id` of the fixture's chain, written by epoch 7:
 /// segment `n` holds one put at sequence `n` and links segment `n - 1`.
 fn sealed_wal_bytes(segment_id: u64) -> Vec<u8> {
-    let mut prev = crate::wal::format::ChainLink::GENESIS;
+    let mut prev = cntryl_midge_durability::wal::format::ChainLink::GENESIS;
     let mut bytes = Vec::new();
     for id in 1..=segment_id {
-        let record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
+        let record = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"key"),
             Some(bytes::Bytes::from_static(b"value")),
             id,
         );
-        (bytes, prev) = crate::wal::format::segment::SegmentBuilder::new(id, 7, prev)
-            .record(&record)
-            .seal();
+        (bytes, prev) =
+            cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(id, 7, prev)
+                .record(&record)
+                .seal();
     }
     bytes
 }
 
 struct CatalogExpiryFixture {
     directory: tempfile::TempDir,
-    validity: Arc<crate::lease::LeaseValidity>,
+    validity: Arc<cntryl_midge_durability::lease::LeaseValidity>,
     provider: Arc<ExpiringCatalogRead>,
     storage: CloudPersistence,
     segment: CatalogEntry,
@@ -118,7 +119,7 @@ struct CatalogExpiryFixture {
 impl CatalogExpiryFixture {
     fn new(schedule: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
         validity
             .activate(
                 7,
@@ -126,7 +127,7 @@ impl CatalogExpiryFixture {
             )
             .unwrap();
         let provider = Arc::new(ExpiringCatalogRead {
-            inner: crate::storage::cloud::MockCloudBackend::new(),
+            inner: cntryl_midge_storage::cloud::MockCloudBackend::new(),
             validity: Arc::clone(&validity),
             expire_read_key: std::sync::Mutex::new(None),
             writes_after_expiry: std::sync::atomic::AtomicUsize::new(0),
@@ -135,10 +136,10 @@ impl CatalogExpiryFixture {
         });
         let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
             Arc::new(CloudStorage::new(provider.clone(), String::new())),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )));
-        let primary = crate::wal::cloud_catalog::OBJECT_KEY;
-        let mirror = crate::wal::cloud_catalog::MIRROR_OBJECT_KEY;
+        let primary = cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY;
+        let mirror = cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY;
         let first_wal = sealed_wal_bytes(1);
         let segment = CatalogEntry::from_sealed_bytes(&first_wal).unwrap();
         storage
@@ -148,7 +149,11 @@ impl CatalogExpiryFixture {
         let publication_path = directory.path().join("second.wal");
         std::fs::write(&publication_path, &second_wal).unwrap();
         storage
-            .compare_exchange_remote_object(&crate::wal::segment_object_key(2, 7), None, second_wal)
+            .compare_exchange_remote_object(
+                &cntryl_midge_durability::wal::segment_object_key(2, 7),
+                None,
+                second_wal,
+            )
             .unwrap();
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
         catalog
@@ -191,8 +196,8 @@ impl CatalogExpiryFixture {
     }
 
     fn arm(&self, schedule: &str) {
-        let primary = crate::wal::cloud_catalog::OBJECT_KEY;
-        let mirror = crate::wal::cloud_catalog::MIRROR_OBJECT_KEY;
+        let primary = cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY;
+        let mirror = cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY;
         *self.provider.expire_read_key.lock().unwrap() = if schedule.starts_with("prepared-") {
             None
         } else {
@@ -241,8 +246,8 @@ impl CatalogExpiryFixture {
             bytes,
             primary_before,
         } = self;
-        let primary = crate::wal::cloud_catalog::OBJECT_KEY;
-        let deadline = crate::common::OperationDeadline::unbounded();
+        let primary = cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY;
+        let deadline = cntryl_midge_core::common::OperationDeadline::unbounded();
         let expected = if matches!(
             schedule,
             "mirror-after-commit" | "prepared-primary" | "prepared-mirror"
@@ -266,7 +271,7 @@ impl CatalogExpiryFixture {
             "publication" => storage.publish_remote_wal_segment(
                 2,
                 2,
-                &crate::io::FsLocation::host_file(&publication_path),
+                &cntryl_midge_core::io::FsLocation::host_file(&publication_path),
                 7,
                 &deadline,
             ),
@@ -284,7 +289,7 @@ impl CatalogExpiryFixture {
                         .retire_prefix(
                             7,
                             std::slice::from_ref(&segment),
-                            crate::lease::SharedGenerationId::FIRST,
+                            cntryl_midge_durability::lease::SharedGenerationId::FIRST,
                         )
                         .map(|retired| Mutation::of(!retired.is_empty(), retired))
                 },
@@ -331,7 +336,7 @@ fn commit_expiring_catalog(
     storage: &HybridStorage,
     expected: Option<ControlObject>,
     catalog: &mut WalPublicationCatalog,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
     validate: &dyn Fn() -> MidgeResult<()>,
 ) -> MidgeResult<()> {
     catalog.set_aside_suffix(7, None, &[], 11).unwrap();
@@ -347,8 +352,8 @@ fn assert_retained_catalogs(
     bytes: &[u8],
 ) {
     // Assert
-    let primary = crate::wal::cloud_catalog::OBJECT_KEY;
-    let mirror = crate::wal::cloud_catalog::MIRROR_OBJECT_KEY;
+    let primary = cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY;
+    let mirror = cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY;
     assert_eq!(
         provider
             .writes_after_expiry
@@ -365,7 +370,7 @@ fn assert_retained_catalogs(
     assert_eq!(
         primary_after
             .as_ref()
-            .map(crate::storage::hybrid::backend::RemoteObjectProof::bytes),
+            .map(cntryl_midge_storage::hybrid::backend::RemoteObjectProof::bytes),
         expected_primary.as_deref(),
         "{schedule}"
     );
@@ -380,7 +385,7 @@ fn assert_retained_catalogs(
 fn should_preserve_catalog_when_validity_expires_during_provider_read() {
     // Arrange
     #[cfg(feature = "failpoints")]
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     #[cfg(feature = "failpoints")]
     let _scenario = fail::FailScenario::setup();
     for schedule in [
@@ -411,10 +416,11 @@ fn should_preserve_catalog_when_validity_expires_during_provider_read() {
 /// ledger starts past every cataloged segment.
 fn strict_recovery(
     root: &std::path::Path,
-    remote: &Arc<dyn crate::storage::StorageBackend>,
+    remote: &Arc<dyn cntryl_midge_storage::StorageBackend>,
     catalog: &WalPublicationCatalog,
 ) -> crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery {
-    let wal: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(root.join("wal")).unwrap());
+    let wal: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(root.join("wal")).unwrap());
     // A cache that joined the catalog: its first segment follows the head.
     let history = match crate::runtime::wal_history::WalHistory::load(Arc::clone(&wal), 0).unwrap()
     {
@@ -428,14 +434,14 @@ fn strict_recovery(
         .unwrap(),
     };
     crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery::build(
-        &crate::io::real::test_root(root),
+        &cntryl_midge_core::io::real::test_root(root),
         Some(history.ledger()),
         remote,
         catalog,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
         std::time::Duration::from_secs(5),
         127,
-        crate::wal::recovery::streaming::StreamingReplayLimits {
+        cntryl_midge_durability::wal::recovery::streaming::StreamingReplayLimits {
             max_frame_bytes: 128 * 1024,
             max_pending_txn_bytes: 256 * 1024,
             max_memtable_encoded_bytes: 256 * 1024,
@@ -449,7 +455,7 @@ fn wait_wal_ack(storage: &CloudPersistence) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         for event in storage.process_uploads() {
-            if let crate::storage::StorageEvent::CloudAck {
+            if let cntryl_midge_storage::StorageEvent::CloudAck {
                 segment_id: 1,
                 max_sequence: 1,
             } = event
@@ -465,11 +471,11 @@ fn wait_wal_ack(storage: &CloudPersistence) {
     }
 }
 
-fn wait_prune_completion(storage: &CloudPersistence) -> crate::storage::StorageOutcome<()> {
+fn wait_prune_completion(storage: &CloudPersistence) -> cntryl_midge_storage::StorageOutcome<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         for event in storage.process_uploads() {
-            if let crate::storage::StorageEvent::CloudWalPruneComplete {
+            if let cntryl_midge_storage::StorageEvent::CloudWalPruneComplete {
                 segment_id: 1,
                 result,
             } = event
@@ -485,12 +491,12 @@ fn wait_prune_completion(storage: &CloudPersistence) -> crate::storage::StorageO
     }
 }
 
-fn successor_storage(remote: &Arc<dyn crate::storage::StorageBackend>) -> CloudPersistence {
+fn successor_storage(remote: &Arc<dyn cntryl_midge_storage::StorageBackend>) -> CloudPersistence {
     let successor = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         Arc::clone(remote),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
-    let successor_validity = Arc::new(crate::lease::LeaseValidity::new());
+    let successor_validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     successor_validity
         .activate(
             8,
@@ -511,7 +517,9 @@ fn successor_storage(remote: &Arc<dyn crate::storage::StorageBackend>) -> CloudP
 fn retain_local_seal(fixture: &CatalogExpiryFixture) -> (std::path::PathBuf, std::path::PathBuf) {
     let retained = fixture.directory.path().join("retained");
     std::fs::create_dir_all(retained.join("wal")).unwrap();
-    let seal = retained.join("wal").join(crate::wal::segment_file_name(1));
+    let seal = retained
+        .join("wal")
+        .join(cntryl_midge_durability::wal::segment_file_name(1));
     std::fs::write(&seal, sealed_wal_bytes(1)).unwrap();
     crate::runtime::wal_history::fixture::record_at(&retained, &[1], 2).unwrap();
     (retained, seal)
@@ -530,7 +538,7 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
     let retired = mutate_wal_catalog_within(
         &fixture.storage,
         "cloud WAL retirement",
-        &crate::common::OperationDeadline::unbounded(),
+        &cntryl_midge_core::common::OperationDeadline::unbounded(),
         &|| fixture.storage.check_write_authority(),
         Missing::Refuse,
         |catalog| {
@@ -538,7 +546,7 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
                 .retire_prefix(
                     7,
                     std::slice::from_ref(&fixture.segment),
-                    crate::lease::SharedGenerationId::FIRST,
+                    cntryl_midge_durability::lease::SharedGenerationId::FIRST,
                 )
                 .map(|retired| Mutation::of(!retired.is_empty(), retired))
         },
@@ -569,7 +577,7 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
     // Act: the successor plans over the retained seal of segment 1, which
     // the catalog already retired, and uploads its identical bytes again.
     fixture.validity.expire_for_test();
-    let remote: Arc<dyn crate::storage::StorageBackend> =
+    let remote: Arc<dyn cntryl_midge_storage::StorageBackend> =
         Arc::new(CloudStorage::new(fixture.provider.clone(), String::new()));
     let successor = successor_storage(&remote);
     let catalog = successor.fence_cloud_wal_catalog(8).unwrap();
@@ -582,7 +590,7 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
     );
     assert_eq!(
         successor
-            .enqueue_wal_segment(&crate::io::FsLocation::host_file(&seal), 1, 1)
+            .enqueue_wal_segment(&cntryl_midge_core::io::FsLocation::host_file(&seal), 1, 1)
             .unwrap(),
         fixture.segment.object_key()
     );
@@ -591,8 +599,8 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
         .remote_object_proof(&fixture.segment.object_key())
         .unwrap();
     assert!(republished.metadata().same_version(target.metadata()));
-    let wal: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(retained.join("wal")).unwrap());
+    let wal: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(retained.join("wal")).unwrap());
     crate::runtime::wal_history::WalHistory::open(wal, 1, 0)
         .unwrap()
         .retire_below(2)
@@ -607,7 +615,7 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
     // Assert: the expired predecessor deletes nothing, and the object the
     // successor wrote again survives.
     assert!(
-        matches!(completion, crate::storage::StorageOutcome::Err(_)),
+        matches!(completion, cntryl_midge_storage::StorageOutcome::Err(_)),
         "{completion:?}"
     );
     assert_eq!(
@@ -632,20 +640,20 @@ fn should_report_incompatible_catalog_version_without_repairing_from_mirror() {
     // a valid catalog of this one.
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         Arc::new(CloudStorage::with_mock()),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     let primary = br#"{"format_version":99,"fencing_epoch":7,"segments":{}}"#.to_vec();
     let mirror = WalPublicationCatalog::empty(7).unwrap().encode().unwrap();
     storage
         .compare_exchange_remote_object(
-            crate::wal::cloud_catalog::OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
             None,
             primary.clone(),
         )
         .unwrap();
     storage
         .compare_exchange_remote_object(
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
             None,
             mirror.clone(),
         )
@@ -661,14 +669,14 @@ fn should_report_incompatible_catalog_version_without_repairing_from_mirror() {
     );
     assert_eq!(
         storage
-            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+            .remote_object_proof(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY)
             .unwrap()
             .bytes(),
         primary
     );
     assert_eq!(
         storage
-            .remote_object_proof(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+            .remote_object_proof(cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY)
             .unwrap()
             .bytes(),
         mirror
@@ -679,10 +687,11 @@ fn should_report_incompatible_catalog_version_without_repairing_from_mirror() {
 fn should_share_catalog_budget_when_maintenance_is_not_yet_configured() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
+    let local =
+        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(directory.path()).unwrap());
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         local,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     let first = catalog_budget(&storage);
     let _held = first.reserve(4096, "retained catalog").unwrap();
@@ -737,26 +746,27 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
     // Arrange
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         Arc::new(CloudStorage::with_mock()),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     let mut catalog = WalPublicationCatalog::empty(7).unwrap();
-    let mut prev = crate::wal::format::ChainLink::GENESIS;
+    let mut prev = cntryl_midge_durability::wal::format::ChainLink::GENESIS;
     for segment_id in 1..=1024_u64 {
-        let record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
+        let record = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"key"),
             Some(bytes::Bytes::from_static(b"value")),
             segment_id,
         );
-        let (bytes, link) = crate::wal::format::segment::SegmentBuilder::new(segment_id, 7, prev)
-            .record(&record)
-            .seal();
+        let (bytes, link) =
+            cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(segment_id, 7, prev)
+                .record(&record)
+                .seal();
         let entry = CatalogEntry::from_sealed_bytes(&bytes).expect("verified fixture segment");
         prev = link;
         catalog.append_run(7, &[entry]).unwrap();
     }
     let original = catalog.encode().unwrap();
-    let key = crate::wal::cloud_catalog::OBJECT_KEY;
+    let key = cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY;
     storage
         .compare_exchange_remote_object(key, None, original.clone())
         .unwrap();
@@ -772,7 +782,9 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
     );
     assert_eq!(storage.remote_object_proof(key).unwrap().bytes(), original);
     assert!(storage
-        .remote_object_proof_optional(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+        .remote_object_proof_optional(
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY
+        )
         .unwrap()
         .is_none());
     let budget = storage.maintenance_memory().unwrap();

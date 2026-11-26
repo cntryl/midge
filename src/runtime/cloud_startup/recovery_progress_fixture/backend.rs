@@ -1,7 +1,7 @@
 use super::{local_wal_state, RecoveryProgressFixtureMode, PROVIDER_TIMEOUT};
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Fs, FsError, FsPath};
-use crate::storage::{
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::{Fs, FsError, FsPath};
+use cntryl_midge_storage::{
     MetadataReadCallback, RangeReadCallback, StorageBackend, StorageCallback, StorageError,
     StorageRequest,
 };
@@ -45,7 +45,7 @@ impl FixtureObservations {
         persist_inventory_progress: bool,
     ) -> MidgeResult<Self> {
         let observations = Self {
-            fs: Arc::new(crate::io::RealFs::new(root).map_err(FsError::into_midge)?),
+            fs: Arc::new(cntryl_midge_core::io::RealFs::new(root).map_err(FsError::into_midge)?),
             local: root.join("local"),
             snapshot: Mutex::new(ObservationSnapshot {
                 mode,
@@ -109,7 +109,7 @@ impl FixtureObservations {
         (snapshot.local_wal_bytes, snapshot.staged_wal_count) = local_wal_state(&self.local)?;
         let bytes = serde_json::to_vec(&*snapshot)
             .map_err(|error| MidgeError::Internal(format!("fixture observations: {error}")))?;
-        crate::io::staging::stage_bytes(
+        cntryl_midge_core::io::staging::stage_bytes(
             &self.fs,
             &FsPath::new(".fixture-observations.tmp"),
             &FsPath::new("fixture-observations.json"),
@@ -164,12 +164,12 @@ impl FixtureObservations {
 /// fixture contributes no tracing events and delays only a completed response.
 #[cfg(any(test, feature = "cloud-common"))]
 pub(super) struct InventoryCloudBackend {
-    inner: crate::storage::filesystem::FileSystem,
+    inner: cntryl_midge_storage::filesystem::FileSystem,
     mode: RecoveryProgressFixtureMode,
     expected_sizes: std::collections::HashMap<String, u64>,
     completed_keys: Mutex<std::collections::HashSet<String>>,
     observations: Arc<FixtureObservations>,
-    held: Mutex<Vec<crate::storage::cloud::CloudCallback>>,
+    held: Mutex<Vec<cntryl_midge_storage::cloud::CloudCallback>>,
     head_delay: Duration,
 }
 
@@ -178,16 +178,21 @@ impl InventoryCloudBackend {
     pub(super) fn new(
         remote_root: PathBuf,
         mode: RecoveryProgressFixtureMode,
-        files: &[crate::metadata::FileMeta],
+        files: &[cntryl_midge_durability::metadata::FileMeta],
         observations: Arc<FixtureObservations>,
         head_delay: Duration,
     ) -> MidgeResult<Self> {
         Ok(Self {
-            inner: crate::storage::filesystem::FileSystem::new(remote_root)?,
+            inner: cntryl_midge_storage::filesystem::FileSystem::new(remote_root)?,
             mode,
             expected_sizes: files
                 .iter()
-                .map(|file| (crate::cloud_layout::object_key(&file.name), file.size_bytes))
+                .map(|file| {
+                    (
+                        cntryl_midge_core::cloud_layout::object_key(&file.name),
+                        file.size_bytes,
+                    )
+                })
                 .collect(),
             completed_keys: Mutex::new(std::collections::HashSet::new()),
             observations,
@@ -196,8 +201,8 @@ impl InventoryCloudBackend {
         })
     }
 
-    fn head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome};
+    fn head(&self, key: &str, callback: cntryl_midge_storage::cloud::CloudCallback) {
+        use cntryl_midge_storage::cloud::{CloudError, CloudEvent, CloudOutcome};
         if self.mode == RecoveryProgressFixtureMode::HeldInventory {
             if let Err(error) = self.observations.hold_request() {
                 let _ = callback.send(CloudEvent::Head {
@@ -213,30 +218,31 @@ impl InventoryCloudBackend {
         self.inner.submit_head_request(
             StorageRequest::new(
                 key,
-                crate::common::OperationDeadline::from_budget(PROVIDER_TIMEOUT),
+                cntryl_midge_core::common::OperationDeadline::from_budget(PROVIDER_TIMEOUT),
                 PROVIDER_TIMEOUT,
             ),
             sender,
         );
-        let result: CloudOutcome<crate::storage::cloud::ObjectMetadata> =
-            match receiver.recv_timeout(PROVIDER_TIMEOUT) {
-                Ok(crate::storage::StorageEvent::HeadComplete {
-                    key: actual,
-                    result,
-                }) if actual == key => match result {
-                    crate::storage::StorageOutcome::Ok(metadata) => Ok(metadata),
-                    crate::storage::StorageOutcome::Err(error) => Err(Self::head_error(&error)),
-                },
-                Err(mpsc::RecvTimeoutError::Timeout) => Err(CloudError::Timeout(
-                    "fixture HEAD callback timed out".into(),
-                )),
-                Err(mpsc::RecvTimeoutError::Disconnected) => Err(CloudError::Transport(
-                    "fixture HEAD callback disconnected".into(),
-                )),
-                other => Err(CloudError::Protocol(format!(
-                    "fixture HEAD callback: {other:?}"
-                ))),
-            };
+        let result: CloudOutcome<cntryl_midge_storage::cloud::ObjectMetadata> = match receiver
+            .recv_timeout(PROVIDER_TIMEOUT)
+        {
+            Ok(cntryl_midge_storage::StorageEvent::HeadComplete {
+                key: actual,
+                result,
+            }) if actual == key => match result {
+                cntryl_midge_storage::StorageOutcome::Ok(metadata) => Ok(metadata),
+                cntryl_midge_storage::StorageOutcome::Err(error) => Err(Self::head_error(&error)),
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(CloudError::Timeout(
+                "fixture HEAD callback timed out".into(),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(CloudError::Transport(
+                "fixture HEAD callback disconnected".into(),
+            )),
+            other => Err(CloudError::Protocol(format!(
+                "fixture HEAD callback: {other:?}"
+            ))),
+        };
         let expected_size = result.as_ref().ok().map(|metadata| {
             self.expected_sizes
                 .get(key)
@@ -258,9 +264,9 @@ impl InventoryCloudBackend {
         }
     }
 
-    fn head_error(error: &StorageError) -> crate::storage::cloud::CloudError {
-        use crate::storage::cloud::CloudError;
-        use crate::storage::StorageErrorKind;
+    fn head_error(error: &StorageError) -> cntryl_midge_storage::cloud::CloudError {
+        use cntryl_midge_storage::cloud::CloudError;
+        use cntryl_midge_storage::StorageErrorKind;
         let message = format!("fixture HEAD: {error}");
         match error.kind() {
             StorageErrorKind::NotFound => CloudError::NotFound(message),
@@ -276,98 +282,101 @@ impl InventoryCloudBackend {
 }
 
 #[cfg(any(test, feature = "cloud-common"))]
-impl crate::storage::cloud::CloudReadCapability for InventoryCloudBackend {
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        let _ = callback.send(crate::storage::cloud::CloudEvent::Get {
+impl cntryl_midge_storage::cloud::CloudReadCapability for InventoryCloudBackend {
+    fn submit_get(&self, key: &str, callback: cntryl_midge_storage::cloud::CloudCallback) {
+        let _ = callback.send(cntryl_midge_storage::cloud::CloudEvent::Get {
             key: key.to_string(),
-            result: Err(crate::storage::cloud::CloudError::Protocol(
+            result: Err(cntryl_midge_storage::cloud::CloudError::Protocol(
                 "inventory fixture only supports HEAD".into(),
             )),
         });
     }
 
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        let _ = callback.send(crate::storage::cloud::CloudEvent::GetWithMetadata {
+    fn submit_get_with_metadata(
+        &self,
+        key: &str,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
+    ) {
+        let _ = callback.send(cntryl_midge_storage::cloud::CloudEvent::GetWithMetadata {
             key: key.to_string(),
-            result: Err(crate::storage::cloud::CloudError::Protocol(
+            result: Err(cntryl_midge_storage::cloud::CloudError::Protocol(
                 "inventory fixture only supports HEAD".into(),
             )),
         });
     }
 
-    #[cfg(test)]
     fn submit_get_range(
         &self,
         key: &str,
         start: u64,
         end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
-        let _ = callback.send(crate::storage::cloud::CloudEvent::GetRange {
+        let _ = callback.send(cntryl_midge_storage::cloud::CloudEvent::GetRange {
             key: key.to_string(),
             start,
             end,
-            result: Err(crate::storage::cloud::CloudError::Protocol(
+            result: Err(cntryl_midge_storage::cloud::CloudError::Protocol(
                 "inventory fixture only supports HEAD".into(),
             )),
         });
     }
 }
 
-impl crate::storage::cloud::CloudWriteCapability for InventoryCloudBackend {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for InventoryCloudBackend {
     fn submit_put(
         &self,
         key: &str,
         _data: Vec<u8>,
         _headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
-        let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
+        let _ = callback.send(cntryl_midge_storage::cloud::CloudEvent::Put {
             key: key.to_string(),
-            result: Err(crate::storage::cloud::CloudError::Protocol(
+            result: Err(cntryl_midge_storage::cloud::CloudError::Protocol(
                 "inventory fixture only supports HEAD".into(),
             )),
         });
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for InventoryCloudBackend {
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for InventoryCloudBackend {
     fn submit_delete(
         &self,
         key: &str,
         _headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
-        let _ = callback.send(crate::storage::cloud::CloudEvent::Delete {
+        let _ = callback.send(cntryl_midge_storage::cloud::CloudEvent::Delete {
             key: key.to_string(),
-            result: Err(crate::storage::cloud::CloudError::Protocol(
+            result: Err(cntryl_midge_storage::cloud::CloudError::Protocol(
                 "inventory fixture only supports HEAD".into(),
             )),
         });
     }
 }
 
-impl crate::storage::cloud::CloudListCapability for InventoryCloudBackend {
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        let _ = callback.send(crate::storage::cloud::CloudEvent::List {
+impl cntryl_midge_storage::cloud::CloudListCapability for InventoryCloudBackend {
+    fn submit_list(&self, prefix: &str, callback: cntryl_midge_storage::cloud::CloudCallback) {
+        let _ = callback.send(cntryl_midge_storage::cloud::CloudEvent::List {
             prefix: prefix.to_string(),
-            result: Err(crate::storage::cloud::CloudError::Protocol(
+            result: Err(cntryl_midge_storage::cloud::CloudError::Protocol(
                 "inventory fixture only supports HEAD".into(),
             )),
         });
     }
 }
 
-impl crate::storage::cloud::CloudHeadCapability for InventoryCloudBackend {
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+impl cntryl_midge_storage::cloud::CloudHeadCapability for InventoryCloudBackend {
+    fn submit_head(&self, key: &str, callback: cntryl_midge_storage::cloud::CloudCallback) {
         self.head(key, callback);
     }
 }
 
-impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {}
+impl cntryl_midge_storage::cloud::CloudBackend for InventoryCloudBackend {}
 
 pub(super) struct ObservedBackend {
-    inner: crate::storage::filesystem::FileSystem,
+    inner: cntryl_midge_storage::filesystem::FileSystem,
     mode: RecoveryProgressFixtureMode,
     observations: Arc<FixtureObservations>,
     held: Mutex<Option<RangeReadCallback>>,
@@ -380,7 +389,7 @@ impl ObservedBackend {
         observations: Arc<FixtureObservations>,
     ) -> MidgeResult<Self> {
         Ok(Self {
-            inner: crate::storage::filesystem::FileSystem::new(remote_root)?,
+            inner: cntryl_midge_storage::filesystem::FileSystem::new(remote_root)?,
             mode,
             observations,
             held: Mutex::new(None),

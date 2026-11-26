@@ -2,7 +2,7 @@ use super::super::durability::DurabilityWaiter;
 use super::durability_sync::{AppliedTransaction, CompletionSource};
 use super::{EventLoop, HandleOutcome};
 use crate::runtime::{ConflictPolicy, KeyAssertion, RuntimeMsg, RuntimeResponse, TransactionOp};
-use crate::wal::DurabilityPolicy;
+use cntryl_midge_durability::wal::DurabilityPolicy;
 use crossbeam::channel::{Receiver, Sender};
 
 pub(super) struct WalCoordinator;
@@ -30,7 +30,7 @@ pub(super) struct SpilledTransactionRequest {
 #[cfg(test)]
 pub(super) struct AppendRequest {
     pub request_id: u64,
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub key: Vec<u8>,
     pub value: Option<Vec<u8>>,
     pub ttl_seconds: Option<u64>,
@@ -155,8 +155,11 @@ impl WalCoordinator {
     fn prepare_spilled_transaction(
         event_loop: &mut EventLoop,
         request: SpilledTransactionRequest,
-    ) -> crate::common::MidgeResult<
-        Option<(SpilledTransactionRequest, Vec<crate::types::ColumnFamilyId>)>,
+    ) -> cntryl_midge_core::common::MidgeResult<
+        Option<(
+            SpilledTransactionRequest,
+            Vec<cntryl_midge_core::types::ColumnFamilyId>,
+        )>,
     > {
         let touched_cfs = request.source.touched_cf_ids()?;
         event_loop.ensure_l0_write_admission(&touched_cfs)?;
@@ -316,7 +319,7 @@ impl WalCoordinator {
                     request_id,
                     RuntimeResponse::Error {
                         request_id,
-                        error: crate::common::MidgeError::Internal(error.to_string()),
+                        error: cntryl_midge_core::common::MidgeError::Internal(error.to_string()),
                     },
                 );
             }
@@ -333,7 +336,7 @@ impl WalCoordinator {
         event_loop: &mut EventLoop,
         msg_rx: &Receiver<RuntimeMsg>,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         durability_policy: Option<DurabilityPolicy>,
@@ -363,7 +366,7 @@ impl WalCoordinator {
                     request_id,
                     RuntimeResponse::Error {
                         request_id,
-                        error: crate::common::MidgeError::Internal(error.to_string()),
+                        error: cntryl_midge_core::common::MidgeError::Internal(error.to_string()),
                     },
                 );
             }
@@ -391,7 +394,7 @@ impl WalCoordinator {
         let resp = result.map_or_else(
             |error| RuntimeResponse::Error {
                 request_id,
-                error: crate::common::MidgeError::Internal(error.to_string()),
+                error: cntryl_midge_core::common::MidgeError::Internal(error.to_string()),
             },
             |_| RuntimeResponse::Ok { request_id },
         );
@@ -411,7 +414,7 @@ impl WalCoordinator {
             } else {
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::InvalidArgument(
+                    error: cntryl_midge_core::common::MidgeError::InvalidArgument(
                         "cloud durability requested outside cloud-backed mode".to_string(),
                     ),
                 }
@@ -494,7 +497,7 @@ impl WalCoordinator {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Internal(format!(
+                    error: cntryl_midge_core::common::MidgeError::Internal(format!(
                         "no inflight cloud upload covers sequence {sequence}"
                     )),
                 },
@@ -509,7 +512,7 @@ impl WalCoordinator {
             return false;
         }
         if let Err(error) = event_loop.check_cloud_wal_admission() {
-            if matches!(error, crate::common::MidgeError::WriteStall(_)) {
+            if matches!(error, cntryl_midge_core::common::MidgeError::WriteStall(_)) {
                 event_loop
                     .state
                     .diagnostics

@@ -1,5 +1,5 @@
-use crate::common::{MidgeError, MidgeResult};
 use crate::compaction::LeveledCompactionConfig;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 
 /// Leveled-compaction level sizing. Defaults match the engine's built-in
 /// leveled layout: 40 MiB at L1, a 10x multiplier, and seven levels.

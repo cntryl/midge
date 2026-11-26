@@ -1,9 +1,11 @@
 //! Keep accepted cloud transactions inside a flushable memtable generation.
 
 use super::EventLoop;
-use crate::common::{MidgeError, MidgeResult};
-use crate::memtable::size_bound::{flush_staging_bytes, point_bytes, range_bytes, FIXED_SST_BYTES};
 use crate::runtime::TransactionOp;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_table::memtable::size_bound::{
+    flush_staging_bytes, point_bytes, range_bytes, FIXED_SST_BYTES,
+};
 use std::collections::HashMap;
 
 impl EventLoop {
@@ -259,11 +261,13 @@ mod tests {
     fn fixture() -> MidgeResult<(
         tempfile::TempDir,
         EventLoop,
-        Arc<crate::storage::HybridStorage>,
+        Arc<cntryl_midge_storage::HybridStorage>,
     )> {
         let directory = tempfile::tempdir()?;
-        let setup =
-            crate::storage::simulated::host_simulated_cloud(directory.path(), Some(256 * 1024))?;
+        let setup = cntryl_midge_storage::simulated::host_simulated_cloud(
+            directory.path(),
+            Some(256 * 1024),
+        )?;
         setup.hybrid_storage.enable_ephemeral_sst_cache(256 * 1024);
         let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
         let config = crate::runtime::RuntimeConfig {
@@ -285,7 +289,7 @@ mod tests {
     ) -> MidgeResult<()> {
         use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
         use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse};
-        use crate::wal::DurabilityPolicy;
+        use cntryl_midge_durability::wal::DurabilityPolicy;
 
         for policy in [DurabilityPolicy::Strict, DurabilityPolicy::Batched] {
             for (stalled, fallback) in [(false, false), (false, true), (true, false), (true, true)]
@@ -299,8 +303,9 @@ mod tests {
                     let cf = event_loop.state.get_cf_mut(other).unwrap();
                     cf.memtable
                         .put_with_seq(b"seed".to_vec(), vec![1; 20 * 1024], 1, None)?;
-                    cf.immutable_memtables
-                        .push(Arc::new(crate::memtable::SkipListMemtable::new()));
+                    cf.immutable_memtables.push(Arc::new(
+                        cntryl_midge_table::memtable::SkipListMemtable::new(),
+                    ));
                     event_loop.state.sequence = 1;
                 }
                 let put = |cf_id, key: &'static [u8], size| TransactionOp::Put {
@@ -377,7 +382,7 @@ mod tests {
     ) -> MidgeResult<()> {
         use super::super::wal::ApplyTransactionRequest;
         use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse};
-        use crate::wal::DurabilityPolicy;
+        use cntryl_midge_durability::wal::DurabilityPolicy;
 
         for (policy, value_size, appends) in [
             (DurabilityPolicy::Strict, 2 * 1024, 1),
@@ -450,7 +455,7 @@ mod tests {
     ) -> MidgeResult<()> {
         use super::super::wal::ApplyTransactionRequest;
         use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse};
-        use crate::wal::DurabilityPolicy;
+        use cntryl_midge_durability::wal::DurabilityPolicy;
 
         for policy in [DurabilityPolicy::Strict, DurabilityPolicy::Batched] {
             // Arrange: the seeded memtable plus both members exceed the window,
@@ -537,7 +542,7 @@ mod tests {
     ) -> MidgeResult<()> {
         use super::super::wal::ApplyTransactionRequest;
         use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse};
-        use crate::wal::DurabilityPolicy;
+        use cntryl_midge_durability::wal::DurabilityPolicy;
 
         // Arrange: an empty-range delete stages a commit sequence but adds no
         // growth; the follower alone fits the window but not beside the seed.
@@ -696,7 +701,9 @@ mod tests {
             .get_cf_mut(0)
             .unwrap()
             .immutable_memtables
-            .push(Arc::new(crate::memtable::SkipListMemtable::new()));
+            .push(Arc::new(
+                cntryl_midge_table::memtable::SkipListMemtable::new(),
+            ));
         let ops = || {
             vec![TransactionOp::Put {
                 cf_id: 0,
@@ -711,7 +718,7 @@ mod tests {
             request_id,
             ops: ops(),
             assertions: Vec::new(),
-            durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+            durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Batched),
             start_sequence: None,
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
         };

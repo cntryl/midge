@@ -1,7 +1,7 @@
 //! Runtime and cloud durability policy configuration.
 
-use crate::wal::policy::BatchConfig;
-use crate::wal::DurabilityPolicy;
+use cntryl_midge_durability::wal::policy::BatchConfig;
+use cntryl_midge_durability::wal::DurabilityPolicy;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,7 +86,7 @@ pub struct RuntimeConfig {
     /// Opt-in amortized WAL sync floor (#904); `None` records every strict
     /// sync's floor exactly.
     pub(crate) wal_sync_floor: Option<crate::config::AmortizedSyncFloor>,
-    pub(crate) ttl_clock: Arc<crate::common::time::ObservedClock>,
+    pub(crate) ttl_clock: Arc<cntryl_midge_core::common::time::ObservedClock>,
     pub wal_durability_policy: DurabilityPolicy,
     pub wal_batch_config: BatchConfig,
     pub storage_io_timeout: Duration,
@@ -97,9 +97,10 @@ pub struct RuntimeConfig {
     pub(crate) shutdown_cloud_drain_timeout: Duration,
     pub cloud_runtime_policy: CloudRuntimePolicy,
     pub(crate) retry_policy: RuntimeRetryPolicy,
-    pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
-    pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
-    pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    pub hybrid_storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
+    pub hybrid_storage_events:
+        Option<crossbeam::channel::Receiver<cntryl_midge_storage::StorageEvent>>,
+    pub cloud_metadata_storage: Option<Arc<cntryl_midge_storage::cloud::CloudStorage>>,
     /// Provider-backed cloud requires a lease-epoch-fenced V2 DDL registry.
     /// Simulated cloud fixtures may attach metadata storage for mirror tests
     /// without enabling the provider DDL protocol.
@@ -110,10 +111,11 @@ pub struct RuntimeConfig {
     pub(crate) metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     /// Immutable SST reads, including compaction inputs, may be backed by
     /// version-pinned cloud range requests instead of resident local files.
-    pub(crate) sst_read_fs: Option<Arc<dyn crate::io::Fs>>,
+    pub(crate) sst_read_fs: Option<Arc<dyn cntryl_midge_core::io::Fs>>,
     /// Remote WAL segments replayed during startup and still eligible for
     /// manifest-covered cleanup.
-    pub(crate) recovered_cloud_wal_entries: BTreeMap<u64, crate::wal::cloud_catalog::CatalogEntry>,
+    pub(crate) recovered_cloud_wal_entries:
+        BTreeMap<u64, cntryl_midge_durability::wal::cloud_catalog::CatalogEntry>,
     pub(crate) recovered_cloud_wal_anchor_sequence: u64,
     pub recovered_cloud_wal_segments: BTreeMap<u64, u64>,
     /// Writer epochs paired with `recovered_cloud_wal_segments` by segment id.
@@ -126,9 +128,9 @@ pub struct RuntimeConfig {
     pub(crate) recovered_local_wal_segments: BTreeMap<u64, u64>,
     /// Writer epochs paired with `recovered_local_wal_segments` by segment id.
     pub(crate) recovered_local_wal_segment_epochs: BTreeMap<u64, u64>,
-    pub compression_policy: crate::codec::CompressionPolicy,
+    pub compression_policy: cntryl_midge_core::codec::CompressionPolicy,
     pub block_cache_size: usize,
-    pub block_cache_policy: crate::sst::cache::CachePolicyType,
+    pub block_cache_policy: cntryl_midge_table::sst::cache::CachePolicyType,
     pub(crate) target_sst_size: usize,
     pub(crate) compaction_memory_limit: usize,
     pub(crate) flush_memory_limit: usize,
@@ -139,11 +141,11 @@ pub struct RuntimeConfig {
     /// Shared lease-health flag.  Set to `false` by the heartbeat thread when
     /// renewal fails.  The event loop checks this before accepting writes.
     pub lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
-    pub(crate) lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
+    pub(crate) lease_validity: Option<Arc<cntryl_midge_durability::lease::LeaseValidity>>,
     /// Leader store for epoch validation at WAL sync boundaries.
     /// Injected into the WAL actor so it can verify the epoch is still
     /// valid before flushing to durable storage.
-    pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+    pub leader_store: Option<Arc<dyn cntryl_midge_durability::lease::LeaderStore>>,
     /// This instance's own lease holder identity, paired with
     /// `leader_store` for fencing checks that must verify `holder_id` as
     /// well as epoch (lsm-spec format/lease.md §5.1, §6 item 1).
@@ -155,7 +157,7 @@ pub struct RuntimeConfig {
     /// Explicit owner of startup transition observations for internal tests.
     pub(crate) startup_observer: Option<Arc<dyn super::StartupObserver>>,
     /// Mandatory runtime initialization shares the original open budget.
-    pub(crate) startup_scope: Option<crate::common::DeadlineScope>,
+    pub(crate) startup_scope: Option<cntryl_midge_core::common::DeadlineScope>,
 }
 
 impl Default for RuntimeConfig {
@@ -166,10 +168,10 @@ impl Default for RuntimeConfig {
             write_backpressure: crate::config::WriteBackpressureConfig::default(),
             compaction_levels: crate::config::CompactionLevelConfig::default(),
             wal_sync_floor: None,
-            ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
+            ttl_clock: Arc::new(cntryl_midge_core::common::time::ObservedClock::default()),
             wal_durability_policy: DurabilityPolicy::Batched,
             wal_batch_config: BatchConfig::default(),
-            storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            storage_io_timeout: cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
             runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
             shutdown_cloud_drain_timeout: crate::config::DEFAULT_CLOUD_SHUTDOWN_DRAIN_TIMEOUT,
             cloud_runtime_policy: CloudRuntimePolicy::default(),
@@ -186,9 +188,9 @@ impl Default for RuntimeConfig {
             recovered_cloud_wal_segment_epochs: BTreeMap::new(),
             recovered_local_wal_segments: BTreeMap::new(),
             recovered_local_wal_segment_epochs: BTreeMap::new(),
-            compression_policy: crate::codec::CompressionPolicy::default(),
+            compression_policy: cntryl_midge_core::codec::CompressionPolicy::default(),
             block_cache_size: 128 * 1024 * 1024,
-            block_cache_policy: crate::sst::cache::CachePolicyType::Lru,
+            block_cache_policy: cntryl_midge_table::sst::cache::CachePolicyType::Lru,
             target_sst_size: crate::compaction::DEFAULT_TARGET_SST_SIZE,
             compaction_memory_limit: crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT,
             flush_memory_limit: 256 * 1024 * 1024,

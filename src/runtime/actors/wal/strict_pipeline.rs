@@ -4,12 +4,12 @@ use super::{
     FloorEdit, PendingStrictIo, PendingStrictSync, PreparedTransactionAppend, SyncCadence,
     WalActor, WalTransitionOperation,
 };
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition::WalSyncTicket;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::wal::traits::{WalSyncCompletion, WalSyncPrefix};
-use crate::wal::DurabilityPolicy;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::wal::traits::{WalSyncCompletion, WalSyncPrefix};
+use cntryl_midge_durability::wal::DurabilityPolicy;
 
 impl WalActor {
     /// Called only after the pending physical callback has reached terminal
@@ -20,7 +20,7 @@ impl WalActor {
 
     pub(crate) fn supports_sync_submission(&self) -> bool {
         self.writer()
-            .is_some_and(crate::wal::WalWriter::supports_sync_submission)
+            .is_some_and(cntryl_midge_durability::wal::WalWriter::supports_sync_submission)
     }
 
     pub(crate) fn prepared_retained_bytes(prepared: &[PreparedTransactionAppend]) -> usize {
@@ -71,7 +71,7 @@ impl WalActor {
         let prevalidated = root.is_some() || self.validate_writer_admission(state)?;
         if self
             .writer()
-            .is_some_and(crate::wal::WalWriter::supports_sequenced_submission)
+            .is_some_and(cntryl_midge_durability::wal::WalWriter::supports_sequenced_submission)
         {
             return self
                 .begin_sequenced_group_append(state, prepared, ticket, root, prevalidated)
@@ -101,7 +101,7 @@ impl WalActor {
         params: &super::SpilledTransactionAppendParams,
         proof: Option<&super::SpilledValidationProof>,
         ticket: &WalSyncTicket,
-        memory: &crate::common::resource_budget::ResourceBudget,
+        memory: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<(PendingStrictSync, super::PreparedSpilledAppend)> {
         let root = self.begin_strict_writer_group(state)?;
         let authority_prevalidated = root.is_some() || self.validate_writer_admission(state)?;
@@ -133,9 +133,11 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         ticket: &WalSyncTicket,
-        root: Option<&crate::lease::WriterEffectGroup>,
+        root: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
     ) -> MidgeResult<PendingStrictSync> {
-        crate::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
+        cntryl_midge_core::failpoints::fail_point!(
+            "midge::wal::txn_after_commit_append_before_sync"
+        );
         self.validate_sync_authority(state)?;
         self.begin_io_transition(WalTransitionOperation::Sync)?;
         WalTransitionBoundary::BeforeFsync.check()?;
@@ -170,7 +172,7 @@ impl WalActor {
             receipt,
             expected,
             started,
-            deadline: crate::common::OperationDeadline::from_start(
+            deadline: cntryl_midge_core::common::OperationDeadline::from_start(
                 started,
                 self.storage_io_timeout,
             ),
@@ -248,7 +250,7 @@ impl WalActor {
             metrics.record_wal_sync();
             metrics.record_wal_fsync_latency(elapsed);
         });
-        crate::failpoints::fail_point!("midge::wal::txn_after_sync_before_ack");
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::txn_after_sync_before_ack");
         Ok(pending.receipt)
     }
 }

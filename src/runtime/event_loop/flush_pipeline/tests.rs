@@ -3,15 +3,15 @@ use std::sync::atomic::AtomicBool;
 
 fn event_loop_with_hybrid_storage(
     directory: &tempfile::TempDir,
-) -> crate::common::MidgeResult<(EventLoop, Arc<crate::storage::HybridStorage>)> {
+) -> cntryl_midge_core::common::MidgeResult<(EventLoop, Arc<cntryl_midge_storage::HybridStorage>)> {
     let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+    let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+        Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         String::new(),
     ));
-    let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     let config = crate::runtime::RuntimeConfig {
         hybrid_storage: Some(Arc::clone(&hybrid)),
@@ -29,7 +29,7 @@ fn event_loop_with_hybrid_storage(
 
 #[test]
 fn should_preserve_resource_limit_kind_when_flush_waiter_is_failed(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -50,7 +50,7 @@ fn should_preserve_resource_limit_kind_when_flush_waiter_is_failed(
     event_loop.fail_flush_waiters(
         0,
         7,
-        &crate::common::MidgeError::ResourceLimit("flush budget exhausted".to_string()),
+        &cntryl_midge_core::common::MidgeError::ResourceLimit("flush budget exhausted".to_string()),
     );
 
     // Assert: backpressure must reach the flush caller as backpressure, not
@@ -59,7 +59,7 @@ fn should_preserve_resource_limit_kind_when_flush_waiter_is_failed(
         Ok(crate::runtime::RuntimeResponse::Error { error, .. }) => assert!(
             matches!(
                 &error,
-                crate::common::MidgeError::ResourceLimit(message)
+                cntryl_midge_core::common::MidgeError::ResourceLimit(message)
                     if message == "flush budget exhausted"
             ),
             "flush waiter lost the error kind: {error:?}"
@@ -71,7 +71,7 @@ fn should_preserve_resource_limit_kind_when_flush_waiter_is_failed(
 
 #[test]
 fn should_not_report_busy_when_deferred_drop_fails_from_flush_pipeline(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: a safe drop_column_family deferred behind an active
     // publication, then failed by a transient flush-pipeline Busy.
     let directory = tempfile::tempdir()?;
@@ -92,7 +92,7 @@ fn should_not_report_busy_when_deferred_drop_fails_from_flush_pipeline(
     // Act
     event_loop.fail_deferred_column_family_drops(
         0,
-        &crate::common::MidgeError::Busy(
+        &cntryl_midge_core::common::MidgeError::Busy(
             "flush 7 writer validation could not complete: lease io error".to_string(),
         ),
     );
@@ -103,13 +103,13 @@ fn should_not_report_busy_when_deferred_drop_fails_from_flush_pipeline(
     match response.recv_timeout(std::time::Duration::from_secs(1)) {
         Ok(crate::runtime::RuntimeResponse::Error { error, .. }) => {
             assert!(
-                !matches!(error, crate::common::MidgeError::Busy(_)),
+                !matches!(error, cntryl_midge_core::common::MidgeError::Busy(_)),
                 "flush pipeline failure reached drop_column_family as Busy: {error:?}"
             );
             assert!(
                 matches!(
                     &error,
-                    crate::common::MidgeError::Aborted(message)
+                    cntryl_midge_core::common::MidgeError::Aborted(message)
                         if message.contains(
                             "flush 7 writer validation could not complete: lease io error"
                         )
@@ -128,7 +128,7 @@ fn should_not_report_busy_when_deferred_drop_fails_from_flush_pipeline(
 
 #[test]
 fn should_yield_flush_publication_turn_to_restored_deferred_request(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -170,7 +170,8 @@ fn should_yield_flush_publication_turn_to_restored_deferred_request(
 }
 
 #[test]
-fn should_separate_writes_at_freeze_linearization_boundary() -> crate::common::MidgeResult<()> {
+fn should_separate_writes_at_freeze_linearization_boundary(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -220,7 +221,7 @@ fn should_separate_writes_at_freeze_linearization_boundary() -> crate::common::M
 
 #[test]
 fn should_resume_built_flush_when_compaction_publication_releases_the_gate(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -253,7 +254,7 @@ fn should_resume_built_flush_when_compaction_publication_releases_the_gate(
         identity,
         directory.path().join("built.sst"),
         None,
-        crate::runtime::FileMeta {
+        cntryl_midge_durability::metadata::intent::FileMeta {
             name: String::new(),
             level: 0,
             size_bytes: 1,
@@ -289,7 +290,7 @@ fn should_resume_built_flush_when_compaction_publication_releases_the_gate(
 
 #[test]
 fn should_release_storage_reservation_when_orphan_build_completion_is_discarded(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -304,11 +305,13 @@ fn should_release_storage_reservation_when_orphan_build_completion_is_discarded(
     };
     let completion = crate::runtime::actors::flush::FlushBuildCompletion {
         identity,
-        memtable: Arc::new(crate::memtable::SkipListMemtable::new()),
+        memtable: Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new()),
         staging_path: directory.path().join("orphan.sst"),
         reservation: Some(reservation),
         build_ns: 1,
-        result: Err(crate::common::MidgeError::Fenced("orphan".to_string())),
+        result: Err(cntryl_midge_core::common::MidgeError::Fenced(
+            "orphan".to_string(),
+        )),
     };
 
     // Act
@@ -321,16 +324,17 @@ fn should_release_storage_reservation_when_orphan_build_completion_is_discarded(
 }
 
 #[test]
-fn should_remove_failed_flush_output_from_injected_filesystem() -> crate::common::MidgeResult<()> {
+fn should_remove_failed_flush_output_from_injected_filesystem(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
-    let injected_fs = Arc::new(crate::io::MockFs::new());
-    let mut staged = crate::io::Fs::open(
+    let injected_fs = Arc::new(cntryl_midge_core::io::MockFs::new());
+    let mut staged = cntryl_midge_core::io::Fs::open(
         injected_fs.as_ref(),
-        &crate::io::FsPath::new("orphan.sst"),
-        crate::io::OpenOptions {
-            mode: crate::io::OpenMode::ReadWrite,
+        &cntryl_midge_core::io::FsPath::new("orphan.sst"),
+        cntryl_midge_core::io::OpenOptions {
+            mode: cntryl_midge_core::io::OpenMode::ReadWrite,
             create: true,
             create_new: false,
             truncate: true,
@@ -351,11 +355,13 @@ fn should_remove_failed_flush_output_from_injected_filesystem() -> crate::common
             cf_id: 0,
             sequence: 1,
         },
-        memtable: Arc::new(crate::memtable::SkipListMemtable::new()),
+        memtable: Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new()),
         staging_path: std::path::PathBuf::from("orphan.sst"),
         reservation: Some(reservation),
         build_ns: 1,
-        result: Err(crate::common::MidgeError::Fenced("orphan".to_string())),
+        result: Err(cntryl_midge_core::common::MidgeError::Fenced(
+            "orphan".to_string(),
+        )),
     };
 
     // Act
@@ -370,25 +376,35 @@ fn should_remove_failed_flush_output_from_injected_filesystem() -> crate::common
 struct FlakyLeaderStore {
     epoch: u64,
     fail_next_read: std::sync::atomic::AtomicBool,
-    error: fn() -> crate::lease::LeaseError,
+    error: fn() -> cntryl_midge_durability::lease::LeaseError,
 }
 
-impl crate::lease::LeaderStore for FlakyLeaderStore {
+impl cntryl_midge_durability::lease::LeaderStore for FlakyLeaderStore {
     fn acquire_leadership(
         &self,
         _holder_id: &str,
-    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
-        Err(crate::lease::LeaseError::Internal("not used".into()))
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaderRecord,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
+        Err(cntryl_midge_durability::lease::LeaseError::Internal(
+            "not used".into(),
+        ))
     }
 
-    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+    fn read_current(
+        &self,
+    ) -> Result<
+        Option<cntryl_midge_durability::lease::LeaderRecord>,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         if self
             .fail_next_read
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             return Err((self.error)());
         }
-        Ok(Some(crate::lease::LeaderRecord {
+        Ok(Some(cntryl_midge_durability::lease::LeaderRecord {
             epoch: self.epoch,
             holder_id: "writer".to_string(),
             acquired_at: "test".to_string(),
@@ -398,21 +414,29 @@ impl crate::lease::LeaderStore for FlakyLeaderStore {
 
 struct ValidityExpiringLeaderStore {
     epoch: u64,
-    validity: Arc<crate::lease::LeaseValidity>,
+    validity: Arc<cntryl_midge_durability::lease::LeaseValidity>,
     expire_on_validation: bool,
 }
-impl crate::lease::LeaderStore for ValidityExpiringLeaderStore {
+impl cntryl_midge_durability::lease::LeaderStore for ValidityExpiringLeaderStore {
     fn acquire_leadership(
         &self,
         _holder_id: &str,
-    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaderRecord,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         unreachable!("validation fixture")
     }
-    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+    fn read_current(
+        &self,
+    ) -> Result<
+        Option<cntryl_midge_durability::lease::LeaderRecord>,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         if self.expire_on_validation {
             self.validity.expire_for_test();
         }
-        Ok(Some(crate::lease::LeaderRecord {
+        Ok(Some(cntryl_midge_durability::lease::LeaderRecord {
             epoch: self.epoch,
             holder_id: "writer".into(),
             acquired_at: "test".into(),
@@ -422,20 +446,22 @@ impl crate::lease::LeaderStore for ValidityExpiringLeaderStore {
 
 #[test]
 fn should_reject_flush_metadata_when_provider_validation_outlives_validity(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     assert_rejected_flush_metadata(true)
 }
 
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_reject_flush_metadata_when_intent_persistence_outlives_validity(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     assert_rejected_flush_metadata(false)
 }
 
-fn assert_rejected_flush_metadata(expire_on_validation: bool) -> crate::common::MidgeResult<()> {
+fn assert_rejected_flush_metadata(
+    expire_on_validation: bool,
+) -> cntryl_midge_core::common::MidgeResult<()> {
     #[cfg(feature = "failpoints")]
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     #[cfg(feature = "failpoints")]
     let _scenario = fail::FailScenario::setup();
     // Arrange
@@ -450,7 +476,7 @@ fn assert_rejected_flush_metadata(expire_on_validation: bool) -> crate::common::
     )?;
     let flush_id = event_loop.freeze_active_memtable(0)?.unwrap();
     let epoch = event_loop.authority.fencing.writer_epoch;
-    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity
         .activate(
             epoch,
@@ -471,8 +497,8 @@ fn assert_rejected_flush_metadata(expire_on_validation: bool) -> crate::common::
             cf_id: 0,
             sequence: 1,
         },
-        file_meta: crate::runtime::FileMeta {
-            name: crate::cloud_layout::file_name(0, 0, 1),
+        file_meta: cntryl_midge_durability::metadata::intent::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
             level: 0,
             size_bytes: 128,
             content_crc32c: Some(1),
@@ -488,9 +514,9 @@ fn assert_rejected_flush_metadata(expire_on_validation: bool) -> crate::common::
     };
     let metadata = || {
         [
-            crate::metadata::files::MANIFEST_SNAPSHOT,
-            crate::metadata::files::JOURNAL,
-            crate::metadata::files::INTENT_LOG,
+            cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT,
+            cntryl_midge_durability::metadata::files::JOURNAL,
+            cntryl_midge_durability::metadata::files::INTENT_LOG,
         ]
         .map(|name| std::fs::read(directory.path().join(name)).ok())
     };
@@ -506,7 +532,10 @@ fn assert_rejected_flush_metadata(expire_on_validation: bool) -> crate::common::
     // Act
     let result = event_loop.commit_flush_metadata(&delta);
     // Assert
-    assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+    ));
     if expire_on_validation {
         assert_eq!(metadata(), before);
     } else {
@@ -525,15 +554,25 @@ struct ExpiringLeaderStore {
     valid_reads: std::sync::atomic::AtomicUsize,
 }
 
-impl crate::lease::LeaderStore for ExpiringLeaderStore {
+impl cntryl_midge_durability::lease::LeaderStore for ExpiringLeaderStore {
     fn acquire_leadership(
         &self,
         _holder_id: &str,
-    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
-        Err(crate::lease::LeaseError::Internal("not used".into()))
+    ) -> Result<
+        cntryl_midge_durability::lease::LeaderRecord,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
+        Err(cntryl_midge_durability::lease::LeaseError::Internal(
+            "not used".into(),
+        ))
     }
 
-    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+    fn read_current(
+        &self,
+    ) -> Result<
+        Option<cntryl_midge_durability::lease::LeaderRecord>,
+        cntryl_midge_durability::lease::LeaseError,
+    > {
         let remaining = self.valid_reads.load(std::sync::atomic::Ordering::SeqCst);
         let holder = if remaining == 0 {
             "successor"
@@ -542,7 +581,7 @@ impl crate::lease::LeaderStore for ExpiringLeaderStore {
                 .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
             "writer"
         };
-        Ok(Some(crate::lease::LeaderRecord {
+        Ok(Some(cntryl_midge_durability::lease::LeaderRecord {
             epoch: self.epoch,
             holder_id: holder.to_string(),
             acquired_at: "test".to_string(),
@@ -551,7 +590,8 @@ impl crate::lease::LeaderStore for ExpiringLeaderStore {
 }
 
 #[test]
-fn should_retire_no_local_wal_when_lease_is_lost_during_prune() -> crate::common::MidgeResult<()> {
+fn should_retire_no_local_wal_when_lease_is_lost_during_prune(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: three flushed sealed segments, and a lease that stays
     // valid for the pass preamble only.
     let directory = tempfile::tempdir()?;
@@ -559,7 +599,7 @@ fn should_retire_no_local_wal_when_lease_is_lost_during_prune() -> crate::common
     let wal_dir = state.host_wal_dir().clone();
     for segment_id in 1..=3 {
         std::fs::write(
-            wal_dir.join(crate::wal::segment_file_name(segment_id)),
+            wal_dir.join(cntryl_midge_durability::wal::segment_file_name(segment_id)),
             b"x",
         )?;
     }
@@ -590,7 +630,7 @@ fn should_retire_no_local_wal_when_lease_is_lost_during_prune() -> crate::common
     // anything, so after the loss nothing is retired or deleted.
     let exists = |segment_id| {
         wal_dir
-            .join(crate::wal::segment_file_name(segment_id))
+            .join(cntryl_midge_durability::wal::segment_file_name(segment_id))
             .exists()
     };
     assert_eq!((exists(1), exists(2), exists(3)), (true, true, true));
@@ -603,10 +643,10 @@ fn should_retire_no_local_wal_when_lease_is_lost_during_prune() -> crate::common
 
 #[test]
 fn should_retry_flush_publication_when_completion_validation_fails_transiently(
-) -> crate::common::MidgeResult<()> {
-    let unanswered: [fn() -> crate::lease::LeaseError; 2] = [
-        || crate::lease::LeaseError::IoError("leader read failed".into()),
-        || crate::lease::LeaseError::Timeout("leader read".into()),
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    let unanswered: [fn() -> cntryl_midge_durability::lease::LeaseError; 2] = [
+        || cntryl_midge_durability::lease::LeaseError::IoError("leader read failed".into()),
+        || cntryl_midge_durability::lease::LeaseError::Timeout("leader read".into()),
     ];
     for error in unanswered {
         // Arrange
@@ -648,7 +688,9 @@ fn should_retry_flush_publication_when_completion_validation_fails_transiently(
             identity,
             reservation: None,
             publish_ns: 1,
-            result: Err(crate::common::MidgeError::Internal("unused".into())),
+            result: Err(cntryl_midge_core::common::MidgeError::Internal(
+                "unused".into(),
+            )),
         });
 
         // Assert
@@ -667,7 +709,8 @@ fn should_retry_flush_publication_when_completion_validation_fails_transiently(
 }
 
 #[test]
-fn should_not_reload_metadata_after_flush_worker_failure() -> crate::common::MidgeResult<()> {
+fn should_not_reload_metadata_after_flush_worker_failure(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -683,7 +726,7 @@ fn should_not_reload_metadata_after_flush_worker_failure() -> crate::common::Mid
         event_loop
             .state
             .db_path
-            .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+            .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT),
         b"not a manifest",
     )?;
     event_loop.publication.publication_gate.try_acquire(
@@ -694,7 +737,7 @@ fn should_not_reload_metadata_after_flush_worker_failure() -> crate::common::Mid
     event_loop.fail_flush_pipeline(
         flush_id,
         None,
-        &crate::common::MidgeError::Internal("worker failed".into()),
+        &cntryl_midge_core::common::MidgeError::Internal("worker failed".into()),
     );
 
     // Assert
@@ -705,7 +748,8 @@ fn should_not_reload_metadata_after_flush_worker_failure() -> crate::common::Mid
 }
 
 #[test]
-fn should_fence_metadata_when_flush_commit_result_is_uncertain() -> crate::common::MidgeResult<()> {
+fn should_fence_metadata_when_flush_commit_result_is_uncertain(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -731,7 +775,7 @@ fn should_fence_metadata_when_flush_commit_result_is_uncertain() -> crate::commo
         event_loop
             .state
             .db_path
-            .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+            .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT),
         b"not a manifest",
     )?;
     event_loop.publication.publication_gate.try_acquire(
@@ -745,8 +789,8 @@ fn should_fence_metadata_when_flush_commit_result_is_uncertain() -> crate::commo
         publish_ns: 0,
         result: Ok(FlushPublicationDelta {
             identity,
-            file_meta: crate::runtime::FileMeta {
-                name: crate::cloud_layout::file_name(0, 0, 1),
+            file_meta: cntryl_midge_durability::metadata::intent::FileMeta {
+                name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
                 level: 0,
                 size_bytes: 10,
                 content_crc32c: Some(1),
@@ -767,14 +811,14 @@ fn should_fence_metadata_when_flush_commit_result_is_uncertain() -> crate::commo
     assert!(event_loop.state.persistence_anomaly_detected());
     assert!(matches!(
         event_loop.state.ensure_metadata_current(),
-        Err(crate::common::MidgeError::Fenced(_))
+        Err(cntryl_midge_core::common::MidgeError::Fenced(_))
     ));
     Ok(())
 }
 
 #[test]
 fn should_keep_gate_owned_by_wal_prune_when_flush_failure_did_not_acquire_it(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -790,7 +834,7 @@ fn should_keep_gate_owned_by_wal_prune_when_flush_failure_did_not_acquire_it(
         event_loop
             .state
             .db_path
-            .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+            .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT),
         b"not a manifest",
     )?;
     let prune_owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
@@ -803,7 +847,7 @@ fn should_keep_gate_owned_by_wal_prune_when_flush_failure_did_not_acquire_it(
     event_loop.fail_flush_pipeline(
         flush_id,
         None,
-        &crate::common::MidgeError::Internal("flush admission failed".into()),
+        &cntryl_midge_core::common::MidgeError::Internal("flush admission failed".into()),
     );
 
     // Assert: a non-owner cannot open the gate or trigger a metadata reload.
@@ -821,7 +865,7 @@ fn should_keep_gate_owned_by_wal_prune_when_flush_failure_did_not_acquire_it(
 
 #[test]
 fn should_release_fenced_failed_publish_admission_only_when_all_owned_outputs_are_absent(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     for residue in ["absent", "staging", "temporary", "final", "unknown owner"] {
         // Arrange
         let directory = tempfile::tempdir()?;
@@ -845,7 +889,7 @@ fn should_release_fenced_failed_publish_admission_only_when_all_owned_outputs_ar
             .reserve_for_flush_with_token(128)
             .expect("flush admission");
         let staging_path = directory.path().join("failed.sst");
-        let name = crate::cloud_layout::file_name(0, 0, 1);
+        let name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
         let path = match residue {
             "staging" => Some(staging_path.clone()),
             "temporary" => Some(directory.path().join("failed.sst.tmp")),
@@ -865,7 +909,7 @@ fn should_release_fenced_failed_publish_admission_only_when_all_owned_outputs_ar
             identity,
             staging_path,
             reservation: Some(token),
-            file_meta: crate::runtime::FileMeta {
+            file_meta: cntryl_midge_durability::metadata::intent::FileMeta {
                 name,
                 level: 0,
                 size_bytes: 128,
@@ -893,7 +937,7 @@ fn should_release_fenced_failed_publish_admission_only_when_all_owned_outputs_ar
             identity,
             reservation: Some(token),
             publish_ns: 1,
-            result: Err(crate::common::MidgeError::Fenced(
+            result: Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "publisher lost its lease".into(),
             )),
         });
@@ -909,7 +953,7 @@ fn should_release_fenced_failed_publish_admission_only_when_all_owned_outputs_ar
 
 #[test]
 fn should_keep_flush_admission_for_retry_when_publication_fails_after_output_is_built(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -943,8 +987,8 @@ fn should_keep_flush_admission_for_retry_when_publication_fails_after_output_is_
         identity,
         staging_path: staging_path.clone(),
         reservation: Some(reservation),
-        file_meta: crate::runtime::FileMeta {
-            name: crate::cloud_layout::file_name(0, 0, 1),
+        file_meta: cntryl_midge_durability::metadata::intent::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
             level: 0,
             size_bytes: 128,
             content_crc32c: Some(1),
@@ -963,7 +1007,7 @@ fn should_keep_flush_admission_for_retry_when_publication_fails_after_output_is_
         identity,
         reservation: Some(reservation),
         publish_ns: 1,
-        result: Err(crate::common::MidgeError::Timeout(
+        result: Err(cntryl_midge_core::common::MidgeError::Timeout(
             "cloud unavailable".into(),
         )),
     });
@@ -985,7 +1029,7 @@ fn should_keep_flush_admission_for_retry_when_publication_fails_after_output_is_
 
 #[test]
 fn should_retain_flush_admission_when_failed_build_residue_cannot_be_removed(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     for is_temp in [false, true] {
         // Arrange
         let directory = tempfile::tempdir()?;
@@ -1010,11 +1054,13 @@ fn should_retain_flush_admission_when_failed_build_residue_cannot_be_removed(
                 cf_id: 0,
                 sequence: 1,
             },
-            memtable: Arc::new(crate::memtable::SkipListMemtable::new()),
+            memtable: Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new()),
             staging_path,
             reservation: Some(reservation),
             build_ns: 1,
-            result: Err(crate::common::MidgeError::NoSpace("build failed".into())),
+            result: Err(cntryl_midge_core::common::MidgeError::NoSpace(
+                "build failed".into(),
+            )),
         };
 
         // Act
@@ -1030,7 +1076,7 @@ fn should_retain_flush_admission_when_failed_build_residue_cannot_be_removed(
 
 #[test]
 fn should_settle_storage_reservation_when_published_output_lost_immutable_owner(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -1045,8 +1091,8 @@ fn should_settle_storage_reservation_when_published_output_lost_immutable_owner(
     };
     let delta = FlushPublicationDelta {
         identity,
-        file_meta: crate::runtime::FileMeta {
-            name: crate::cloud_layout::file_name(0, 0, 1),
+        file_meta: cntryl_midge_durability::metadata::intent::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
             level: 0,
             size_bytes: 128,
             content_crc32c: Some(1),
@@ -1070,7 +1116,8 @@ fn should_settle_storage_reservation_when_published_output_lost_immutable_owner(
 }
 
 #[test]
-fn should_seal_active_wal_when_a_memtable_is_still_unflushed() -> crate::common::MidgeResult<()> {
+fn should_seal_active_wal_when_a_memtable_is_still_unflushed(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: prune is the only local seal trigger, so a column family
     // that never goes quiet must not keep the open segment growing
     // forever.
@@ -1099,7 +1146,7 @@ fn should_seal_active_wal_when_a_memtable_is_still_unflushed() -> crate::common:
     let active = event_loop
         .state
         .host_wal_dir()
-        .join(crate::wal::segment_file_name(current));
+        .join(cntryl_midge_durability::wal::segment_file_name(current));
     let active_len_before = std::fs::metadata(&active)?.len();
     assert!(
         event_loop
@@ -1128,7 +1175,7 @@ fn should_seal_active_wal_when_a_memtable_is_still_unflushed() -> crate::common:
 /// eventual-flush byte bound, with every memtable empty (#552).
 fn local_event_loop_after_long_wal_history(
     directory: &std::path::Path,
-) -> crate::common::MidgeResult<EventLoop> {
+) -> cntryl_midge_core::common::MidgeResult<EventLoop> {
     let state = crate::runtime::state::RuntimeState::new(directory.to_path_buf(), false);
     let router = Arc::new(crate::runtime::ResponseRouter::new());
     let mut event_loop = EventLoop::new(
@@ -1147,7 +1194,7 @@ fn local_event_loop_after_long_wal_history(
 
 #[test]
 fn should_not_flush_memtable_started_by_a_put_when_wal_history_exceeds_the_byte_bound(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: the byte gap counts from when this memtable started, not
     // from the start of the WAL.
     let directory = tempfile::tempdir()?;
@@ -1174,7 +1221,7 @@ fn should_not_flush_memtable_started_by_a_put_when_wal_history_exceeds_the_byte_
 
 #[test]
 fn should_not_flush_memtable_started_by_a_range_delete_when_wal_history_exceeds_the_byte_bound(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut event_loop = local_event_loop_after_long_wal_history(directory.path())?;
@@ -1196,8 +1243,8 @@ fn should_not_flush_memtable_started_by_a_range_delete_when_wal_history_exceeds_
 }
 
 #[test]
-fn should_count_put_bytes_toward_the_local_wal_gap_when_appending() -> crate::common::MidgeResult<()>
-{
+fn should_count_put_bytes_toward_the_local_wal_gap_when_appending(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut event_loop = local_event_loop_after_long_wal_history(directory.path())?;
@@ -1222,7 +1269,8 @@ fn should_count_put_bytes_toward_the_local_wal_gap_when_appending() -> crate::co
 }
 
 #[test]
-fn should_not_rotate_local_wal_when_active_segment_is_empty() -> crate::common::MidgeResult<()> {
+fn should_not_rotate_local_wal_when_active_segment_is_empty(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: nothing has been written since the last rotation.
     let directory = tempfile::tempdir()?;
     let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
@@ -1246,21 +1294,24 @@ fn should_not_rotate_local_wal_when_active_segment_is_empty() -> crate::common::
 
 fn local_event_loop_with_sealed_segments(
     directory: &std::path::Path,
-) -> crate::common::MidgeResult<EventLoop> {
+) -> cntryl_midge_core::common::MidgeResult<EventLoop> {
     let mut state = crate::runtime::state::RuntimeState::new(directory.to_path_buf(), false);
     for sequence in 1..=3 {
-        let record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
+        let record = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::Put,
             bytes::Bytes::from(format!("key-{sequence}")),
             Some(bytes::Bytes::from_static(b"value")),
             sequence,
         );
         let mut frame = Vec::new();
-        crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
+        cntryl_midge_durability::wal::frame::append_frame(
+            &mut frame,
+            &cntryl_midge_durability::wal::encoding::encode(&record)?,
+        )?;
         std::fs::write(
             state
                 .host_wal_dir()
-                .join(crate::wal::segment_file_name(sequence)),
+                .join(cntryl_midge_durability::wal::segment_file_name(sequence)),
             frame,
         )?;
     }
@@ -1276,15 +1327,15 @@ fn local_event_loop_with_sealed_segments(
 
 #[test]
 fn should_retain_local_wal_when_sst_metadata_has_no_flush_frontier(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: file membership alone never grants retirement authority.
     let directory = tempfile::tempdir()?;
     let mut event_loop = local_event_loop_with_sealed_segments(directory.path())?;
     event_loop
         .state
         .manifest
-        .add_file(crate::metadata::FileMeta {
-            name: crate::cloud_layout::file_name(0, 0, 1),
+        .add_file(cntryl_midge_durability::metadata::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
             cf_id: 0,
             smallest_seq: Some(1),
             largest_seq: Some(3),
@@ -1300,7 +1351,7 @@ fn should_retain_local_wal_when_sst_metadata_has_no_flush_frontier(
         assert!(event_loop
             .state
             .host_wal_dir()
-            .join(crate::wal::segment_file_name(id))
+            .join(cntryl_midge_durability::wal::segment_file_name(id))
             .exists());
     }
     Ok(())
@@ -1308,22 +1359,23 @@ fn should_retain_local_wal_when_sst_metadata_has_no_flush_frontier(
 
 #[test]
 fn should_retire_local_wal_from_durable_frontiers_without_opening_sst_payloads(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: a durable flush publication grants prefix authority. The SST
     // path is deliberately absent; retention must use the persisted summary.
     let directory = tempfile::tempdir()?;
     let mut event_loop = local_event_loop_with_sealed_segments(directory.path())?;
-    let file: crate::runtime::FileMeta = (&crate::metadata::FileMeta {
-        name: crate::cloud_layout::file_name(0, 0, 1),
-        cf_id: 0,
-        smallest_seq: Some(1),
-        largest_seq: Some(3),
-        ..Default::default()
-    })
-        .into();
+    let file: cntryl_midge_durability::metadata::intent::FileMeta =
+        (&cntryl_midge_durability::metadata::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
+            cf_id: 0,
+            smallest_seq: Some(1),
+            largest_seq: Some(3),
+            ..Default::default()
+        })
+            .into();
     event_loop.state.commit_flush_publication_for(
         crate::runtime::state::FlushManifestPublication {
-            origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+            origin: cntryl_midge_durability::metadata::accounting::Origin::OrdinaryLocalFlush,
             cf_id: 0,
             sequence: 3,
             file_meta: &file,
@@ -1341,7 +1393,7 @@ fn should_retire_local_wal_from_durable_frontiers_without_opening_sst_payloads(
         assert!(!event_loop
             .state
             .host_wal_dir()
-            .join(crate::wal::segment_file_name(id))
+            .join(cntryl_midge_durability::wal::segment_file_name(id))
             .exists());
     }
     assert!(!event_loop.state.host_sst_dir().join(&file.name).exists());
@@ -1350,13 +1402,13 @@ fn should_retire_local_wal_from_durable_frontiers_without_opening_sst_payloads(
 
 #[test]
 fn should_not_checkpoint_manifest_on_event_loop_for_each_flush_name_reservation(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
     let snapshot = directory
         .path()
-        .join(crate::metadata::files::MANIFEST_SNAPSHOT);
+        .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT);
     let before = std::fs::read(&snapshot).ok();
 
     // Act
@@ -1370,16 +1422,21 @@ fn should_not_checkpoint_manifest_on_event_loop_for_each_flush_name_reservation(
     unique.dedup();
     assert_eq!(unique, names);
     assert_eq!(std::fs::read(&snapshot).ok(), before);
-    let journaled = crate::metadata::ManifestPersistence::load(directory.path())
-        .map_err(crate::common::MidgeError::Internal)?;
+    let journaled = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path())
+        .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
     let durable = journaled.next_sst_seqs.get(&0).copied().unwrap_or(1);
     assert!(
         names.iter().all(|seq| *seq < durable),
         "{names:?} vs {durable}"
     );
-    let bumps = crate::metadata::journal::replay_journal(directory.path())?
+    let bumps = cntryl_midge_durability::metadata::journal::replay_journal(directory.path())?
         .into_iter()
-        .filter(|edit| matches!(edit, crate::metadata::ManifestEdit::BumpNextSstSeq { .. }))
+        .filter(|edit| {
+            matches!(
+                edit,
+                cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq { .. }
+            )
+        })
         .count();
     assert_eq!(bumps, 1);
     Ok(())
@@ -1387,30 +1444,32 @@ fn should_not_checkpoint_manifest_on_event_loop_for_each_flush_name_reservation(
 
 #[test]
 fn should_mirror_flush_sst_name_reservation_again_when_mirror_failed(
-) -> crate::common::MidgeResult<()> {
-    use crate::lease::PrimaryLease as _;
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    use cntryl_midge_durability::lease::PrimaryLease as _;
 
     // Arrange: the journal append succeeds but the cloud mirror fails,
     // so the cloud metadata never learns the reserved block.
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
-    crate::metadata::ManifestPersistence::save(
+    cntryl_midge_durability::metadata::ManifestPersistence::save(
         &event_loop.state.db_path,
         &event_loop.state.manifest,
     )
-    .map_err(crate::common::MidgeError::Internal)?;
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+    .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
+    let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+        Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         String::new(),
     ));
-    let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-        crate::lease::CloudLeaseConfig {
-            bucket: "test".to_string(),
-            prefix: String::new(),
-        },
-        directory.path().to_path_buf(),
-        Arc::clone(&cloud),
-    ));
+    let lease = Arc::new(
+        cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+            cntryl_midge_durability::lease::CloudLeaseConfig {
+                bucket: "test".to_string(),
+                prefix: String::new(),
+            },
+            directory.path().to_path_buf(),
+            Arc::clone(&cloud),
+        ),
+    );
     let _lease_guard = Arc::clone(&lease)
         .try_acquire()
         .expect("acquire cloud metadata lease");
@@ -1439,13 +1498,13 @@ fn should_mirror_flush_sst_name_reservation_again_when_mirror_failed(
 
 #[test]
 fn should_not_mirror_sst_name_reservation_while_metadata_reload_is_required(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: a failed reload leaves memory behind disk (#500), and the
     // on-disk intent log is unreadable.
     let directory = tempfile::tempdir()?;
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+    let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+        Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         String::new(),
     ));
     event_loop.actors.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
@@ -1453,7 +1512,7 @@ fn should_not_mirror_sst_name_reservation_while_metadata_reload_is_required(
         event_loop
             .state
             .db_path
-            .join(crate::metadata::files::INTENT_LOG),
+            .join(cntryl_midge_durability::metadata::files::INTENT_LOG),
         b"not json",
     )?;
     assert!(event_loop.state.reload_persisted_metadata().is_err());
@@ -1463,17 +1522,21 @@ fn should_not_mirror_sst_name_reservation_while_metadata_reload_is_required(
 
     // Assert: fenced, and nothing reached the authoritative mirror.
     assert!(
-        matches!(result, Err(crate::common::MidgeError::Fenced(_))),
+        matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+        ),
         "{result:?}"
     );
-    let key =
-        crate::cloud_layout::CloudObjectLayout::metadata_key(crate::metadata::files::INTENT_LOG);
+    let key = cntryl_midge_core::cloud_layout::CloudObjectLayout::metadata_key(
+        cntryl_midge_durability::metadata::files::INTENT_LOG,
+    );
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_get(&key, tx);
     let uploaded = matches!(
         rx.recv_timeout(std::time::Duration::from_secs(1)),
-        Ok(crate::storage::cloud::CloudEvent::Get {
-            result: crate::storage::cloud::CloudOutcome::Ok(_),
+        Ok(cntryl_midge_storage::cloud::CloudEvent::Get {
+            result: cntryl_midge_storage::cloud::CloudOutcome::Ok(_),
             ..
         })
     );
@@ -1483,27 +1546,32 @@ fn should_not_mirror_sst_name_reservation_while_metadata_reload_is_required(
 
 #[test]
 fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_metadata(
-) -> crate::common::MidgeResult<()> {
-    use crate::lease::PrimaryLease as _;
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    use cntryl_midge_durability::lease::PrimaryLease as _;
 
     // Arrange: hand out flush names and a compaction generation, then lose
     // the machine. The replacement sees only the cloud metadata mirror.
     let directory = tempfile::tempdir()?;
     let (mut first, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
-    crate::metadata::ManifestPersistence::save(&first.state.db_path, &first.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+    cntryl_midge_durability::metadata::ManifestPersistence::save(
+        &first.state.db_path,
+        &first.state.manifest,
+    )
+    .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
+    let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+        Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         String::new(),
     ));
-    let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-        crate::lease::CloudLeaseConfig {
-            bucket: "test".to_string(),
-            prefix: String::new(),
-        },
-        directory.path().to_path_buf(),
-        Arc::clone(&cloud),
-    ));
+    let lease = Arc::new(
+        cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+            cntryl_midge_durability::lease::CloudLeaseConfig {
+                bucket: "test".to_string(),
+                prefix: String::new(),
+            },
+            directory.path().to_path_buf(),
+            Arc::clone(&cloud),
+        ),
+    );
     let _lease_guard = Arc::clone(&lease)
         .try_acquire()
         .expect("acquire cloud metadata lease");
@@ -1517,18 +1585,17 @@ fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_meta
     }
     let plan =
         first.assign_compaction_output_sequence(crate::compaction::CompactionPlan::new(0, 0, 1))?;
-    let orphan_key = crate::cloud_layout::object_key(&crate::cloud_layout::compaction_file_name(
-        0,
-        1,
-        plan.output_seq,
-        0,
-    ));
+    let orphan_key = cntryl_midge_core::cloud_layout::object_key(
+        &cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, plan.output_seq, 0),
+    );
     let orphan = b"abandoned immutable compaction output".to_vec();
-    let deadline = crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
-    crate::storage::cloud::BlockingCloud::new(&cloud, &deadline).put_with_precondition(
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+        std::time::Duration::from_secs(5),
+    );
+    cntryl_midge_storage::cloud::BlockingCloud::new(&cloud, &deadline).put_with_precondition(
         &orphan_key,
         orphan.clone(),
-        &crate::storage::StoragePrecondition::IfAbsent,
+        &cntryl_midge_storage::StoragePrecondition::IfAbsent,
     )?;
     drop(first);
     let replacement = tempfile::tempdir()?;
@@ -1536,9 +1603,9 @@ fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_meta
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
         &cloud,
         leader_store.as_ref(),
-        &crate::io::real::test_root(replacement.path()),
+        &cntryl_midge_core::io::real::test_root(replacement.path()),
         replacement.path(),
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
 
     // Act
@@ -1554,9 +1621,12 @@ fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_meta
         "{used:?} then {first_name}"
     );
     assert!(next_generation > plan.output_seq);
-    let deadline = crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
+        std::time::Duration::from_secs(5),
+    );
     assert_eq!(
-        crate::storage::cloud::BlockingCloud::new(&cloud, &deadline).get_optional(&orphan_key)?,
+        cntryl_midge_storage::cloud::BlockingCloud::new(&cloud, &deadline)
+            .get_optional(&orphan_key)?,
         Some(orphan)
     );
     Ok(())
@@ -1564,7 +1634,7 @@ fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_meta
 
 #[test]
 fn should_not_reuse_reserved_flush_sst_name_when_reopened_after_crash(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: hand out names, then lose the in-memory cursor.
     let directory = tempfile::tempdir()?;
     let (mut first, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -1587,8 +1657,8 @@ fn should_not_reuse_reserved_flush_sst_name_when_reopened_after_crash(
 }
 
 #[test]
-fn should_validate_transactions_through_event_loop_read_resources() -> crate::common::MidgeResult<()>
-{
+fn should_validate_transactions_through_event_loop_read_resources(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
@@ -1610,14 +1680,15 @@ fn should_validate_transactions_through_event_loop_read_resources() -> crate::co
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_retain_all_wal_state_when_pre_prune_sync_fails() -> crate::common::MidgeResult<()> {
+fn should_retain_all_wal_state_when_pre_prune_sync_fails(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
-    let _failpoint_guard = crate::failpoints::test_failpoint_guard();
+    let _failpoint_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let directory = tempfile::tempdir()?;
     let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
     let router = Arc::new(crate::runtime::ResponseRouter::new());
     let config = crate::runtime::RuntimeConfig {
-        wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+        wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::Batched,
         ..crate::runtime::RuntimeConfig::default()
     };
     let mut event_loop = EventLoop::new(
@@ -1653,10 +1724,13 @@ fn should_retain_all_wal_state_when_pre_prune_sync_fails() -> crate::common::Mid
     )?;
     let segment_before = event_loop.state.wal.open_segment();
     let durable_before = event_loop.state.wal.frontiers.local_durable();
-    let sealed_path = event_loop
-        .state
-        .host_wal_dir()
-        .join(crate::wal::segment_file_name(segment_before - 1));
+    let sealed_path =
+        event_loop
+            .state
+            .host_wal_dir()
+            .join(cntryl_midge_durability::wal::segment_file_name(
+                segment_before - 1,
+            ));
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("configure WAL sync failure");
 
@@ -1676,7 +1750,9 @@ fn should_retain_all_wal_state_when_pre_prune_sync_fails() -> crate::common::Mid
         event_loop
             .state
             .host_wal_dir()
-            .join(crate::wal::segment_file_name(segment_before))
+            .join(cntryl_midge_durability::wal::segment_file_name(
+                segment_before
+            ))
             .exists(),
         "failed sync must retain the open segment"
     );
@@ -1684,19 +1760,20 @@ fn should_retain_all_wal_state_when_pre_prune_sync_fails() -> crate::common::Mid
 }
 
 #[test]
-fn should_reject_publication_completion_after_lease_loss() -> crate::common::MidgeResult<()> {
+fn should_reject_publication_completion_after_lease_loss(
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let state = crate::runtime::state::RuntimeState::new_in_epoch(directory.path(), false, 7);
     let router = Arc::new(crate::runtime::ResponseRouter::new());
     let healthy = Arc::new(AtomicBool::new(true));
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+    let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+        Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         String::new(),
     ));
-    let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     let config = crate::runtime::RuntimeConfig {
         writer_epoch: 7,
@@ -1738,8 +1815,8 @@ fn should_reject_publication_completion_after_lease_loss() -> crate::common::Mid
             publish_ns: 10,
             result: Ok(FlushPublicationDelta {
                 identity,
-                file_meta: crate::runtime::FileMeta {
-                    name: crate::cloud_layout::file_name(0, 0, 1),
+                file_meta: cntryl_midge_durability::metadata::intent::FileMeta {
+                    name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
                     level: 0,
                     size_bytes: 128,
                     content_crc32c: Some(1),
@@ -1781,7 +1858,7 @@ fn should_reject_publication_completion_after_lease_loss() -> crate::common::Mid
 
 fn event_loop_with_frozen_publishing_flush(
     directory: &tempfile::TempDir,
-) -> crate::common::MidgeResult<(EventLoop, FlushIdentity)> {
+) -> cntryl_midge_core::common::MidgeResult<(EventLoop, FlushIdentity)> {
     let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(directory)?;
     event_loop.state.sequence = 1;
     event_loop
@@ -1810,13 +1887,15 @@ fn deliver_failed_publish(event_loop: &mut EventLoop, identity: FlushIdentity) {
         identity,
         reservation: None,
         publish_ns: 1,
-        result: Err(crate::common::MidgeError::Internal("unused".into())),
+        result: Err(cntryl_midge_core::common::MidgeError::Internal(
+            "unused".into(),
+        )),
     });
 }
 
 #[test]
 fn should_retry_flush_publication_when_ddl_authority_ambiguity_clears_after_completion(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, identity) = event_loop_with_frozen_publishing_flush(&directory)?;
@@ -1853,7 +1932,7 @@ fn recv_flush_result(event_loop: &EventLoop) -> FlushWorkerResult {
 
 type PendingPublish = (
     EventLoop,
-    Arc<crate::storage::HybridStorage>,
+    Arc<cntryl_midge_storage::HybridStorage>,
     u64,
     FlushWorkerResult,
     crossbeam::channel::Receiver<crate::runtime::RuntimeResponse>,
@@ -1863,7 +1942,7 @@ type PendingPublish = (
 /// back the publish result before the loop has handled it.
 fn event_loop_with_publish_result_pending(
     directory: &tempfile::TempDir,
-) -> crate::common::MidgeResult<PendingPublish> {
+) -> cntryl_midge_core::common::MidgeResult<PendingPublish> {
     let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(directory)?;
     hybrid.enable_ephemeral_sst_cache(1 << 20);
     event_loop.state.sequence = 1;
@@ -1893,16 +1972,16 @@ fn event_loop_with_publish_result_pending(
 
 fn flush_frontier(event_loop: &EventLoop) -> Option<u64> {
     match event_loop.state.manifest.flush_frontiers().get(0).ok()? {
-        crate::metadata::frontiers::FamilyFrontier::Live { through_sequence } => {
+        cntryl_midge_durability::metadata::frontiers::FamilyFrontier::Live { through_sequence } => {
             Some(through_sequence)
         }
-        crate::metadata::frontiers::FamilyFrontier::Dropped => None,
+        cntryl_midge_durability::metadata::frontiers::FamilyFrontier::Dropped => None,
     }
 }
 
 #[test]
 fn should_republish_built_flush_exactly_once_when_fence_clears_after_publish_completion(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: baseline with no fence.
     let baseline_dir = tempfile::tempdir()?;
     let (mut baseline, baseline_hybrid, _, publish, _) =
@@ -1941,7 +2020,7 @@ fn should_republish_built_flush_exactly_once_when_fence_clears_after_publish_com
     assert!(matches!(
         response.recv_timeout(std::time::Duration::from_secs(1)),
         Ok(crate::runtime::RuntimeResponse::Error {
-            error: crate::common::MidgeError::Fenced(_),
+            error: cntryl_midge_core::common::MidgeError::Fenced(_),
             ..
         })
     ));
@@ -1972,7 +2051,8 @@ fn should_republish_built_flush_exactly_once_when_fence_clears_after_publish_com
 }
 
 #[test]
-fn should_back_off_each_retry_when_fence_never_clears() -> crate::common::MidgeResult<()> {
+fn should_back_off_each_retry_when_fence_never_clears() -> cntryl_midge_core::common::MidgeResult<()>
+{
     // Arrange
     let directory = tempfile::tempdir()?;
     let (mut event_loop, hybrid, flush_id, publish, _response) =

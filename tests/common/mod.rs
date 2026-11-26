@@ -4,8 +4,7 @@ pub mod crash;
 pub mod metadata_fixtures;
 
 #[cfg(feature = "sqrzl-tests")]
-#[path = "../support/sqrzl.rs"]
-mod sqrzl;
+use cntryl_midge_storage::test_support::sqrzl;
 
 #[cfg(feature = "sqrzl-tests")]
 pub fn prepare_sqrzl_namespace(provider: &cntryl_midge::CloudProviderConfig) -> Result<(), String> {

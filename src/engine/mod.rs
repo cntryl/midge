@@ -14,12 +14,12 @@
 //! Point operations (get, put, delete, scan) are methods on Transaction.
 //! Transaction finalization and range tombstones are also transaction-scoped.
 
-use crate::common::{MidgeError, MidgeResult};
-#[cfg(test)]
-use crate::lease::PrimaryLease;
 #[cfg(test)]
 use crate::runtime::RuntimeState;
 use crate::runtime::{next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+#[cfg(test)]
+use cntryl_midge_durability::lease::PrimaryLease;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -39,13 +39,13 @@ mod startup;
 pub use startup::{install_manual_caller_expiry, OwnerExit};
 mod verification;
 
-pub use crate::types::ColumnFamilyId;
 pub use api::{
     BlockCachePolicy, CloudWritePolicy, ConflictPolicy, Direction, DurabilityPolicy, Goal,
     IteratorState, Key, MemoryBudget, OpenOptions, OpenOptionsBuilder, Query, RecoveryPolicy,
     ScanIterator, Storage, Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 pub use backup::{BackupManifest, BackupObject, BackupStorageKind};
+pub use cntryl_midge_core::types::ColumnFamilyId;
 use lease_state::LeaseState;
 pub use metrics::EngineMetrics;
 pub use verification::StorageVerifier;
@@ -80,7 +80,7 @@ impl ColumnFamilyHandle {
 /// is managed by the runtime actors.
 pub struct Engine {
     #[cfg(feature = "internal-testing")]
-    metadata_accounting: crate::metadata::accounting::MetricsHandle,
+    metadata_accounting: cntryl_midge_durability::metadata::accounting::MetricsHandle,
     /// Runtime (owns the event loop thread)
     runtime: Option<Runtime>,
     /// Handle to submit work to the runtime
@@ -88,7 +88,7 @@ pub struct Engine {
     /// Database path
     db_path: PathBuf,
     /// The database root; transaction spill runs are written below it.
-    root: Arc<dyn crate::io::Fs>,
+    root: Arc<dyn cntryl_midge_core::io::Fs>,
     /// Pure in-memory mode flag.
     memory_mode: bool,
     /// True when opened in cloud-backed mode.
@@ -111,7 +111,7 @@ pub struct Engine {
     ingest_coordinators: dashmap::DashMap<ColumnFamilyId, Arc<ingest::IngestCoordinator>>,
     /// Shared bounded pool for resident transaction intents.
     transaction_memory_pool: Arc<crate::runtime::transaction_spill::TransactionMemoryPool>,
-    ttl_clock: Arc<crate::common::time::ObservedClock>,
+    ttl_clock: Arc<cntryl_midge_core::common::time::ObservedClock>,
     drop_transaction_wait_timeout: Duration,
 }
 
@@ -136,13 +136,15 @@ type CloudSstRecoveryProof = crate::runtime::cloud_startup::CloudSstRecoveryProo
 
 impl Engine {
     #[cfg(feature = "internal-testing")]
-    pub(crate) fn checkpoint_metrics(&self) -> crate::metadata::accounting::MetricsHandle {
+    pub(crate) fn checkpoint_metrics(
+        &self,
+    ) -> cntryl_midge_durability::metadata::accounting::MetricsHandle {
         self.metadata_accounting.clone()
     }
 
     #[cfg(test)]
     fn blocking_cloud_get(
-        cloud: &crate::storage::cloud::CloudStorage,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
         key: &str,
     ) -> MidgeResult<Vec<u8>> {
         crate::runtime::cloud_startup::cloud_io::BlockingCloudIo::new(cloud).get(key)
@@ -150,7 +152,7 @@ impl Engine {
 
     #[cfg(test)]
     fn blocking_cloud_put(
-        cloud: &crate::storage::cloud::CloudStorage,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
         key: &str,
         data: Vec<u8>,
     ) -> MidgeResult<()> {
@@ -159,8 +161,8 @@ impl Engine {
 
     #[cfg(test)]
     fn hydrate_cloud_metadata(
-        cloud: &crate::storage::cloud::CloudStorage,
-        lease: &crate::lease::CloudStorageLease,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
+        lease: &cntryl_midge_durability::lease::CloudStorageLease,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
@@ -170,7 +172,7 @@ impl Engine {
                 .get_leader_store()
                 .expect("provider-backed test lease has a leader store")
                 .as_ref(),
-            &crate::io::real::test_root(db_path),
+            &cntryl_midge_core::io::real::test_root(db_path),
             db_path,
             recovery_policy,
         )
@@ -178,8 +180,8 @@ impl Engine {
 
     #[cfg(test)]
     fn mirror_cloud_metadata(
-        cloud: &crate::storage::cloud::CloudStorage,
-        lease: &crate::lease::CloudStorageLease,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
+        lease: &cntryl_midge_durability::lease::CloudStorageLease,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
@@ -188,7 +190,7 @@ impl Engine {
             .expect("provider-backed test lease has a leader store");
         crate::runtime::cloud_startup::CloudStartupRecovery::mirror_cloud_metadata(
             cloud,
-            &crate::io::real::test_root(db_path),
+            &cntryl_midge_core::io::real::test_root(db_path),
             recovery_policy,
             crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                 store: store.as_ref(),
@@ -203,7 +205,7 @@ impl Engine {
     #[cfg(test)]
     fn validate_manifest_ssts_in_store(
         state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
         crate::runtime::cloud_startup::CloudStartupRecovery::validate_manifest_ssts_in_store(
             state, cloud,
@@ -213,7 +215,7 @@ impl Engine {
     #[cfg(test)]
     fn ensure_named_sst_cache_from_cloud_storage(
         state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
         sst_proofs: impl IntoIterator<Item = CloudSstRecoveryProof>,
     ) -> MidgeResult<()> {
         crate::runtime::cloud_startup::CloudStartupRecovery::ensure_named_sst_cache_from_cloud_storage(
@@ -583,7 +585,8 @@ impl Engine {
             Some(RuntimeResponse::Error { error, .. })
                 if matches!(
                     error.severity(),
-                    crate::common::Severity::Backpressure | crate::common::Severity::Transient
+                    cntryl_midge_core::common::Severity::Backpressure
+                        | cntryl_midge_core::common::Severity::Transient
                 ) =>
             {
                 Ok(false)
@@ -719,7 +722,7 @@ impl Engine {
             self.runtime_handle
                 .send_and_wait(RuntimeMsg::ManifestPersist {
                     request_id,
-                    origin: crate::metadata::accounting::Origin::Ddl,
+                    origin: cntryl_midge_durability::metadata::accounting::Origin::Ddl,
                 })
         });
         match outcome {
@@ -880,7 +883,7 @@ impl Engine {
         match resp {
             crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
             crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(crate::common::MidgeError::Internal(
+            _ => Err(cntryl_midge_core::common::MidgeError::Internal(
                 "unexpected response to CompactAll".to_string(),
             )),
         }

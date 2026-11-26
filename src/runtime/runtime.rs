@@ -4,9 +4,9 @@ use super::{
     snapshot_cache, snapshot_pins, EventLoop, ResponseRouter, RuntimeConfig, RuntimeHandle,
     RuntimeLifecycle, RuntimeMsg, RuntimeState, StartupAdmission,
 };
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::frontiers::{ObservedDurabilityFrontiers, ObservedPendingCloudUploads};
-use crate::types::DurabilityFrontiersSnapshot;
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::types::DurabilityFrontiersSnapshot;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::sync::{atomic::Ordering, Arc};
 use std::thread::{self, JoinHandle};
@@ -183,7 +183,7 @@ impl Runtime {
             init_tx,
             admission: admission.clone(),
         };
-        let failpoint_gate = crate::failpoints::worker_gate();
+        let failpoint_gate = cntryl_midge_core::failpoints::worker_gate();
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
             .spawn(move || failpoint_gate.run(|| startup.run()))

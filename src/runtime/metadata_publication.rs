@@ -15,8 +15,8 @@ pub(crate) struct MetadataPublicationLock {
     state: Arc<Mutex<MetadataPublicationState>>,
     format_10_writer: Arc<Mutex<()>>,
     cuts: Arc<Mutex<cut::CutRegistry>>,
-    capture_memory: Arc<OnceLock<crate::common::resource_budget::ResourceBudget>>,
-    capture_slots: Arc<OnceLock<crate::common::resource_budget::ResourceBudget>>,
+    capture_memory: Arc<OnceLock<cntryl_midge_core::common::resource_budget::ResourceBudget>>,
+    capture_slots: Arc<OnceLock<cntryl_midge_core::common::resource_budget::ResourceBudget>>,
 }
 
 #[derive(Default)]
@@ -30,23 +30,25 @@ impl MetadataPublicationLock {
     /// Existing ownership must never move to a different accounting ledger.
     pub(crate) fn configure_capture_memory(
         &self,
-        memory: crate::common::resource_budget::ResourceBudget,
+        memory: cntryl_midge_core::common::resource_budget::ResourceBudget,
     ) {
         let _ = self.capture_memory.set(memory.with_contention_errors());
     }
     #[cfg(test)]
-    pub(crate) fn capture_contention(&self, error: &crate::common::MidgeError) -> bool {
-        crate::common::resource_budget::ResourceContention::from_error(error).is_some_and(
-            |contention| {
+    pub(crate) fn capture_contention(&self, error: &cntryl_midge_core::common::MidgeError) -> bool {
+        cntryl_midge_core::common::resource_budget::ResourceContention::from_error(error)
+            .is_some_and(|contention| {
                 self.capture_memory
                     .get()
                     .is_some_and(|memory| contention.is_blocked_by(memory))
-            },
-        )
+            })
     }
-    pub(crate) fn capture_admission_retryable(&self, error: &crate::common::MidgeError) -> bool {
-        crate::common::resource_budget::ResourceContention::from_error(error).is_some_and(
-            |contention| {
+    pub(crate) fn capture_admission_retryable(
+        &self,
+        error: &cntryl_midge_core::common::MidgeError,
+    ) -> bool {
+        cntryl_midge_core::common::resource_budget::ResourceContention::from_error(error)
+            .is_some_and(|contention| {
                 self.capture_memory
                     .get()
                     .is_some_and(|memory| contention.is_for_pool(memory))
@@ -54,8 +56,7 @@ impl MetadataPublicationLock {
                         .capture_slots
                         .get()
                         .is_some_and(|slots| contention.is_for_pool(slots))
-            },
-        )
+            })
     }
     pub(crate) fn lock_for(
         &self,
@@ -69,9 +70,9 @@ impl MetadataPublicationLock {
     pub(crate) fn lock_format_10_writer(
         &self,
         timeout: std::time::Duration,
-    ) -> crate::common::MidgeResult<MutexGuard<'_, ()>> {
+    ) -> cntryl_midge_core::common::MidgeResult<MutexGuard<'_, ()>> {
         self.format_10_writer.try_lock_for(timeout).ok_or_else(|| {
-            crate::common::MidgeError::Timeout(
+            cntryl_midge_core::common::MidgeError::Timeout(
                 "FORMAT 10 publication waits for staging authority".into(),
             )
         })

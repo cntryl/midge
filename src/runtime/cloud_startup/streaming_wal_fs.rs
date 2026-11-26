@@ -4,11 +4,11 @@
 //! exposes its canonical names without copying WAL objects onto local disk.
 //! It implements only [`ReadFs`], so replay cannot mutate through it.
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::buffered_read::BufferedReadFile;
-use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{FsError, FsPath, FsResult, ReadFs};
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::buffered_read::BufferedReadFile;
+use cntryl_midge_core::io::traits::{DirEntry, Metadata};
+use cntryl_midge_core::io::{FsError, FsPath, FsResult, ReadFs};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -20,11 +20,11 @@ struct WalSource {
 
 /// A planned verified prefix; planning never truncates its backing WAL.
 struct WalPrefixFile<'a> {
-    inner: Box<dyn crate::io::ReadFile + 'a>,
+    inner: Box<dyn cntryl_midge_core::io::ReadFile + 'a>,
     len: u64,
 }
 
-impl crate::io::ReadFile for WalPrefixFile<'_> {
+impl cntryl_midge_core::io::ReadFile for WalPrefixFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let len = len.min(self.len.saturating_sub(offset));
         if len == 0 {
@@ -98,7 +98,7 @@ impl StreamingWalFs {
 }
 
 fn canonical_wal_name(name: &str) -> bool {
-    crate::wal::parse_segment_file_name(name).is_some()
+    cntryl_midge_durability::wal::parse_segment_file_name(name).is_some()
 }
 
 fn replay_directory(path: &FsPath) -> bool {
@@ -106,7 +106,7 @@ fn replay_directory(path: &FsPath) -> bool {
 }
 
 impl ReadFs for StreamingWalFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         let source = self.source(path)?;
         let mut file = source.fs.open_read(&source.path)?;
         if let Some(len) = source.prefix_len {
@@ -196,7 +196,8 @@ pub(crate) fn validate_wal_source(
     }
     let mut offset = 0_u64;
     let mut crc = 0;
-    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("crc_validation");
+    let mut progress =
+        cntryl_midge_core::telemetry::recovery_progress::WorkProgress::new("crc_validation");
     while offset < expected_len {
         let length = (range_buffer_bytes as u64).min(expected_len - offset);
         let bytes = read_exact_range(file.as_ref(), offset, length)?;
@@ -214,7 +215,7 @@ pub(crate) fn validate_wal_source(
 }
 
 fn read_exact_range(
-    file: &dyn crate::io::ReadFile,
+    file: &dyn cntryl_midge_core::io::ReadFile,
     offset: u64,
     length: u64,
 ) -> MidgeResult<Bytes> {
@@ -230,27 +231,27 @@ fn read_exact_range(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{StorageBackend, StorageEvent, StorageOutcome};
+    use cntryl_midge_storage::{StorageBackend, StorageEvent, StorageOutcome};
     use std::time::Duration;
 
     struct RecordingBackend {
-        inner: crate::storage::filesystem::FileSystem,
+        inner: cntryl_midge_storage::filesystem::FileSystem,
         ranges: parking_lot::Mutex<Vec<(u64, u64)>>,
     }
 
     impl StorageBackend for RecordingBackend {
         fn submit_range_read_request(
             &self,
-            request: crate::storage::StorageRequest,
+            request: cntryl_midge_storage::StorageRequest,
             range: std::ops::Range<u64>,
-            callback: crate::storage::RangeReadCallback,
+            callback: cntryl_midge_storage::RangeReadCallback,
         ) {
             self.ranges.lock().push((range.start, range.end));
             self.inner
                 .submit_range_read_request(request, range, callback);
         }
 
-        crate::storage::forward_storage_backend!(
+        cntryl_midge_storage::forward_storage_backend!(
             inner;
             submit_head_request, submit_range_head_request, submit_metadata_read_request,
 
@@ -258,16 +259,16 @@ mod tests {
 
         fn submit_write_request(
             &self,
-            _request: crate::storage::StorageRequest,
+            _request: cntryl_midge_storage::StorageRequest,
             _bytes: Vec<u8>,
-            _callback: crate::storage::StorageCallback,
+            _callback: cntryl_midge_storage::StorageCallback,
         ) {
             panic!("replay cannot write cloud objects");
         }
         fn submit_delete_request(
             &self,
-            _request: crate::storage::StorageRequest,
-            _callback: crate::storage::StorageCallback,
+            _request: cntryl_midge_storage::StorageRequest,
+            _callback: cntryl_midge_storage::StorageCallback,
         ) {
             panic!("replay cannot delete cloud objects");
         }
@@ -286,14 +287,14 @@ mod tests {
             let directory = tempfile::tempdir()?;
             let cloud_root = directory.path().join("cloud");
             let local = Arc::new(
-                crate::io::RealFs::new(directory.path().join("local"))
+                cntryl_midge_core::io::RealFs::new(directory.path().join("local"))
                     .map_err(FsError::into_midge)?,
             );
             let backend = Arc::new(RecordingBackend {
-                inner: crate::storage::filesystem::FileSystem::new(&cloud_root)?,
+                inner: cntryl_midge_storage::filesystem::FileSystem::new(&cloud_root)?,
                 ranges: parking_lot::Mutex::new(Vec::new()),
             });
-            let key = crate::wal::segment_object_key(41, 7);
+            let key = cntryl_midge_durability::wal::segment_object_key(41, 7);
             let full_path = cloud_root.join(&key);
             std::fs::create_dir_all(full_path.parent().expect("object parent"))?;
             let bytes: Vec<u8> = (0..65_537_u32)
@@ -302,9 +303,11 @@ mod tests {
             std::fs::write(&full_path, &bytes)?;
             let (tx, rx) = std::sync::mpsc::channel();
             backend.submit_range_head_request(
-                crate::storage::StorageRequest::new(
+                cntryl_midge_storage::StorageRequest::new(
                     &key,
-                    crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+                    cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(
+                        5,
+                    )),
                     Duration::from_secs(5),
                 ),
                 tx,
@@ -316,7 +319,7 @@ mod tests {
                 } => metadata,
                 other => panic!("unexpected HEAD {other:?}"),
             };
-            let source = Arc::new(crate::storage::remote_sst::RemoteSstFs::for_object(
+            let source = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::for_object(
                 local,
                 backend.clone(),
                 key,
@@ -339,7 +342,7 @@ mod tests {
         // Arrange
         let fixture = Fixture::new()?;
         let mut fs = StreamingWalFs::new(127)?;
-        let name = crate::wal::segment_file_name(41);
+        let name = cntryl_midge_durability::wal::segment_file_name(41);
         fs.insert(
             name.clone(),
             Arc::clone(&fixture.source),
@@ -382,7 +385,7 @@ mod tests {
         // Arrange
         let fixture = Fixture::new()?;
         let mut fs = StreamingWalFs::new(127)?;
-        let name = crate::wal::segment_file_name(41);
+        let name = cntryl_midge_durability::wal::segment_file_name(41);
         fs.insert(
             name.clone(),
             Arc::clone(&fixture.source),
@@ -464,7 +467,7 @@ mod tests {
         // Arrange
         let fixture = Fixture::new()?;
         let mut fs = StreamingWalFs::new(1_024)?;
-        let name = crate::wal::segment_file_name(41);
+        let name = cntryl_midge_durability::wal::segment_file_name(41);
         fs.insert(
             name.clone(),
             Arc::clone(&fixture.source),

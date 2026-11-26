@@ -5,11 +5,11 @@ use std::sync::Barrier;
 fn live_handle() -> (
     crate::runtime::Runtime,
     RuntimeHandle,
-    Arc<crate::lease::LeaseValidity>,
+    Arc<cntryl_midge_durability::lease::LeaseValidity>,
     Arc<AtomicBool>,
 ) {
     let (runtime, mut handle) = crate::runtime::Runtime::new();
-    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity
         .activate(7, std::time::Instant::now() + Duration::from_mins(1))
         .unwrap();

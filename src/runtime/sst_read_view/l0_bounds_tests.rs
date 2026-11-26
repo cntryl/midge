@@ -1,14 +1,14 @@
 use super::*;
-use crate::common::MidgeResult;
 use crate::diagnostics::RuntimeDiagnostics;
-use crate::io::FsError;
-use crate::io::{Fs, RealFs};
-use crate::memtable::SkipListMemtable;
 use crate::runtime::read_resources::ReadResources;
 use crate::runtime::read_snapshot::ReadSnapshot;
-use crate::sst::traits::SstFactory;
-use crate::sst::FsSstFactoryIo;
-use crate::types::EntryType;
+use cntryl_midge_core::common::MidgeResult;
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_core::io::{Fs, RealFs};
+use cntryl_midge_core::types::EntryType;
+use cntryl_midge_table::memtable::SkipListMemtable;
+use cntryl_midge_table::sst::traits::SstFactory;
+use cntryl_midge_table::sst::FsSstFactoryIo;
 use std::path::Path;
 
 const CACHE_BYTES: usize = 64 * 1024;
@@ -46,7 +46,7 @@ fn snapshot(
         fs.clone(),
         std::path::PathBuf::new(),
         CACHE_BYTES,
-        crate::sst::cache::CachePolicyType::Lru,
+        cntryl_midge_table::sst::cache::CachePolicyType::Lru,
         diagnostics.clone(),
     ));
     Ok((
@@ -72,7 +72,10 @@ fn should_open_only_relevant_l0_reader_when_full_inventory_exceeds_metadata_cach
     let files = (0..128)
         .map(|index| write_point_sst(directory.path(), index))
         .collect::<MidgeResult<Vec<_>>>()?;
-    assert!(files.len() * std::mem::size_of::<crate::sst::fs::SstFileIo>() > CACHE_BYTES / 4);
+    assert!(
+        files.len() * std::mem::size_of::<cntryl_midge_table::sst::fs::SstFileIo>()
+            > CACHE_BYTES / 4
+    );
     let (snapshot, diagnostics) = snapshot(directory.path(), files)?;
     // Act
     let value = snapshot.get(b"key-064", u64::MAX)?;

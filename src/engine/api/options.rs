@@ -29,20 +29,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::codec::{CompressionAlgo, CompressionPolicy};
-use crate::common::{MidgeError, MidgeResult};
+pub use crate::config::Storage;
+use cntryl_midge_core::codec::{CompressionAlgo, CompressionPolicy};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::lease::{LeaseConfig, LeaseLossHook, LeaseStorageKind};
+pub use cntryl_midge_durability::RecoveryPolicy;
+pub use cntryl_midge_storage::cloud::CloudWritePolicy;
+use cntryl_midge_storage::cloud::CloudWritePolicyConfig;
 #[cfg(test)]
-use crate::config::{
+use cntryl_midge_storage::config::{
     AzureCredentialSource, CloudProviderConfig, GcsApiStyle, GcsCredentialSource,
     S3CredentialSource,
 };
-pub use crate::config::{RecoveryPolicy, Storage};
-use crate::lease::{LeaseConfig, LeaseLossHook, LeaseStorageKind};
-use crate::memtable::{MemtableConfig, MemtableConfigInput};
-pub use crate::sst::cache::BlockCachePolicy;
-use crate::sst::cache::{CachePolicyConfig, CachePolicyType};
-pub use crate::storage::cloud::CloudWritePolicy;
-use crate::storage::cloud::CloudWritePolicyConfig;
+use cntryl_midge_table::memtable::{MemtableConfig, MemtableConfigInput};
+pub use cntryl_midge_table::sst::cache::BlockCachePolicy;
+use cntryl_midge_table::sst::cache::{CachePolicyConfig, CachePolicyType};
 
 /// Performance optimization goal.
 ///
@@ -135,7 +136,7 @@ struct IoTimeouts<T> {
 /// requiring every filesystem adapter to be.
 #[cfg(feature = "internal-testing")]
 #[derive(Clone)]
-struct InjectedFilesystem(Arc<dyn crate::io::Fs>);
+struct InjectedFilesystem(Arc<dyn cntryl_midge_core::io::Fs>);
 
 #[cfg(feature = "internal-testing")]
 impl std::fmt::Debug for InjectedFilesystem {
@@ -147,7 +148,7 @@ impl std::fmt::Debug for InjectedFilesystem {
 /// A test-supplied object store standing in for every cloud object store.
 #[cfg(feature = "internal-testing")]
 #[derive(Clone)]
-struct InjectedObjectStore(Arc<dyn crate::storage::cloud::CloudBackend>);
+struct InjectedObjectStore(Arc<dyn cntryl_midge_storage::cloud::CloudBackend>);
 
 #[cfg(feature = "internal-testing")]
 impl std::fmt::Debug for InjectedObjectStore {
@@ -193,9 +194,9 @@ pub struct OpenOptions {
     filesystem: Option<InjectedFilesystem>,
     #[cfg(feature = "internal-testing")]
     object_store: Option<InjectedObjectStore>,
-    wal: crate::wal::WalBatchingConfig,
+    wal: cntryl_midge_durability::wal::WalBatchingConfig,
     lease: LeaseConfig,
-    ttl_clock: crate::common::time::ClockHandle,
+    ttl_clock: cntryl_midge_core::common::time::ClockHandle,
 }
 
 /// Mutable input state for constructing [`OpenOptions`].
@@ -227,9 +228,9 @@ pub struct OpenOptionsBuilder {
     filesystem: Option<InjectedFilesystem>,
     #[cfg(feature = "internal-testing")]
     object_store: Option<InjectedObjectStore>,
-    wal: crate::wal::WalBatchingConfig,
+    wal: cntryl_midge_durability::wal::WalBatchingConfig,
     lease: LeaseConfig,
-    ttl_clock: crate::common::time::ClockHandle,
+    ttl_clock: cntryl_midge_core::common::time::ClockHandle,
 }
 
 struct DerivedMemoryPools {
@@ -290,11 +291,11 @@ impl OpenOptions {
     #[must_use]
     pub fn cloud<P: Into<PathBuf>>(
         local_cache_path: P,
-        location: crate::config::CloudStorageLocation,
+        location: cntryl_midge_storage::config::CloudStorageLocation,
     ) -> OpenOptionsBuilder {
         Self::cloud_multi(
             local_cache_path,
-            crate::config::CloudStorageTopology::new(location),
+            cntryl_midge_storage::config::CloudStorageTopology::new(location),
         )
     }
 
@@ -302,7 +303,7 @@ impl OpenOptions {
     #[must_use]
     pub fn cloud_multi<P: Into<PathBuf>>(
         local_cache_path: P,
-        topology: crate::config::CloudStorageTopology,
+        topology: cntryl_midge_storage::config::CloudStorageTopology,
     ) -> OpenOptionsBuilder {
         OpenOptionsBuilder::new(Storage::Cloud {
             local_cache_path: local_cache_path.into(),
@@ -332,7 +333,9 @@ impl OpenOptions {
 
     /// Return the configured WAL, SST, and control stores for cloud mode.
     #[must_use]
-    pub fn cloud_storage_topology(&self) -> Option<&crate::config::CloudStorageTopology> {
+    pub fn cloud_storage_topology(
+        &self,
+    ) -> Option<&cntryl_midge_storage::config::CloudStorageTopology> {
         match &self.storage {
             Storage::Cloud { topology, .. } => Some(topology),
             _ => None,
@@ -512,7 +515,9 @@ impl OpenOptions {
         self.cloud.shutdown_drain_timeout
     }
 
-    pub(crate) fn wal_batch_config(&self) -> Option<crate::wal::policy::BatchConfig> {
+    pub(crate) fn wal_batch_config(
+        &self,
+    ) -> Option<cntryl_midge_durability::wal::policy::BatchConfig> {
         self.wal.batch
     }
 
@@ -524,7 +529,7 @@ impl OpenOptions {
     #[must_use]
     pub fn local_storage_budget_bytes(&self) -> u64 {
         self.cloud.local_storage_budget_bytes.unwrap_or_else(|| {
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default().max_local_bytes
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default().max_local_bytes
         })
     }
 
@@ -543,12 +548,12 @@ impl OpenOptions {
         self.lease.ttl
     }
 
-    pub(crate) fn lease_clock(&self) -> crate::lease::LeaseClock {
+    pub(crate) fn lease_clock(&self) -> cntryl_midge_durability::lease::LeaseClock {
         self.lease.clock.clone()
     }
 
     /// The filesystem a test injected in place of the host root, if any.
-    pub(crate) fn injected_filesystem(&self) -> Option<Arc<dyn crate::io::Fs>> {
+    pub(crate) fn injected_filesystem(&self) -> Option<Arc<dyn cntryl_midge_core::io::Fs>> {
         #[cfg(feature = "internal-testing")]
         {
             self.filesystem
@@ -565,7 +570,7 @@ impl OpenOptions {
     /// if any.
     pub(crate) fn injected_object_store(
         &self,
-    ) -> Option<Arc<dyn crate::storage::cloud::CloudBackend>> {
+    ) -> Option<Arc<dyn cntryl_midge_storage::cloud::CloudBackend>> {
         #[cfg(feature = "internal-testing")]
         {
             self.object_store
@@ -578,7 +583,7 @@ impl OpenOptions {
         }
     }
 
-    pub(crate) fn ttl_clock(&self) -> Arc<crate::common::time::ObservedClock> {
+    pub(crate) fn ttl_clock(&self) -> Arc<cntryl_midge_core::common::time::ObservedClock> {
         Arc::clone(&self.ttl_clock.0)
     }
 }
@@ -657,7 +662,7 @@ impl OpenOptionsBuilder {
             cloud: CloudWritePolicyConfig::default(),
             retry_policy: crate::runtime::RuntimeRetryPolicy::default(),
             io_timeouts: IoTimeouts {
-                storage: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+                storage: cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
                 runtime_response: None,
             },
             open_timeout: None,
@@ -666,10 +671,10 @@ impl OpenOptionsBuilder {
             filesystem: None,
             #[cfg(feature = "internal-testing")]
             object_store: None,
-            wal: crate::wal::WalBatchingConfig::new(0, None),
+            wal: cntryl_midge_durability::wal::WalBatchingConfig::new(0, None),
             lease: LeaseConfig::new(Duration::from_secs(30), None, None),
-            ttl_clock: crate::common::time::ClockHandle(Arc::new(
-                crate::common::time::ObservedClock::default(),
+            ttl_clock: cntryl_midge_core::common::time::ClockHandle(Arc::new(
+                cntryl_midge_core::common::time::ObservedClock::default(),
             )),
         }
     }
@@ -815,12 +820,15 @@ impl OpenOptionsBuilder {
     /// lease, SST, transaction spill and cloud working files are served from
     /// it. A simulated cloud lives under the root's host directory, so a root
     /// without one needs [`Self::object_store_for_testing`]. The filesystem
-    /// must expose [`crate::io::PersistentHandleFs`], which SST
+    /// must expose [`cntryl_midge_core::io::PersistentHandleFs`], which SST
     /// builds use for scratch.
     #[cfg(feature = "internal-testing")]
     #[doc(hidden)]
     #[must_use]
-    pub fn filesystem_for_testing(mut self, filesystem: Arc<dyn crate::io::Fs>) -> Self {
+    pub fn filesystem_for_testing(
+        mut self,
+        filesystem: Arc<dyn cntryl_midge_core::io::Fs>,
+    ) -> Self {
         self.filesystem = Some(InjectedFilesystem(filesystem));
         self
     }
@@ -834,7 +842,7 @@ impl OpenOptionsBuilder {
     #[must_use]
     pub fn object_store_for_testing(
         mut self,
-        store: Arc<dyn crate::storage::cloud::CloudBackend>,
+        store: Arc<dyn cntryl_midge_storage::cloud::CloudBackend>,
     ) -> Self {
         self.object_store = Some(InjectedObjectStore(store));
         self
@@ -854,7 +862,9 @@ impl OpenOptionsBuilder {
                 let summaries = report
                     .findings
                     .iter()
-                    .filter(|finding| finding.outcome == crate::config::CloudCheckOutcome::Failed)
+                    .filter(|finding| {
+                        finding.outcome == cntryl_midge_storage::config::CloudCheckOutcome::Failed
+                    })
                     .map(|finding| format!("{:?}: {}", finding.roles, finding.message))
                     .collect::<Vec<_>>();
                 return Err(MidgeError::InvalidArgument(format!(
@@ -947,7 +957,7 @@ impl OpenOptionsBuilder {
     #[doc(hidden)]
     #[must_use]
     pub fn lease_clock_for_testing(mut self, clock: Arc<dyn crate::Clock>) -> Self {
-        self.lease.clock = crate::lease::LeaseClock::injected(clock);
+        self.lease.clock = cntryl_midge_durability::lease::LeaseClock::injected(clock);
         self
     }
 
@@ -955,8 +965,8 @@ impl OpenOptionsBuilder {
     /// and tests. Midge applies a process-local nondecreasing floor to it.
     #[must_use]
     pub fn ttl_clock(mut self, clock: Arc<dyn crate::Clock>) -> Self {
-        self.ttl_clock = crate::common::time::ClockHandle(Arc::new(
-            crate::common::time::ObservedClock::new(clock),
+        self.ttl_clock = cntryl_midge_core::common::time::ClockHandle(Arc::new(
+            cntryl_midge_core::common::time::ObservedClock::new(clock),
         ));
         self
     }
@@ -1030,20 +1040,17 @@ impl OpenOptionsBuilder {
             ));
         }
         self.validate_open_timeout()?;
-        let runtime_response_timeout = self.io_timeouts.runtime_response.unwrap_or_else(|| {
-            crate::config::default_runtime_response_timeout(self.io_timeouts.storage)
-        });
-        if runtime_response_timeout <= self.io_timeouts.storage {
-            return Err(MidgeError::InvalidArgument(
-                "runtime response timeout must be greater than storage I/O timeout".to_string(),
-            ));
-        }
+        let runtime_response_timeout = self.resolve_runtime_response_timeout()?;
         if self.cloud.shutdown_drain_timeout.is_zero() {
             return Err(MidgeError::InvalidArgument(
                 "cloud shutdown drain timeout must be greater than zero".to_string(),
             ));
         }
-        self.lease.validate(LeaseStorageKind::from(&self.storage))?;
+        let lease_kind = match self.storage {
+            Storage::Cloud { .. } | Storage::CloudSimulated { .. } => LeaseStorageKind::Cloud,
+            Storage::Local { .. } | Storage::InMemory => LeaseStorageKind::Local,
+        };
+        self.lease.validate(lease_kind)?;
         self.cloud.policy.validate()?;
 
         let total_memory = self.resolve_total_memory()?;
@@ -1115,11 +1122,26 @@ impl OpenOptionsBuilder {
             filesystem: self.filesystem,
             #[cfg(feature = "internal-testing")]
             object_store: self.object_store,
-            wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
+            wal: cntryl_midge_durability::wal::WalBatchingConfig::new(
+                wal_buffer_size,
+                self.wal.batch,
+            ),
             lease: self.lease,
             ttl_clock: self.ttl_clock,
             drop_transaction_wait_timeout: self.drop_transaction_wait_timeout,
         })
+    }
+
+    fn resolve_runtime_response_timeout(&self) -> MidgeResult<Duration> {
+        let timeout = self.io_timeouts.runtime_response.unwrap_or_else(|| {
+            crate::config::default_runtime_response_timeout(self.io_timeouts.storage)
+        });
+        if timeout <= self.io_timeouts.storage {
+            return Err(MidgeError::InvalidArgument(
+                "runtime response timeout must be greater than storage I/O timeout".to_string(),
+            ));
+        }
+        Ok(timeout)
     }
 
     fn resolve_total_memory(&self) -> MidgeResult<usize> {

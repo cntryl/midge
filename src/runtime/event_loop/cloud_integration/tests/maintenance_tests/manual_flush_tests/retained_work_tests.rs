@@ -15,7 +15,7 @@ fn replace_flush_worker(el: &mut EventLoop, memory_bytes: usize) -> MidgeResult<
     el.actors.flush_actor = FlushActor::new_with_memory_limit(
         &el.state.fs,
         false,
-        &crate::codec::CompressionPolicy::default(),
+        &cntryl_midge_core::codec::CompressionPolicy::default(),
         &tx,
         memory_bytes,
     )?;
@@ -220,7 +220,7 @@ fn should_preserve_built_flush_identity_when_actual_upload_retries() -> MidgeRes
     ));
     assert_eq!(
         *cloud.uploads.lock().unwrap(),
-        vec![crate::cloud_layout::object_key(&identity.0); 2]
+        vec![cntryl_midge_core::cloud_layout::object_key(&identity.0); 2]
     );
     assert_eq!(
         el.state

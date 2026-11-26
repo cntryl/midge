@@ -5,10 +5,10 @@ use super::coordination::CloudWalUploadTracker;
 use std::sync::Arc;
 
 pub(in crate::runtime) struct CloudCoordinator {
-    pub(super) hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+    pub(super) hybrid_storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     pub(super) hybrid_storage_events:
-        Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
-    pub(super) cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+        Option<crossbeam::channel::Receiver<cntryl_midge_storage::StorageEvent>>,
+    pub(super) cloud_metadata_storage: Option<Arc<cntryl_midge_storage::cloud::CloudStorage>>,
     pub(super) provider_ddl_fencing: bool,
     pub(super) cloud_wal: CloudWalUploadTracker,
     pub(super) cloud_publication:
@@ -19,7 +19,7 @@ pub(in crate::runtime) struct CloudCoordinator {
 }
 
 impl CloudCoordinator {
-    pub(super) fn held_uploads(&self) -> crate::storage::hybrid::backend::HeldUploads {
+    pub(super) fn held_uploads(&self) -> cntryl_midge_storage::hybrid::backend::HeldUploads {
         let mut held = self.cloud_wal.held_uploads();
         let verification = self.cloud_publication.held_uploads();
         held.entries = held.entries.saturating_add(verification.entries);
@@ -59,7 +59,10 @@ impl CloudCoordinator {
                 .is_some_and(|storage| storage.ephemeral_sst_cache_enabled())
     }
 
-    pub(super) fn attach_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
+    pub(super) fn attach_hybrid_storage(
+        &mut self,
+        storage: Arc<cntryl_midge_storage::HybridStorage>,
+    ) {
         self.hybrid_storage = Some(storage);
     }
 
@@ -77,17 +80,21 @@ impl CloudCoordinator {
 
     pub(super) fn mirror_metadata_within(
         &self,
-        fs: &dyn crate::io::Fs,
+        fs: &dyn cntryl_midge_core::io::Fs,
         publication_lock: &crate::runtime::MetadataPublicationLock,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
-        validate_lease: impl FnMut(&crate::common::OperationDeadline) -> crate::common::MidgeResult<()>,
-    ) -> crate::common::MidgeResult<()> {
+        validate_lease: impl FnMut(
+            &cntryl_midge_core::common::OperationDeadline,
+        ) -> cntryl_midge_core::common::MidgeResult<()>,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(());
         };
         let authority = authority.ok_or_else(|| {
-            crate::common::MidgeError::Fenced("cloud metadata mirror has no leader store".into())
+            cntryl_midge_core::common::MidgeError::Fenced(
+                "cloud metadata mirror has no leader store".into(),
+            )
         })?;
         crate::runtime::hybrid_persistence::mirror_control_metadata_within(
             crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {

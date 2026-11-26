@@ -1,6 +1,6 @@
 use super::*;
-use crate::lease::{fs_leader_store::FsLeaderStore, LeaderStore};
 use crate::runtime::wal_history::{WalHistory, WalHistoryFence};
+use cntryl_midge_durability::lease::{fs_leader_store::FsLeaderStore, LeaderStore};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FenceCountingFs {
@@ -10,9 +10,9 @@ struct FenceCountingFs {
 }
 
 impl ReadFs for FenceCountingFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
         self.inner.exists(path)
@@ -26,13 +26,16 @@ impl ReadFs for FenceCountingFs {
 }
 
 impl Fs for FenceCountingFs {
-    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::FsLock>> {
+    fn try_lock_exclusive(
+        &self,
+        path: &FsPath,
+    ) -> FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         let lock = self.inner.try_lock_exclusive(path)?;
         self.locks.fetch_add(1, Ordering::SeqCst);
         Ok(lock)
     }
     fn open(&self, path: &FsPath, options: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
-        if path.0 == ".midge_leader" && options.mode == crate::io::OpenMode::ReadOnly {
+        if path.0 == ".midge_leader" && options.mode == cntryl_midge_core::io::OpenMode::ReadOnly {
             self.leader_reads.fetch_add(1, Ordering::SeqCst);
         }
         self.inner.open(path, options)
@@ -71,7 +74,7 @@ fn fenced_actor() -> MidgeResult<FencedActor> {
     let root: Arc<dyn Fs> = fs.clone();
     let store = Arc::new(FsLeaderStore::new(
         root.clone(),
-        crate::lease::LeaseClock::default(),
+        cntryl_midge_durability::lease::LeaseClock::default(),
     ));
     let lease = store.acquire_leadership("writer").unwrap();
     let fence = WalHistoryFence::new(
@@ -80,7 +83,7 @@ fn fenced_actor() -> MidgeResult<FencedActor> {
         lease.epoch,
         Duration::from_secs(2),
     );
-    let wal = crate::io::subdirectory(root, crate::wal::WAL_DIR);
+    let wal = cntryl_midge_core::io::subdirectory(root, cntryl_midge_durability::wal::WAL_DIR);
     let mut state = RuntimeState::new(PathBuf::from("/writer-group"), true);
     state.wal.history = WalHistory::open_with_fence(wal.clone(), 1, lease.epoch, &fence)?;
     let mut actor = WalActor::open(
@@ -143,7 +146,7 @@ fn should_reuse_one_native_fence_when_strict_group_appends_syncs_and_records_his
         .open_member()
         .durable_bytes
         .unwrap();
-    assert!(durable > crate::wal::format::HEADER_LEN as u64);
+    assert!(durable > cntryl_midge_durability::wal::format::HEADER_LEN as u64);
     drop(actor);
     let successor = store.acquire_leadership("successor").unwrap();
     let successor_fence = WalHistoryFence::new(
@@ -154,11 +157,14 @@ fn should_reuse_one_native_fence_when_strict_group_appends_syncs_and_records_his
     );
     let reopened = WalHistory::open_with_fence(wal.clone(), 1, successor.epoch, &successor_fence)?;
     assert_eq!(reopened.ledger().open_member().durable_bytes, Some(durable));
-    let bytes = crate::io::read_all(wal.as_ref(), &FsPath::new(crate::wal::segment_file_name(1)))
-        .map_err(FsError::into_midge)?;
-    let records = crate::wal::format::segment::records(&bytes)?;
+    let bytes = cntryl_midge_core::io::read_all(
+        wal.as_ref(),
+        &FsPath::new(cntryl_midge_durability::wal::segment_file_name(1)),
+    )
+    .map_err(FsError::into_midge)?;
+    let records = cntryl_midge_durability::wal::format::segment::records(&bytes)?;
     assert_eq!(records.len(), 1);
-    let batch = crate::wal::encoding::decode_txn_batch_payload(
+    let batch = cntryl_midge_durability::wal::encoding::decode_txn_batch_payload(
         &records[0],
         records[0].value.as_ref().unwrap(),
     )?;
@@ -187,8 +193,9 @@ fn should_fence_strict_actor_when_successor_precedes_native_group_admission() ->
         DurabilityPolicy::Strict,
     )?;
     store.acquire_leadership("successor").unwrap();
-    let path = FsPath::new(crate::wal::segment_file_name(1));
-    let before = crate::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?;
+    let path = FsPath::new(cntryl_midge_durability::wal::segment_file_name(1));
+    let before =
+        cntryl_midge_core::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?;
 
     // Act
     let rejected = actor.append_prepared_transactions(&mut state, vec![prepared]);
@@ -203,7 +210,7 @@ fn should_fence_strict_actor_when_successor_precedes_native_group_admission() ->
         Vec::<(Vec<u8>, Option<Vec<u8>>, u64)>::new()
     );
     assert_eq!(
-        crate::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?,
+        cntryl_midge_core::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?,
         before
     );
     Ok(())
@@ -243,8 +250,9 @@ fn should_remain_retryable_when_native_strict_group_admission_times_out() -> Mid
         drop(ticket);
     });
     ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    let path = FsPath::new(crate::wal::segment_file_name(1));
-    let before = crate::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?;
+    let path = FsPath::new(cntryl_midge_durability::wal::segment_file_name(1));
+    let before =
+        cntryl_midge_core::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?;
 
     // Act
     let timed_out = actor.append_prepared_transactions(&mut state, vec![prepared]);
@@ -260,7 +268,7 @@ fn should_remain_retryable_when_native_strict_group_admission_times_out() -> Mid
         Vec::<(Vec<u8>, Option<Vec<u8>>, u64)>::new()
     );
     assert_eq!(
-        crate::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?,
+        cntryl_midge_core::io::read_all(wal.as_ref(), &path).map_err(FsError::into_midge)?,
         before
     );
     let retried = prepare_put_transaction(

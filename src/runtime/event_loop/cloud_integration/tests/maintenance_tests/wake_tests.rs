@@ -1,8 +1,8 @@
 use super::*;
 
-fn idle_cloud_loop() -> crate::common::MidgeResult<EventLoop> {
+fn idle_cloud_loop() -> cntryl_midge_core::common::MidgeResult<EventLoop> {
     let el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.actors
         .cloud_coordinator
@@ -15,7 +15,7 @@ fn idle_cloud_loop() -> crate::common::MidgeResult<EventLoop> {
 
 #[test]
 fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: hold the worker after it queues its terminal event. Consuming
     // that event cannot yet reap the handle or release the publication gate.
     let (requests, request_rx) = crossbeam::channel::unbounded();
@@ -60,7 +60,7 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
             .expect("report initialized runtime");
         let (_worker_tx, worker_rx) = crossbeam::channel::unbounded();
         el.run(&request_rx, &worker_rx);
-        Ok::<_, crate::common::MidgeError>((
+        Ok::<_, cntryl_midge_core::common::MidgeError>((
             el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none(),
             !el.publication.publication_gate.is_active(),
             el.state.pending_compaction_waits.is_empty(),
@@ -91,7 +91,7 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
 
 #[test]
 fn should_observe_finished_prune_worker_when_no_other_work_can_wake_runtime(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut el = idle_cloud_loop()?;
     el.publication

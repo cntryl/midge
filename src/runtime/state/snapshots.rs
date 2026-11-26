@@ -79,21 +79,21 @@ impl RuntimeState {
             .reclaimable_column_family_files(self.oldest_active_snapshot_sequence());
         let edits = candidates
             .iter()
-            .map(
-                |(cf_id, names)| crate::metadata::ManifestEdit::ReclaimColumnFamily {
+            .map(|(cf_id, names)| {
+                cntryl_midge_durability::metadata::ManifestEdit::ReclaimColumnFamily {
                     id: *cf_id,
                     names: names.clone(),
-                },
-            )
+                }
+            })
             .collect::<Vec<_>>();
         let memory_mode = self.is_memory_mode();
-        let batch = crate::metadata::ManifestEdit::Batch(edits);
+        let batch = cntryl_midge_durability::metadata::ManifestEdit::Batch(edits);
         let prepared = self.manifest.prepare_edit(&batch)?;
         let journaled_id = if !memory_mode && !candidates.is_empty() {
-            Some(
-                self.manifest_store
-                    .append_for(crate::metadata::accounting::Origin::Administration, &batch)?,
-            )
+            Some(self.manifest_store.append_for(
+                cntryl_midge_durability::metadata::accounting::Origin::Administration,
+                &batch,
+            )?)
         } else {
             None
         };
@@ -110,7 +110,7 @@ impl RuntimeState {
 
     pub fn record_delete_range(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start_key: &[u8],
         end_key: &[u8],
         sequence: u64,
@@ -145,7 +145,7 @@ impl RuntimeState {
 
     pub fn latest_covering_delete_range_sequence(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: &[u8],
     ) -> Option<u64> {
         self.recent_delete_ranges
@@ -161,7 +161,7 @@ impl RuntimeState {
 
     pub fn latest_overlapping_delete_range_sequence(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start_key: &[u8],
         end_key: &[u8],
     ) -> Option<u64> {

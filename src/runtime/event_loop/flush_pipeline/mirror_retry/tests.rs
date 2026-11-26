@@ -1,6 +1,6 @@
 use super::*;
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::runtime::RuntimeResponse;
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
 use std::sync::Arc;
 
 struct ContendedFlush {
@@ -14,9 +14,9 @@ struct ContendedFlush {
 impl ContendedFlush {
     fn new(timeout: Duration) -> MidgeResult<Self> {
         let mut el = crate::runtime::event_loop::tests::create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
-        let remote_reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        let remote_reads = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
             Arc::clone(&el.state.fs),
             el.actors
                 .cloud_coordinator
@@ -29,9 +29,9 @@ impl ContendedFlush {
         el.authority.read_resources = Some(Arc::new(
             crate::runtime::read_resources::ReadResources::new(
                 remote_reads,
-                std::path::PathBuf::from(crate::sst::fs::SST_DIR),
+                std::path::PathBuf::from(cntryl_midge_table::sst::fs::SST_DIR),
                 1024 * 1024,
-                crate::sst::cache::CachePolicyType::Lru,
+                cntryl_midge_table::sst::cache::CachePolicyType::Lru,
             ),
         ));
         el.prefetch_flush_sst_names_if_due();

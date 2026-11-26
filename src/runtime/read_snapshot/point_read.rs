@@ -10,7 +10,7 @@
 //! equal-sequence conflict check still sees both.
 
 use super::{Arc, FileMeta, KeyState, MidgeResult, ReadSnapshot, SkipListMemtable, SstStateReader};
-use crate::sst::read_path_metrics::SstReadObserver as _;
+use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 
 /// Whether a walk records read heat and read-path diagnostics. Conflict checks
 /// walk the same sources without counting as reads.
@@ -48,7 +48,7 @@ impl ValidationPointState {
         match self.value {
             ValidationValue::Absent => false,
             ValidationValue::Present { expiration } => {
-                !crate::common::time::is_expired_at(expiration, read_time_millis)
+                !cntryl_midge_core::common::time::is_expired_at(expiration, read_time_millis)
             }
         }
     }
@@ -152,7 +152,7 @@ impl PointReadWalk {
         }
         match state {
             KeyState::Value(value, _, exp, _)
-                if !crate::common::time::is_expired_at(exp, read_time_millis) =>
+                if !cntryl_midge_core::common::time::is_expired_at(exp, read_time_millis) =>
             {
                 Some(value)
             }
@@ -311,7 +311,7 @@ pub(crate) mod audit {
 #[cfg(test)]
 mod tests {
     use super::point_group_end;
-    use crate::metadata::FileMeta;
+    use cntryl_midge_durability::metadata::FileMeta;
     use std::sync::Arc;
 
     fn file(level: u32, seqs: Option<(u64, u64)>) -> Arc<FileMeta> {

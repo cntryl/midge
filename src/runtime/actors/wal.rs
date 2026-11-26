@@ -44,12 +44,12 @@
 //!   paired transition.
 
 use super::super::state::RuntimeState;
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::Fs;
 use crate::runtime::wal_transition::WalSealTicket;
-use crate::wal::policy::BatchConfig;
-use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalRecord, WalWriter};
 use apply_op::TransactionApplyOp;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::Fs;
+use cntryl_midge_durability::wal::policy::BatchConfig;
+use cntryl_midge_durability::wal::{DurabilityPolicy, FsWalFactoryIo, WalRecord, WalWriter};
 #[cfg(all(test, feature = "failpoints"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -64,7 +64,7 @@ static TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID: AtomicU64 =
 struct TxnSequencePlan {
     txn_id: u64,
     /// The one column family the transaction writes; its WAL frames carry it.
-    cf_id: crate::types::ColumnFamilyId,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
     begin_seq: u64,
     first_op_seq: u64,
     commit_seq: u64,
@@ -87,7 +87,7 @@ struct UnappliedOutcome {
 }
 
 struct TxnWalBatch {
-    unit: Option<crate::wal::sequenced::SequencedWalUnit>,
+    unit: Option<cntryl_midge_durability::wal::sequenced::SequencedWalUnit>,
     total_wal_bytes: usize,
     pending_wal_records: usize,
 }
@@ -128,7 +128,7 @@ pub(crate) struct PreparedSpilledAppend {
     pub(crate) request_id: u64,
     pub(crate) last_sequence: u64,
     pub(crate) op_count: usize,
-    pub(crate) touched_cfs: Vec<crate::types::ColumnFamilyId>,
+    pub(crate) touched_cfs: Vec<cntryl_midge_core::types::ColumnFamilyId>,
     pub(crate) effective_durability: DurabilityPolicy,
     sequence_plan: TxnSequencePlan,
     pub(crate) commit_time_millis: u64,
@@ -153,29 +153,31 @@ pub(crate) struct PreparedGroupOutcome {
 /// The runtime thread retains this lexical root until physical sync and its
 /// ledger proof settle. It intentionally cannot be sent to another thread.
 pub(crate) struct PendingStrictSync {
-    root: Option<crate::lease::WriterEffectGroup>,
-    physical: crate::wal::traits::WalPendingSync,
+    root: Option<cntryl_midge_durability::lease::WriterEffectGroup>,
+    physical: cntryl_midge_durability::wal::traits::WalPendingSync,
     receipt: WalSyncReceipt,
-    expected: crate::wal::traits::WalSyncPrefix,
+    expected: cntryl_midge_durability::wal::traits::WalSyncPrefix,
     started: std::time::Instant,
-    deadline: crate::common::OperationDeadline,
+    deadline: cntryl_midge_core::common::OperationDeadline,
 }
 
 pub(crate) struct PendingStrictAppend {
-    root: Option<crate::lease::WriterEffectGroup>,
-    physical: crate::wal::append_completion::WalPendingAppend,
-    expected: crate::wal::append_completion::WalAppendPrefix,
+    root: Option<cntryl_midge_durability::lease::WriterEffectGroup>,
+    physical: cntryl_midge_durability::wal::append_completion::WalPendingAppend,
+    expected: cntryl_midge_durability::wal::append_completion::WalAppendPrefix,
     admitted: u64,
     previous_position: u64,
     total_wal_bytes: usize,
     pending_wal_records: usize,
     authority_prevalidated: bool,
     started: std::time::Instant,
-    deadline: crate::common::OperationDeadline,
+    deadline: cntryl_midge_core::common::OperationDeadline,
 }
 
 impl PendingStrictAppend {
-    pub(crate) fn poll(&self) -> Option<crate::wal::append_completion::AppendResult> {
+    pub(crate) fn poll(
+        &self,
+    ) -> Option<cntryl_midge_durability::wal::append_completion::AppendResult> {
         self.physical.try_complete()
     }
 
@@ -185,7 +187,9 @@ impl PendingStrictAppend {
 }
 
 impl PendingStrictSync {
-    pub(crate) fn poll(&self) -> Option<MidgeResult<crate::wal::traits::WalSyncCompletion>> {
+    pub(crate) fn poll(
+        &self,
+    ) -> Option<MidgeResult<cntryl_midge_durability::wal::traits::WalSyncCompletion>> {
         self.physical.try_complete()
     }
 
@@ -200,8 +204,8 @@ pub(crate) enum PendingStrictIo {
 }
 
 pub(crate) enum StrictIoCompletion {
-    Append(crate::wal::append_completion::AppendResult),
-    Sync(MidgeResult<crate::wal::traits::WalSyncCompletion>),
+    Append(cntryl_midge_durability::wal::append_completion::AppendResult),
+    Sync(MidgeResult<cntryl_midge_durability::wal::traits::WalSyncCompletion>),
 }
 
 impl PendingStrictIo {
@@ -222,12 +226,12 @@ impl PendingStrictIo {
 
 enum TransactionIntent<'a> {
     Point {
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: &'a [u8],
         exists: bool,
     },
     Range {
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start: &'a [u8],
         end: &'a [u8],
     },
@@ -357,8 +361,8 @@ pub struct WalActor {
     /// while the runtime still needs to service completion/control messages.
     fenced_writer: Option<Box<dyn WalWriter>>,
     /// Operational counters of the owning engine; shared with every writer.
-    counters: crate::telemetry::CounterSink,
-    storage_budget: Option<Arc<crate::storage::HybridStorage>>,
+    counters: cntryl_midge_core::telemetry::CounterSink,
+    storage_budget: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     /// The event loop's read resources (reader and block caches), shared by
     /// transaction validation so its SST reads reuse cached readers (#492).
     read_resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
@@ -378,12 +382,12 @@ pub struct WalActor {
     /// Fencing epoch assigned when this writer acquired leadership.
     /// Stamped on every WAL record so stale writers can be detected.
     current_epoch: u64,
-    lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
+    lease_validity: Option<Arc<cntryl_midge_durability::lease::LeaseValidity>>,
 
     /// Optional leader store for writer ownership validation. Provider stores
     /// validate once per logical write group and at ungrouped sync boundaries;
     /// filesystem stores validate under the physical effect lock.
-    leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+    leader_store: Option<Arc<dyn cntryl_midge_durability::lease::LeaderStore>>,
     /// This writer's own lease holder identity, checked alongside epoch at
     /// each fencing validation.
     leader_holder_id: String,
@@ -433,17 +437,17 @@ impl WalActor {
     pub(crate) fn reopen_empty_writer_from_state_for_test(
         &mut self,
         state: &RuntimeState,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.pending_sync_count != 0
             || self.bytes_since_sync != 0
             || state.wal.pending_writes != 0
         {
-            return Err(crate::common::MidgeError::Internal(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(
                 "cannot realign WAL fixture with pending writes or syncs".into(),
             ));
         }
         let fs = state.wal.history.segment_files().ok_or_else(|| {
-            crate::common::MidgeError::Internal(
+            cntryl_midge_core::common::MidgeError::Internal(
                 "cannot realign a memory-mode WAL fixture writer".into(),
             )
         })?;
@@ -451,7 +455,8 @@ impl WalActor {
             WalIoState::Open { writer, .. }
                 if writer.tail().first_seq.is_none()
                     && writer.tail().last_seq.is_none()
-                    && writer.current_pos() == crate::wal::format::HEADER_LEN as u64 =>
+                    && writer.current_pos()
+                        == cntryl_midge_durability::wal::format::HEADER_LEN as u64 =>
             {
                 FsWalFactoryIo::new(Arc::clone(&fs))
                     .with_io_timeout(self.storage_io_timeout)
@@ -460,12 +465,12 @@ impl WalActor {
                     .open_segment(state.wal.open_segment())?
             }
             WalIoState::Open { .. } => {
-                return Err(crate::common::MidgeError::Internal(
+                return Err(cntryl_midge_core::common::MidgeError::Internal(
                     "cannot realign WAL fixture after the writer has accepted records".into(),
                 ));
             }
             _ => {
-                return Err(crate::common::MidgeError::Internal(
+                return Err(cntryl_midge_core::common::MidgeError::Internal(
                     "cannot realign WAL fixture while the actor is not open".into(),
                 ));
             }
@@ -479,7 +484,7 @@ impl WalActor {
                 *current_writer = writer;
                 Ok(())
             }
-            _ => Err(crate::common::MidgeError::Internal(
+            _ => Err(cntryl_midge_core::common::MidgeError::Internal(
                 "WAL actor changed state while realigning fixture writer".into(),
             )),
         }
@@ -494,7 +499,7 @@ impl WalActor {
             } => *current = writer,
             WalIoState::Memory => {
                 self.io = WalIoState::Open {
-                    fs: Arc::new(crate::io::MockFs::new()),
+                    fs: Arc::new(cntryl_midge_core::io::MockFs::new()),
                     writer,
                 };
             }
@@ -799,7 +804,7 @@ impl WalActor {
         diagnostics.attach(&self.counters);
     }
 
-    fn record_no_space_event(counters: &crate::telemetry::CounterSink) {
+    fn record_no_space_event(counters: &cntryl_midge_core::telemetry::CounterSink) {
         counters.record(|m| {
             m.record_no_space_event();
             m.record_write_stall_no_space();
@@ -825,7 +830,7 @@ impl WalActor {
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
-        let counters = crate::telemetry::CounterSink::default();
+        let counters = cntryl_midge_core::telemetry::CounterSink::default();
         let io = match state.wal.history.segment_files() {
             None => WalIoState::Memory,
             Some(fs) => {
@@ -898,7 +903,7 @@ impl WalActor {
         }
     }
 
-    pub(crate) fn set_storage_budget(&mut self, storage: Arc<crate::storage::HybridStorage>) {
+    pub(crate) fn set_storage_budget(&mut self, storage: Arc<cntryl_midge_storage::HybridStorage>) {
         self.storage_budget = Some(storage);
     }
 
@@ -928,11 +933,13 @@ impl WalActor {
             return Ok(0);
         }
         let bytes = records.iter().try_fold(0_u64, |total, record| {
-            let frame = crate::wal::encoding::record_frame_size_bound(record)?;
+            let frame = cntryl_midge_durability::wal::encoding::record_frame_size_bound(record)?;
             total
                 .checked_add(u64::try_from(frame).unwrap_or(u64::MAX))
                 .ok_or_else(|| {
-                    crate::common::MidgeError::ResourceLimit("WAL batch size overflow".into())
+                    cntryl_midge_core::common::MidgeError::ResourceLimit(
+                        "WAL batch size overflow".into(),
+                    )
                 })
         })?;
         storage.admit_local_wal_bytes(bytes)?;
@@ -948,7 +955,10 @@ impl WalActor {
         };
         let actual = self
             .writer()
-            .map_or(previous_position, crate::wal::WalWriter::current_pos)
+            .map_or(
+                previous_position,
+                cntryl_midge_durability::wal::WalWriter::current_pos,
+            )
             .saturating_sub(previous_position);
         storage.settle_local_wal_admission(admitted, actual);
     }
@@ -956,24 +966,27 @@ impl WalActor {
     fn settle_failed_wal_append(
         &self,
         admitted: u64,
-        failure: crate::wal::traits::WalAppendError,
-    ) -> crate::common::MidgeError {
+        failure: cntryl_midge_durability::wal::traits::WalAppendError,
+    ) -> cntryl_midge_core::common::MidgeError {
         if failure.unchanged {
             if let Some(storage) = &self.storage_budget {
                 storage.settle_local_wal_admission(admitted, 0);
             }
         }
-        if matches!(failure.error, crate::common::MidgeError::NoSpace(_)) {
+        if matches!(
+            failure.error,
+            cntryl_midge_core::common::MidgeError::NoSpace(_)
+        ) {
             Self::record_no_space_event(&self.counters);
         }
-        crate::common::error::classify_commit_error(failure.error, failure.unchanged)
+        cntryl_midge_core::common::error::classify_commit_error(failure.error, failure.unchanged)
     }
 
     /// Attach a leader store for epoch validation at sync boundaries, along
     /// with this writer's own holder identity.
     pub fn set_leader_store(
         &mut self,
-        store: Arc<dyn crate::lease::LeaderStore>,
+        store: Arc<dyn cntryl_midge_durability::lease::LeaderStore>,
         holder_id: String,
     ) {
         self.leader_store = Some(store);
@@ -985,7 +998,7 @@ impl WalActor {
     }
 
     #[cfg(test)]
-    pub fn batch_config(&self) -> crate::wal::policy::BatchConfig {
+    pub fn batch_config(&self) -> cntryl_midge_durability::wal::policy::BatchConfig {
         self.batch_config
     }
 
@@ -994,7 +1007,7 @@ impl WalActor {
     pub fn set_durability(
         &mut self,
         policy: DurabilityPolicy,
-        batch_config: crate::wal::policy::BatchConfig,
+        batch_config: cntryl_midge_durability::wal::policy::BatchConfig,
     ) {
         // Update batch config and policy atomically
         self.batch_config = batch_config;
@@ -1036,7 +1049,7 @@ impl WalActor {
     /// write unacknowledged instead of acknowledged and unflushable.
     fn ensure_family_accepts_writes(
         state: &RuntimeState,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> MidgeResult<()> {
         if state.partial_apply_prefix {
             return Err(MidgeError::RecoveryFailed(
@@ -1138,7 +1151,7 @@ impl WalActor {
     /// "retry", either of which could apply the unit twice, so it becomes
     /// `OutcomeUnknown`, including a failed fsync or an ambiguous append.
     fn appended_unit_error(error: MidgeError) -> MidgeError {
-        crate::common::error::classify_commit_error(error, false)
+        cntryl_midge_core::common::error::classify_commit_error(error, false)
     }
 
     pub(crate) fn can_coalesce_transaction_append(
@@ -1168,9 +1181,9 @@ impl WalActor {
 
     /// The records the open segment holds: what sealing it would cover.
     /// Memory mode holds none.
-    pub(crate) fn open_tail(&self) -> crate::wal::format::SegmentTail {
+    pub(crate) fn open_tail(&self) -> cntryl_midge_durability::wal::format::SegmentTail {
         self.writer()
-            .map(crate::wal::WalWriter::tail)
+            .map(cntryl_midge_durability::wal::WalWriter::tail)
             .unwrap_or_default()
     }
 
@@ -1190,7 +1203,7 @@ impl WalActor {
     pub(crate) fn retire_wal_below(
         &self,
         state: &mut RuntimeState,
-        to: crate::wal::ledger::SegmentId,
+        to: cntryl_midge_durability::wal::ledger::SegmentId,
     ) -> MidgeResult<crate::runtime::wal_history::RetiredWal> {
         if self.is_fenced() {
             return Err(self
@@ -1226,7 +1239,7 @@ impl WalActor {
     #[cfg(all(test, feature = "failpoints"))]
     pub(crate) fn set_write_authority_for_test(
         &self,
-        authority: crate::wal::traits::WriteAuthority,
+        authority: cntryl_midge_durability::wal::traits::WriteAuthority,
     ) {
         if let Some(writer) = self.writer() {
             writer.set_write_authority(Some(authority));
@@ -1235,7 +1248,7 @@ impl WalActor {
 
     pub(crate) fn set_lease_validity(
         &mut self,
-        validity: Option<Arc<crate::lease::LeaseValidity>>,
+        validity: Option<Arc<cntryl_midge_durability::lease::LeaseValidity>>,
     ) {
         self.lease_validity = validity;
         if let Some(writer) = self.writer() {
@@ -1243,7 +1256,7 @@ impl WalActor {
         }
     }
 
-    fn write_authority(&self) -> Option<crate::wal::traits::WriteAuthority> {
+    fn write_authority(&self) -> Option<cntryl_midge_durability::wal::traits::WriteAuthority> {
         let validity = self.lease_validity.clone();
         let leader_store = self.leader_store.clone();
         if validity.is_none() && leader_store.is_none() {

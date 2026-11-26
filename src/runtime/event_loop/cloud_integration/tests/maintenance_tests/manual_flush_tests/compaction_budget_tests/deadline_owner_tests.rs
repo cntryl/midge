@@ -268,7 +268,7 @@ fn assert_route_timeout(
     );
 }
 
-fn manifest_names(manifest: &crate::metadata::Manifest) -> BTreeSet<String> {
+fn manifest_names(manifest: &cntryl_midge_durability::metadata::Manifest) -> BTreeSet<String> {
     manifest
         .files
         .iter()
@@ -295,7 +295,7 @@ fn assert_genuine_holds(reads: &[MetadataIoEvidence], expected: usize) {
 
 #[test]
 fn should_preserve_background_owner_when_later_manual_waiter_expires() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: launch through the actual background fair turn, without a route.
         let mut fixture = BudgetFixture::new()?;
         fixture.el.state.set_compaction_enabled(true);
@@ -358,7 +358,7 @@ fn should_preserve_background_owner_when_later_manual_waiter_expires() -> MidgeR
 
 #[test]
 fn should_keep_manual_origin_when_later_shorter_waiter_expires() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: lower IDs intentionally tempt a resampled map-origin policy.
         let mut fixture = BudgetFixture::new()?;
         let (started, original_response) = fixture.start_manual();
@@ -429,7 +429,7 @@ fn should_keep_manual_origin_when_later_shorter_waiter_expires() -> MidgeResult<
 #[test]
 fn should_refuse_budget_extension_when_longer_waiter_joins_accepted_manual_work() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: each genuine phase hold fits the ordinary provider cap.
         let mut fixture = BudgetFixture::new()?;
         let (started, original_response) = fixture.start_manual();
@@ -503,7 +503,7 @@ fn should_refuse_budget_extension_when_longer_waiter_joins_accepted_manual_work(
 #[test]
 fn should_inherit_original_clock_when_actual_manual_work_reaches_second_family() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: both families have genuine input bytes before the original clock.
         let mut fixture = BudgetFixture::new_with_all_families(true)?;
         let (started, response) = fixture.start_manual();
@@ -592,7 +592,7 @@ fn should_retain_input_authority_when_second_family_compute_arrives_after_manual
 
 // Keep both real completion dispositions beside their shared authority ledger.
 fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: one real caller owns both CF generations; no late route refresh.
         let mut fixture = BudgetFixture::new_with_all_families(true)?;
         let (started, response) = fixture.start_manual();

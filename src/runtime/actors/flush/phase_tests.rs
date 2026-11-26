@@ -40,7 +40,7 @@ fn complete_build(
     actor: &mut FlushActor,
     results: &crossbeam::channel::Receiver<FlushWorkerResult>,
     identity: FlushIdentity,
-    memtable: Arc<crate::memtable::SkipListMemtable>,
+    memtable: Arc<cntryl_midge_table::memtable::SkipListMemtable>,
 ) -> MidgeResult<FlushWorkerResult> {
     let staging = PathBuf::from("sst/.flush-staging/phase-proof.tmp");
     let held = HeldStage::new("midge::flush_worker::before_build");
@@ -70,7 +70,10 @@ fn complete_build(
     Ok(built)
 }
 
-fn publication_task(fs: Arc<dyn crate::io::Fs>, build: &FlushBuildCompletion) -> FlushPublishTask {
+fn publication_task(
+    fs: Arc<dyn cntryl_midge_core::io::Fs>,
+    build: &FlushBuildCompletion,
+) -> FlushPublishTask {
     FlushPublishTask {
         build: FlushBuildOutput {
             identity: build.identity,
@@ -78,7 +81,7 @@ fn publication_task(fs: Arc<dyn crate::io::Fs>, build: &FlushBuildCompletion) ->
             file_meta: build.result.as_ref().unwrap().clone(),
             reservation: build.reservation,
         },
-        sst_name: crate::cloud_layout::file_name(0, 0, 1),
+        sst_name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
         sst_seq: 1,
         fs,
         storage: Arc::new(HybridFlushStorage::default()),
@@ -90,10 +93,10 @@ fn publication_task(fs: Arc<dyn crate::io::Fs>, build: &FlushBuildCompletion) ->
 }
 
 fn mirror_task(
-    fs: Arc<dyn crate::io::Fs>,
+    fs: Arc<dyn cntryl_midge_core::io::Fs>,
     delta: &FlushPublicationDelta,
     phase: FlushMirrorPhase,
-    deadline: crate::common::OperationDeadline,
+    deadline: cntryl_midge_core::common::OperationDeadline,
 ) -> FlushMirrorTask {
     FlushMirrorTask {
         phase,
@@ -114,10 +117,11 @@ fn mirror_task(
 fn complete_mirror_phases(
     actor: &mut FlushActor,
     results: &crossbeam::channel::Receiver<FlushWorkerResult>,
-    fs: Arc<dyn crate::io::Fs>,
+    fs: Arc<dyn cntryl_midge_core::io::Fs>,
     delta: &FlushPublicationDelta,
 ) -> MidgeResult<()> {
-    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+    let deadline =
+        cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
     actor.submit_mirror(mirror_task(
         Arc::clone(&fs),
         delta,
@@ -152,16 +156,16 @@ fn complete_mirror_phases(
 
 #[test]
 fn should_retain_cf_owner_until_its_exact_physical_completion() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: actual worker, memtable, encoded SST and publication filesystem.
     let directory = tempfile::tempdir()?;
-    let fs = crate::io::real::test_root(directory.path());
+    let fs = cntryl_midge_core::io::real::test_root(directory.path());
     let (completed, results) = crossbeam::channel::unbounded();
     let mut actor = FlushActor::new_with_worker_count(
         &fs,
         false,
-        &crate::codec::CompressionPolicy::default(),
+        &cntryl_midge_core::codec::CompressionPolicy::default(),
         &completed,
         16 * 1024 * 1024,
         None,
@@ -173,7 +177,7 @@ fn should_retain_cf_owner_until_its_exact_physical_completion() -> MidgeResult<(
         cf_id: 0,
         sequence: 1,
     };
-    let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
+    let memtable = Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new());
     memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
     // Act: only the exact completed physical phase can settle.
     let completion = complete_build(&mut actor, &results, identity, memtable)?;
@@ -214,7 +218,7 @@ fn should_retain_cf_owner_until_its_exact_physical_completion() -> MidgeResult<(
     assert!(directory
         .path()
         .join("sst")
-        .join(crate::cloud_layout::file_name(0, 0, 1))
+        .join(cntryl_midge_core::cloud_layout::file_name(0, 0, 1))
         .exists());
     actor.shutdown_and_join()?;
     fail::remove("midge::flush_worker::before_publication");

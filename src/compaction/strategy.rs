@@ -8,8 +8,8 @@
 //!   - Keep read amplification low by honoring key-range overlap.
 //!   - Produce deterministic compaction plans.
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::metadata::FileMeta;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::metadata::FileMeta;
 
 #[cfg(test)]
 #[path = "strategy/work_partition_tests.rs"]
@@ -240,7 +240,7 @@ pub(crate) type CompactionCursors = std::collections::HashMap<(u32, u32), Select
 pub(crate) struct SelectionCursor {
     pub(crate) key: Vec<u8>,
     pub(crate) name: String,
-    pub(crate) reservation: crate::common::resource_budget::ResourceReservation,
+    pub(crate) reservation: cntryl_midge_core::common::resource_budget::ResourceReservation,
 }
 
 impl DebtScore {
@@ -1612,7 +1612,10 @@ mod tests {
             .expect_err("missing persisted key-range metadata must fail closed");
 
         // Assert
-        assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+        assert!(matches!(
+            error,
+            cntryl_midge_core::common::MidgeError::Corruption(_)
+        ));
     }
 
     #[test]
@@ -1637,7 +1640,10 @@ mod tests {
             .expect_err("unknown target overlap must fail closed");
 
         // Assert
-        assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+        assert!(matches!(
+            error,
+            cntryl_midge_core::common::MidgeError::Corruption(_)
+        ));
     }
 
     #[test]
@@ -1659,7 +1665,10 @@ mod tests {
             .expect_err("inverted range must fail closed");
 
         // Assert
-        assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+        assert!(matches!(
+            error,
+            cntryl_midge_core::common::MidgeError::Corruption(_)
+        ));
     }
 
     // ============================================================================
@@ -2222,7 +2231,7 @@ mod tests {
             .map(|sequence| {
                 let key = vec![u8::try_from(sequence).expect("fixture sequence")];
                 let mut file = make_file(
-                    &crate::cloud_layout::file_name(0, 0, sequence),
+                    &cntryl_midge_core::cloud_layout::file_name(0, 0, sequence),
                     0,
                     0,
                     1,
@@ -2293,7 +2302,7 @@ mod tests {
         heat: u64,
     ) -> FileMeta {
         let mut file = make_file(
-            &crate::cloud_layout::file_name(0, 0, sequence),
+            &cntryl_midge_core::cloud_layout::file_name(0, 0, sequence),
             0,
             0,
             1,
@@ -2465,7 +2474,7 @@ mod tests {
         let compactor = Compactor::new();
         let mut files = Vec::new();
         for sequence in 1..=6_u64 {
-            let name = crate::cloud_layout::file_name(0, 0, sequence);
+            let name = cntryl_midge_core::cloud_layout::file_name(0, 0, sequence);
             let file = make_file(
                 &name,
                 0,
@@ -2481,7 +2490,7 @@ mod tests {
             }
             files.push(file);
         }
-        let oldest_cold = crate::cloud_layout::file_name(0, 0, 1);
+        let oldest_cold = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
 
         // Act
         let plan = compactor
@@ -2507,7 +2516,7 @@ mod tests {
         let files: Vec<_> = (1..=8_u64)
             .map(|sequence| {
                 make_file(
-                    &crate::cloud_layout::file_name(0, 0, sequence),
+                    &cntryl_midge_core::cloud_layout::file_name(0, 0, sequence),
                     0,
                     0,
                     1,

@@ -1,4 +1,4 @@
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::time::Duration;
 
 /// Optional admission slowdown and background write limits. Defaults preserve

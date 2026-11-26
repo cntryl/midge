@@ -8,11 +8,11 @@
 
 use super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::EventLoop;
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::actors::wal::CommitValidationProof;
 use crate::runtime::snapshot_pins::OwnedSnapshotPin;
 use crate::runtime::{ConflictPolicy, ReadSnapshot, RuntimeMsg, RuntimeResponse, TransactionOp};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crossbeam::channel::{Receiver, Sender};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -83,7 +83,7 @@ fn read_resident_validation(
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> MidgeResult<CommitValidationProof> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::failpoints::fail_point!("midge::validation::before_snapshot_reads");
+        cntryl_midge_core::failpoints::fail_point!("midge::validation::before_snapshot_reads");
         if job.deadline.is_expired() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return Err(MidgeError::Timeout(
                 "transaction validation expired before storage reads".into(),
@@ -122,7 +122,7 @@ impl ValidationWorker {
         let (continue_after_completion, continued) = crossbeam::channel::bounded(1);
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancellation = Arc::clone(&cancelled);
-        let gate = crate::failpoints::worker_gate();
+        let gate = cntryl_midge_core::failpoints::worker_gate();
         let handle = std::thread::Builder::new()
             .name("midge-commit-validation".into())
             .spawn(move || {

@@ -1,23 +1,25 @@
 use super::*;
-use crate::io::{FsError, OpenOptions};
-use crate::lease::LeaderStore;
-use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
-use crate::wal::format::ChainLink;
-use crate::wal::planner::HistoryAction;
 use bytes::Bytes;
+use cntryl_midge_core::io::{FsError, OpenOptions};
+use cntryl_midge_durability::lease::LeaderStore;
+use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
+use cntryl_midge_durability::wal::format::ChainLink;
+use cntryl_midge_durability::wal::planner::HistoryAction;
 use std::collections::BTreeSet;
 
 /// The frame of a put at `sequence`: a segment body the fixture wraps.
 fn framed_wal(sequence: u64, value: &[u8]) -> Vec<u8> {
-    let record = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
+    let record = cntryl_midge_durability::wal::WalRecord::new(
+        cntryl_midge_durability::wal::WalOpKind::Put,
         Bytes::from_static(b"key"),
         Some(Bytes::copy_from_slice(value)),
         sequence,
     );
-    let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+    let payload =
+        cntryl_midge_durability::wal::encoding::encode(&record).expect("encode WAL record");
     let mut bytes = Vec::new();
-    crate::wal::frame::append_frame(&mut bytes, &payload).expect("encode WAL frame");
+    cntryl_midge_durability::wal::frame::append_frame(&mut bytes, &payload)
+        .expect("encode WAL frame");
     bytes
 }
 
@@ -25,7 +27,7 @@ fn framed_wal(sequence: u64, value: &[u8]) -> Vec<u8> {
 /// segment the fixture wrote with `body` holds after a cut to `body`.
 fn with_header(path: &std::path::Path, body: &[u8]) -> MidgeResult<Vec<u8>> {
     let mut bytes = std::fs::read(path)?;
-    bytes.truncate(crate::wal::format::HEADER_LEN);
+    bytes.truncate(cntryl_midge_durability::wal::format::HEADER_LEN);
     bytes.extend_from_slice(body);
     Ok(bytes)
 }
@@ -34,10 +36,10 @@ fn with_header(path: &std::path::Path, body: &[u8]) -> MidgeResult<Vec<u8>> {
 /// planned, or `None` when it plans none.
 fn open_tail_sequence(recovered: &StreamingCloudWalRecovery) -> Option<u64> {
     recovered.segments.open_segment()?;
-    crate::wal::recovery::validate_wal_with_policy(
+    cntryl_midge_durability::wal::recovery::validate_wal_with_policy(
         recovered.fs.as_ref(),
         &recovered.segments,
-        crate::wal::recovery::ReplayPolicy::Strict,
+        cntryl_midge_durability::wal::recovery::ReplayPolicy::Strict,
         None,
     )
     .expect("replay the plan")
@@ -67,12 +69,12 @@ fn damaged_floor_fixture(
     let path = fixture.active(if synced_suffix { &body } else { &first })?;
     drop(fixture.history()?);
     let mut damaged = with_header(&path, &body)?;
-    let prefix_end = crate::wal::format::HEADER_LEN + first.len();
+    let prefix_end = cntryl_midge_durability::wal::format::HEADER_LEN + first.len();
     if let Some(bytes) = suffix_bytes {
         damaged.truncate(prefix_end + bytes);
     }
     if corrupt_suffix {
-        damaged[prefix_end + crate::wal::frame::WAL_FRAME_HEADER_LEN] ^= 0x80;
+        damaged[prefix_end + cntryl_midge_durability::wal::frame::WAL_FRAME_HEADER_LEN] ^= 0x80;
     }
     std::fs::write(path, damaged)?;
     Ok((fixture, prefix_end as u64))
@@ -92,24 +94,29 @@ fn should_match_recovery_adapters_given_damage_around_the_durable_floor() -> Mid
             let (fixture, prefix_end) =
                 damaged_floor_fixture(synced_suffix, suffix_bytes, corrupt_suffix)?;
             let history = fixture.history()?;
-            let wal = crate::io::RealFs::new(fixture.directory.path().join("local/wal"))
-                .map_err(FsError::into_midge)?;
+            let wal =
+                cntryl_midge_core::io::RealFs::new(fixture.directory.path().join("local/wal"))
+                    .map_err(FsError::into_midge)?;
             let segments = ReplaySegments::from_ledger(history.ledger(), |id| {
-                FsPath::new(crate::wal::segment_file_name(id))
+                FsPath::new(cntryl_midge_durability::wal::segment_file_name(id))
             });
             let replay_policy = match policy {
-                RecoveryPolicy::Strict => crate::wal::recovery::ReplayPolicy::Strict,
-                RecoveryPolicy::Salvage => crate::wal::recovery::ReplayPolicy::SalvageValidPrefix,
+                RecoveryPolicy::Strict => {
+                    cntryl_midge_durability::wal::recovery::ReplayPolicy::Strict
+                }
+                RecoveryPolicy::Salvage => {
+                    cntryl_midge_durability::wal::recovery::ReplayPolicy::SalvageValidPrefix
+                }
             };
             let mut memtables = std::collections::HashMap::new();
 
             // Act
-            let local = crate::wal::recovery::replay_wal_with_frontiers_within(
+            let local = cntryl_midge_durability::wal::recovery::replay_wal_with_frontiers_within(
                 &wal,
                 &segments,
                 &mut memtables,
                 replay_policy,
-                &crate::metadata::frontiers::FlushFrontiers::default(),
+                &cntryl_midge_durability::metadata::frontiers::FlushFrontiers::default(),
                 None,
             );
             let cloud = fixture.plan_only(policy, limits());
@@ -181,7 +188,7 @@ fn should_reopen_strictly_after_cloud_salvage_lowers_the_lost_sync_floor() -> Mi
         assert_eq!(
             std::fs::read(path.with_file_name(format!(
                 "{}.salvage-retained",
-                crate::wal::segment_file_name(id)
+                cntryl_midge_durability::wal::segment_file_name(id)
             )))?,
             damaged
         );
@@ -215,7 +222,7 @@ impl Fixture {
     fn new() -> MidgeResult<Self> {
         let directory = tempfile::tempdir()?;
         std::fs::create_dir_all(directory.path().join("local/wal"))?;
-        let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
+        let cloud = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
             directory.path().join("cloud"),
         )?);
         let fixture = Self {
@@ -242,15 +249,15 @@ impl Fixture {
         self.directory
             .path()
             .join("cloud")
-            .join(crate::wal::cloud_catalog::OBJECT_KEY)
+            .join(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY)
     }
 
     /// Store `catalog` as both catalog copies.
     fn save_catalog(&self, catalog: &WalPublicationCatalog) -> MidgeResult<()> {
         let bytes = catalog.encode().map_err(MidgeError::Internal)?;
         for key in [
-            crate::wal::cloud_catalog::OBJECT_KEY,
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
         ] {
             let path = self.directory.path().join("cloud").join(key);
             std::fs::create_dir_all(path.parent().expect("catalog parent"))?;
@@ -284,12 +291,15 @@ impl Fixture {
     /// newest sealed segment below it; sealed with a footer when `sealed`.
     /// A body that is already a segment stays as it is.
     fn wrap(&mut self, id: u64, epoch: u64, body: &[u8], sealed: bool) -> Vec<u8> {
-        if crate::wal::format::SegmentHeader::decode(body).is_ok() {
+        if cntryl_midge_durability::wal::format::SegmentHeader::decode(body).is_ok() {
             return body.to_vec();
         }
-        let builder =
-            crate::wal::format::segment::SegmentBuilder::new(id, epoch, self.link_below(id))
-                .bytes(body);
+        let builder = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
+            id,
+            epoch,
+            self.link_below(id),
+        )
+        .bytes(body);
         if sealed {
             let (bytes, link) = builder.seal();
             self.links.insert(id, link);
@@ -302,13 +312,17 @@ impl Fixture {
     /// Publish segment `id` holding `body`, written by `epoch` and linked to
     /// the catalog's head, which must hold sequences through `sequence`.
     fn publish(&mut self, id: u64, sequence: u64, epoch: u64, body: &[u8]) -> MidgeResult<()> {
-        let bytes = if crate::wal::format::SegmentHeader::decode(body).is_ok() {
+        let bytes = if cntryl_midge_durability::wal::format::SegmentHeader::decode(body).is_ok() {
             body.to_vec()
         } else {
-            crate::wal::format::segment::SegmentBuilder::new(id, epoch, self.catalog().head())
-                .bytes(body)
-                .seal()
-                .0
+            cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
+                id,
+                epoch,
+                self.catalog().head(),
+            )
+            .bytes(body)
+            .seal()
+            .0
         };
         let entry = CatalogEntry::from_sealed_bytes(&bytes).map_err(MidgeError::Corruption)?;
         assert_eq!(
@@ -344,7 +358,7 @@ impl Fixture {
         self.directory
             .path()
             .join("local/wal")
-            .join(crate::wal::segment_file_name(id))
+            .join(cntryl_midge_durability::wal::segment_file_name(id))
     }
 
     /// Write sealed ledger member `id` holding `body`, written by the epoch
@@ -405,16 +419,18 @@ impl Fixture {
     /// leaves it.
     fn history(&self) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
         let wal: Arc<dyn Fs> = Arc::new(
-            crate::io::RealFs::new(self.directory.path().join("local/wal"))
+            cntryl_midge_core::io::RealFs::new(self.directory.path().join("local/wal"))
                 .map_err(FsError::into_midge)?,
         );
         if !wal
-            .exists(&FsPath::new(crate::wal::ledger_store::LEDGER_FILE))
+            .exists(&FsPath::new(
+                cntryl_midge_durability::wal::ledger_store::LEDGER_FILE,
+            ))
             .map_err(FsError::into_midge)?
         {
             let open = self.open_segment();
             if self.open.is_none() && !self.segment(open).exists() {
-                let header = crate::wal::format::segment::SegmentBuilder::new(
+                let header = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
                     open,
                     self.current_epoch(),
                     self.link_below(open),
@@ -445,7 +461,7 @@ impl Fixture {
                 .retire_prefix(
                     catalog.fencing_epoch(),
                     &retired,
-                    crate::lease::SharedGenerationId::new(1).unwrap(),
+                    cntryl_midge_durability::lease::SharedGenerationId::new(1).unwrap(),
                 )
                 .expect("retire the catalog's oldest segments");
         });
@@ -478,7 +494,11 @@ impl Fixture {
             .ok()?
             .filter_map(Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("salvaged-"))
-            .map(|entry| entry.path().join(crate::wal::segment_file_name(id)))
+            .map(|entry| {
+                entry
+                    .path()
+                    .join(cntryl_midge_durability::wal::segment_file_name(id))
+            })
             .find(|path| path.exists())
     }
 
@@ -494,7 +514,7 @@ impl Fixture {
     ) -> MidgeResult<StreamingCloudWalRecovery> {
         let history = self.history()?;
         let recovered = StreamingCloudWalRecovery::build(
-            &crate::io::real::test_root(self.directory.path().join("local")),
+            &cntryl_midge_core::io::real::test_root(self.directory.path().join("local")),
             Some(history.ledger()),
             &self.cloud,
             &self.catalog(),
@@ -537,7 +557,7 @@ impl Fixture {
     ) -> MidgeResult<StreamingCloudWalRecovery> {
         let history = self.history()?;
         StreamingCloudWalRecovery::build(
-            &crate::io::real::test_root(self.directory.path().join("local")),
+            &cntryl_midge_core::io::real::test_root(self.directory.path().join("local")),
             Some(history.ledger()),
             &self.cloud,
             &self.catalog(),
@@ -600,7 +620,9 @@ fn should_serve_planned_wal_sources_without_staging_copies() -> MidgeResult<()> 
     );
     let file = recovered
         .fs
-        .open_read(&FsPath::new(crate::wal::segment_file_name(2)))
+        .open_read(&FsPath::new(
+            cntryl_midge_durability::wal::segment_file_name(2),
+        ))
         .map_err(FsError::into_midge)?;
     assert_eq!(
         file.read_at(0, second.len() as u64)
@@ -627,14 +649,14 @@ fn should_truncate_only_incomplete_active_wal_tail_before_virtual_replay() -> Mi
     let recovered = fixture.build(RecoveryPolicy::Strict)?;
 
     // Assert
-    let cut = (crate::wal::format::HEADER_LEN + valid.len()) as u64;
+    let cut = (cntryl_midge_durability::wal::format::HEADER_LEN + valid.len()) as u64;
     assert_eq!(std::fs::metadata(path)?.len(), cut);
     assert_eq!(open_tail_sequence(&recovered).expect("an open segment"), 4);
     assert!(!recovered.plan.opened_in_salvage_mode);
     assert_eq!(
         recovered
             .fs
-            .metadata(&crate::wal::segment_key(1))
+            .metadata(&cntryl_midge_durability::wal::segment_key(1))
             .map_err(FsError::into_midge)?
             .len,
         cut
@@ -660,11 +682,14 @@ fn should_fence_cloud_recovery_open_cut_after_successor_acquires_lease() -> Midg
         "the active tail needs a cut"
     );
 
-    let lease_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
-    let leader_store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
-        Arc::clone(&lease_fs),
-        crate::lease::LeaseClock::default(),
-    ));
+    let lease_fs: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::MockFs::new());
+    let leader_store = Arc::new(
+        cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
+            Arc::clone(&lease_fs),
+            cntryl_midge_durability::lease::LeaseClock::default(),
+        ),
+    );
     let predecessor = leader_store.acquire_leadership("predecessor")?;
     leader_store.acquire_leadership("successor")?;
     let fence = crate::runtime::wal_history::WalHistoryFence::new(
@@ -676,9 +701,9 @@ fn should_fence_cloud_recovery_open_cut_after_successor_acquires_lease() -> Midg
     let history = fixture.history()?;
     let catalog = fixture.catalog();
     let persistence = crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::new(
-        crate::storage::HybridStorage::with_policy(
+        cntryl_midge_storage::HybridStorage::with_policy(
             Arc::clone(&fixture.cloud),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ),
     ));
 
@@ -691,7 +716,9 @@ fn should_fence_cloud_recovery_open_cut_after_successor_acquires_lease() -> Midg
         crate::runtime::cloud_startup::CacheHistory::Existing(history),
         Some(&fence),
         &|| Ok(()),
-        &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+        &cntryl_midge_core::common::DeadlineScope::new(
+            cntryl_midge_core::common::OperationDeadline::unbounded(),
+        ),
     );
 
     // Assert: stale recovery must not truncate the active segment the
@@ -715,7 +742,7 @@ fn should_reject_resource_limits_without_salvaging_or_truncating_wal_data() -> M
                 .directory
                 .path()
                 .join("cloud")
-                .join(crate::wal::segment_object_key(1, 7))
+                .join(cntryl_midge_durability::wal::segment_object_key(1, 7))
         };
         let written = std::fs::read(&path)?;
         let limits = StreamingReplayLimits {
@@ -835,10 +862,10 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
     bytes.extend(framed_wal(3, b"three"));
     let active = fixture.active(&bytes)?;
     let written = std::fs::read(&active)?;
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::transient_read::TransientReadFs {
-        inner: crate::io::RealFs::new(fixture.directory.path().join("local"))
+    let fs: Arc<dyn Fs> = Arc::new(cntryl_midge_core::io::transient_read::TransientReadFs {
+        inner: cntryl_midge_core::io::RealFs::new(fixture.directory.path().join("local"))
             .map_err(FsError::into_midge)?,
-        fail_from: (crate::wal::format::HEADER_LEN + first.len()) as u64,
+        fail_from: (cntryl_midge_durability::wal::format::HEADER_LEN + first.len()) as u64,
     });
 
     // Act
@@ -864,7 +891,7 @@ fn corrupt_publication(fixture: &mut Fixture, id: u64) {
         .object_key();
     let path = fixture.directory.path().join("cloud").join(key);
     let mut bytes = std::fs::read(&path).expect("read publication");
-    bytes[crate::wal::format::HEADER_LEN + 8] ^= 1;
+    bytes[cntryl_midge_durability::wal::format::HEADER_LEN + 8] ^= 1;
     std::fs::write(path, bytes).expect("damage publication");
 }
 
@@ -1008,7 +1035,7 @@ fn should_lift_floor_over_valid_frames_after_corrupt_frame_in_retained_active_wa
     assert_eq!(
         std::fs::read(active.with_file_name(format!(
             "{}.salvage-retained",
-            crate::wal::segment_file_name(1)
+            cntryl_midge_durability::wal::segment_file_name(1)
         )))?,
         written
     );
@@ -1116,7 +1143,7 @@ fn should_preserve_active_wal_copy_when_cloud_salvage_truncates_corrupt_suffix()
     assert_eq!(
         std::fs::read(active.with_file_name(format!(
             "{}.salvage-retained",
-            crate::wal::segment_file_name(1)
+            cntryl_midge_durability::wal::segment_file_name(1)
         )))?,
         written,
         "salvage must keep a full copy of the original open segment"
@@ -1192,7 +1219,7 @@ fn should_reject_strict_recovery_when_active_wal_has_lower_writer_epoch() -> Mid
     assert!(!active
         .with_file_name(format!(
             "{}.salvage-retained",
-            crate::wal::segment_file_name(2)
+            cntryl_midge_durability::wal::segment_file_name(2)
         ))
         .exists());
     Ok(())
@@ -1217,7 +1244,7 @@ fn should_recover_valid_active_wal_prefix_when_tail_is_zero_filled() -> MidgeRes
     assert_eq!(open_tail_sequence(&recovered).expect("an open segment"), 3);
     assert_eq!(
         std::fs::metadata(path)?.len(),
-        (crate::wal::format::HEADER_LEN + valid.len()) as u64
+        (cntryl_midge_durability::wal::format::HEADER_LEN + valid.len()) as u64
     );
     Ok(())
 }
@@ -1296,113 +1323,131 @@ fn should_fail_strict_recovery_naming_object_when_cataloged_segment_is_missing()
 /// A real filesystem whose file handles refuse to truncate, standing in for a
 /// disk that fails the salvage cut.
 struct TruncateFailingFs {
-    inner: crate::io::RealFs,
+    inner: cntryl_midge_core::io::RealFs,
 }
 
 struct TruncateFailingFile<'a> {
-    inner: Box<dyn crate::io::File + 'a>,
+    inner: Box<dyn cntryl_midge_core::io::File + 'a>,
 }
 
-impl crate::io::ReadFile for TruncateFailingFile<'_> {
-    fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<Bytes> {
+impl cntryl_midge_core::io::ReadFile for TruncateFailingFile<'_> {
+    fn read_at(&self, offset: u64, len: u64) -> cntryl_midge_core::io::FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
 
-    fn len(&self) -> crate::io::FsResult<u64> {
+    fn len(&self) -> cntryl_midge_core::io::FsResult<u64> {
         self.inner.len()
     }
 }
 
-impl crate::io::File for TruncateFailingFile<'_> {
-    fn write_at(&mut self, offset: u64, data: Bytes) -> crate::io::FsResult<()> {
+impl cntryl_midge_core::io::File for TruncateFailingFile<'_> {
+    fn write_at(&mut self, offset: u64, data: Bytes) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.write_at(offset, data)
     }
 
-    fn truncate(&mut self, len: u64) -> crate::io::FsResult<()> {
+    fn truncate(&mut self, len: u64) -> cntryl_midge_core::io::FsResult<()> {
         Err(FsError::NoSpace(format!(
             "injected truncate failure at {len} bytes"
         )))
     }
 
-    fn append(&mut self, data: Bytes) -> crate::io::FsResult<u64> {
+    fn append(&mut self, data: Bytes) -> cntryl_midge_core::io::FsResult<u64> {
         self.inner.append(data)
     }
 
-    fn sync(&mut self, dur: crate::io::Durability) -> crate::io::FsResult<()> {
+    fn sync(
+        &mut self,
+        dur: cntryl_midge_core::io::Durability,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.sync(dur)
     }
 }
 
 impl ReadFs for TruncateFailingFs {
-    fn open_read(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(
+        &self,
+        path: &FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
+    fn exists(&self, path: &FsPath) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
-    fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
+    fn metadata(
+        &self,
+        path: &FsPath,
+    ) -> cntryl_midge_core::io::FsResult<cntryl_midge_core::io::traits::Metadata> {
         self.inner.metadata(path)
     }
 
-    fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+    fn list_dir(
+        &self,
+        path: &FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Vec<cntryl_midge_core::io::traits::DirEntry>> {
         self.inner.list_dir(path)
     }
 }
 
-impl crate::io::PersistentHandleFs for TruncateFailingFs {
+impl cntryl_midge_core::io::PersistentHandleFs for TruncateFailingFs {
     fn open_persistent(
         &self,
         path: &FsPath,
         opts: OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-        crate::io::open_persistent_handle(&self.inner, path, opts)
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File>> {
+        cntryl_midge_core::io::open_persistent_handle(&self.inner, path, opts)
     }
 }
 
 impl Fs for TruncateFailingFs {
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+    fn persistent_handle_capability(
+        &self,
+    ) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
-            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+            .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
     }
 
     fn open(
         &self,
         path: &FsPath,
         opts: OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
         Ok(Box::new(TruncateFailingFile {
             inner: self.inner.open(path, opts)?,
         }))
     }
 
-    fn remove_file(&self, path: &FsPath) -> crate::io::FsResult<()> {
+    fn remove_file(&self, path: &FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn create_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
+    fn create_dir_all(&self, path: &FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
+    fn remove_dir_all(&self, path: &FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 
-    fn sync_dir(&self, path: &FsPath, dur: crate::io::Durability) -> crate::io::FsResult<()> {
+    fn sync_dir(
+        &self,
+        path: &FsPath,
+        dur: cntryl_midge_core::io::Durability,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.sync_dir(path, dur)
     }
 
-    fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> crate::io::FsResult<()> {
+    fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.rename_atomic(from, to)
     }
 }
@@ -1420,7 +1465,7 @@ fn should_preserve_wal_bytes_when_salvage_truncate_fails() -> MidgeResult<()> {
     let active = fixture.active(&bytes)?;
     let written = std::fs::read(&active)?;
     let local: Arc<dyn Fs> = Arc::new(TruncateFailingFs {
-        inner: crate::io::RealFs::new(fixture.directory.path().join("local"))
+        inner: cntryl_midge_core::io::RealFs::new(fixture.directory.path().join("local"))
             .map_err(FsError::into_midge)?,
     });
 
@@ -1432,7 +1477,7 @@ fn should_preserve_wal_bytes_when_salvage_truncate_fails() -> MidgeResult<()> {
         "planning must be read-only"
     );
     let history = crate::runtime::wal_history::WalHistory::load(
-        crate::io::subdirectory(Arc::clone(&local), "wal"),
+        cntryl_midge_core::io::subdirectory(Arc::clone(&local), "wal"),
         fixture.current_epoch(),
     )?
     .expect("fixture history");
@@ -1455,7 +1500,7 @@ fn should_preserve_wal_bytes_when_salvage_truncate_fails() -> MidgeResult<()> {
     assert_eq!(
         std::fs::read(active.with_file_name(format!(
             "{}.salvage-retained",
-            crate::wal::segment_file_name(1)
+            cntryl_midge_durability::wal::segment_file_name(1)
         )))?,
         written,
         "the retained copy must exist before the cut is attempted"
@@ -1510,8 +1555,8 @@ struct DelayedPlannerBackend {
 impl StorageBackend for DelayedPlannerBackend {
     fn submit_range_head_request(
         &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::StorageCallback,
+        request: cntryl_midge_storage::StorageRequest,
+        callback: cntryl_midge_storage::StorageCallback,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
         self.inner.submit_range_head_request(request, tx);
@@ -1520,8 +1565,8 @@ impl StorageBackend for DelayedPlannerBackend {
             .expect("actual filesystem HEAD");
         assert!(matches!(
             &event,
-            crate::storage::StorageEvent::HeadComplete {
-                result: crate::storage::StorageOutcome::Ok(_),
+            cntryl_midge_storage::StorageEvent::HeadComplete {
+                result: cntryl_midge_storage::StorageOutcome::Ok(_),
                 ..
             }
         ));
@@ -1549,31 +1594,31 @@ impl StorageBackend for DelayedPlannerBackend {
 
     fn submit_range_read_request(
         &self,
-        request: crate::storage::StorageRequest,
+        request: cntryl_midge_storage::StorageRequest,
         range: std::ops::Range<u64>,
-        callback: crate::storage::RangeReadCallback,
+        callback: cntryl_midge_storage::RangeReadCallback,
     ) {
         self.inner
             .submit_range_read_request(request, range, callback);
     }
     fn submit_metadata_read_request(
         &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::MetadataReadCallback,
+        request: cntryl_midge_storage::StorageRequest,
+        callback: cntryl_midge_storage::MetadataReadCallback,
     ) {
         self.inner.submit_metadata_read_request(request, callback);
     }
     fn submit_head_request(
         &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::StorageCallback,
+        request: cntryl_midge_storage::StorageRequest,
+        callback: cntryl_midge_storage::StorageCallback,
     ) {
         self.inner.submit_head_request(request, callback);
     }
     fn submit_delete_request(
         &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::StorageCallback,
+        request: cntryl_midge_storage::StorageRequest,
+        callback: cntryl_midge_storage::StorageCallback,
     ) {
         self.evidence
             .mutations
@@ -1582,9 +1627,9 @@ impl StorageBackend for DelayedPlannerBackend {
     }
     fn submit_write_request(
         &self,
-        request: crate::storage::StorageRequest,
+        request: cntryl_midge_storage::StorageRequest,
         data: Vec<u8>,
-        callback: crate::storage::StorageCallback,
+        callback: cntryl_midge_storage::StorageCallback,
     ) {
         self.evidence
             .mutations
@@ -1601,15 +1646,15 @@ fn run_planner_with_expiring_second_head(
     Arc<PlannerEvidence>,
     OperationDeadline,
 ) {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         let db_path = fixture.directory.path().join("local");
-        let local: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(&db_path).unwrap());
+        let local: Arc<dyn Fs> = Arc::new(cntryl_midge_core::io::RealFs::new(&db_path).unwrap());
         let history = fixture.history().unwrap();
         let evidence = Arc::new(PlannerEvidence::default());
         // Setup and failpoint-gate admission precede this real immutable clock.
         // The second completed HEAD forces expiry, independent of runner speed.
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
-        let scope = crate::common::DeadlineScope::new(deadline);
+        let scope = cntryl_midge_core::common::DeadlineScope::new(deadline);
         let remote: Arc<dyn StorageBackend> = Arc::new(DelayedPlannerBackend {
             inner: Arc::clone(&fixture.cloud),
             evidence: Arc::clone(&evidence),
@@ -1805,9 +1850,9 @@ fn commit_as_startup(
     history: crate::runtime::cloud_startup::CacheHistory,
 ) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
     let persistence = crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::new(
-        crate::storage::HybridStorage::with_policy(
+        cntryl_midge_storage::HybridStorage::with_policy(
             Arc::clone(&fixture.cloud),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ),
     ));
     let catalog = fixture.catalog();
@@ -1819,7 +1864,9 @@ fn commit_as_startup(
         history,
         None,
         &|| Ok(()),
-        &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+        &cntryl_midge_core::common::DeadlineScope::new(
+            cntryl_midge_core::common::OperationDeadline::unbounded(),
+        ),
     )
 }
 
@@ -1831,7 +1878,10 @@ fn published_link(fixture: &Fixture, id: u64) -> MidgeResult<ChainLink> {
         .expect("publication")
         .object_key();
     let bytes = std::fs::read(fixture.directory.path().join("cloud").join(key))?;
-    Ok(crate::wal::format::segment::footer_link(&bytes)?.expect("a published segment is sealed"))
+    Ok(
+        cntryl_midge_durability::wal::format::segment::footer_link(&bytes)?
+            .expect("a published segment is sealed"),
+    )
 }
 
 /// Append a put at `sequence` to the fixture's local segment `id`, as the
@@ -1848,10 +1898,10 @@ fn append_local(fixture: &Fixture, id: u64, sequence: u64) -> MidgeResult<()> {
 
 /// Replay `recovered`'s plan strictly, every segment, the open one included.
 fn replay_strictly(recovered: &StreamingCloudWalRecovery) -> MidgeResult<()> {
-    crate::wal::recovery::validate_wal_with_policy(
+    cntryl_midge_durability::wal::recovery::validate_wal_with_policy(
         recovered.fs.as_ref(),
         &recovered.segments,
-        crate::wal::recovery::ReplayPolicy::Strict,
+        cntryl_midge_durability::wal::recovery::ReplayPolicy::Strict,
         None,
     )
     .map(drop)
@@ -1961,13 +2011,17 @@ fn should_rebase_cache_when_a_successor_published_its_unpublished_segment_id() -
     fixture.local(2, &framed_wal(2, b"unpublished"))?;
     fixture.active(b"")?;
     drop(fixture.history()?);
-    let mut header =
-        crate::wal::format::segment::SegmentBuilder::new(2, 9, published_link(&fixture, 1)?)
-            .header();
+    let mut header = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
+        2,
+        9,
+        published_link(&fixture, 1)?,
+    )
+    .header();
     header.holder = [0x42; 16];
-    let (successor, head) = crate::wal::format::segment::SegmentBuilder::from_header(header)
-        .bytes(&framed_wal(2, b"successor"))
-        .seal();
+    let (successor, head) =
+        cntryl_midge_durability::wal::format::segment::SegmentBuilder::from_header(header)
+            .bytes(&framed_wal(2, b"successor"))
+            .seal();
     fixture.publish(2, 2, 9, &successor)?;
 
     // Act
@@ -2002,11 +2056,13 @@ fn should_set_aside_cache_tail_when_the_catalog_set_aside_a_successor_segment_at
     fixture.active(b"")?;
     drop(fixture.history()?);
     let head = published_link(&fixture, 1)?;
-    let mut header = crate::wal::format::segment::SegmentBuilder::new(2, 9, head).header();
+    let mut header =
+        cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(2, 9, head).header();
     header.holder = [0x42; 16];
-    let (successor, _) = crate::wal::format::segment::SegmentBuilder::from_header(header)
-        .bytes(&framed_wal(2, b"successor"))
-        .seal();
+    let (successor, _) =
+        cntryl_midge_durability::wal::format::segment::SegmentBuilder::from_header(header)
+            .bytes(&framed_wal(2, b"successor"))
+            .seal();
     fixture.publish(2, 2, 9, &successor)?;
     fixture.edit_catalog(|catalog| {
         let set_aside = catalog.entries()[1..].to_vec();
@@ -2038,7 +2094,7 @@ fn should_link_fresh_cache_first_segment_to_catalog_head() -> MidgeResult<()> {
     let mut fixture = Fixture::new()?;
     fixture.publish(1, 1, 7, &framed_wal(1, b"one"))?;
     fixture.publish(2, 2, 7, &framed_wal(2, b"two"))?;
-    let local = crate::io::real::test_root(fixture.directory.path().join("local"));
+    let local = cntryl_midge_core::io::real::test_root(fixture.directory.path().join("local"));
     let recovered = StreamingCloudWalRecovery::build(
         &local,
         None,
@@ -2050,7 +2106,10 @@ fn should_link_fresh_cache_first_segment_to_catalog_head() -> MidgeResult<()> {
         limits(),
     )?;
     let head = published_link(&fixture, 2)?;
-    let wal = crate::io::subdirectory(Arc::clone(&local), crate::wal::WAL_DIR);
+    let wal = cntryl_midge_core::io::subdirectory(
+        Arc::clone(&local),
+        cntryl_midge_durability::wal::WAL_DIR,
+    );
 
     // Act
     let history = commit_as_startup(
@@ -2220,7 +2279,7 @@ fn should_continue_past_retired_catalog_history_when_fresh_cache_takes_over() ->
     fixture.publish(2, 2, 7, &framed_wal(2, b"two"))?;
     let head = published_link(&fixture, 2)?;
     fixture.retire_through(2);
-    let local = crate::io::real::test_root(fixture.directory.path().join("local"));
+    let local = cntryl_midge_core::io::real::test_root(fixture.directory.path().join("local"));
     let recovered = StreamingCloudWalRecovery::build(
         &local,
         None,
@@ -2231,7 +2290,10 @@ fn should_continue_past_retired_catalog_history_when_fresh_cache_takes_over() ->
         127,
         limits(),
     )?;
-    let wal = crate::io::subdirectory(Arc::clone(&local), crate::wal::WAL_DIR);
+    let wal = cntryl_midge_core::io::subdirectory(
+        Arc::clone(&local),
+        cntryl_midge_durability::wal::WAL_DIR,
+    );
 
     // Act
     let history = commit_as_startup(
@@ -2380,7 +2442,7 @@ fn should_ignore_corrupt_local_copy_of_retired_prefix_when_later_history_remains
     drop(fixture.history()?);
     fixture.retire_through(1);
     let mut damaged = std::fs::read(&retired_local)?;
-    damaged[crate::wal::format::HEADER_LEN + 8] ^= 1;
+    damaged[cntryl_midge_durability::wal::format::HEADER_LEN + 8] ^= 1;
     std::fs::write(&retired_local, damaged)?;
 
     // Act
@@ -2489,14 +2551,15 @@ fn should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry()
         last_seq: 0,
         digest: [0x5a; 16],
     };
-    let (bytes, _link) = crate::wal::format::segment::SegmentBuilder::new(1, 7, stranger)
-        .bytes(&framed_wal(1, b"one"))
-        .seal();
+    let (bytes, _link) =
+        cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(1, 7, stranger)
+            .bytes(&framed_wal(1, b"one"))
+            .seal();
     let entry = CatalogEntry::describing(
-        &crate::wal::cloud_segment::SegmentValidation {
+        &cntryl_midge_durability::wal::cloud_segment::SegmentValidation {
             writer_epoch: 7,
             prev: ChainLink::GENESIS,
-            facts: crate::wal::format::segment::sealed_footer(&bytes)
+            facts: cntryl_midge_durability::wal::format::segment::sealed_footer(&bytes)
                 .unwrap()
                 .unwrap()
                 .sealed_facts(),

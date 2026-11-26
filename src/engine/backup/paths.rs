@@ -1,5 +1,5 @@
 //! Resolve aliases before mutation and publish directories without replacement.
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 

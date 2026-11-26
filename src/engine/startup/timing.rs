@@ -1,6 +1,6 @@
 //! Inclusive phase timings; nested phases must not be summed into open time.
 
-use crate::common::MidgeResult;
+use cntryl_midge_core::common::MidgeResult;
 
 pub(super) fn measure<T>(
     phase: &'static str,

@@ -31,9 +31,9 @@ fn publish_wal(path: &std::path::Path, records: u64) -> Vec<u8> {
     publish_records(path, || (1..=records).map(record).collect())
 }
 
-fn record(sequence: u64) -> crate::wal::WalRecord {
-    crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
+fn record(sequence: u64) -> cntryl_midge_durability::wal::WalRecord {
+    cntryl_midge_durability::wal::WalRecord::new(
+        cntryl_midge_durability::wal::WalOpKind::Put,
         bytes::Bytes::from(sequence.to_be_bytes().to_vec()),
         Some(bytes::Bytes::from(value(sequence))),
         sequence,
@@ -44,22 +44,22 @@ fn record(sequence: u64) -> crate::wal::WalRecord {
 /// catalog's epoch, and drop the local WAL cache.
 fn publish_segments(path: &std::path::Path, segments: &[(u64, Vec<u8>, u64)]) {
     let catalog_path = path.join("cloud_store/wal/publication-catalog.v1.json");
-    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+    let mut catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(&catalog_path).expect("read catalog"),
     )
     .expect("decode catalog");
     for (id, bytes, maximum) in segments {
         // The catalog chains each entry onto its head, whatever the object's
         // own header links.
-        let link = crate::wal::format::segment::footer_link(bytes)
+        let link = cntryl_midge_durability::wal::format::segment::footer_link(bytes)
             .expect("scan a published segment")
             .expect("a published segment is sealed");
         assert_eq!((link.id, link.last_seq), (*id, *maximum));
-        let publication = crate::wal::cloud_catalog::CatalogEntry::describing(
-            &crate::wal::cloud_segment::SegmentValidation {
+        let publication = cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::describing(
+            &cntryl_midge_durability::wal::cloud_segment::SegmentValidation {
                 writer_epoch: catalog.fencing_epoch(),
                 prev: catalog.head(),
-                facts: crate::wal::format::segment::sealed_footer(bytes)
+                facts: cntryl_midge_durability::wal::format::segment::sealed_footer(bytes)
                     .unwrap()
                     .unwrap()
                     .sealed_facts(),
@@ -95,7 +95,7 @@ fn should_set_aside_cataloged_segment_that_breaks_the_chain_when_salvaging() {
         .shutdown(std::time::Duration::from_secs(10))
         .expect("shutdown");
     drop(engine);
-    let epoch = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+    let epoch = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(
             dir.path()
                 .join("cloud_store/wal/publication-catalog.v1.json"),
@@ -104,20 +104,21 @@ fn should_set_aside_cataloged_segment_that_breaks_the_chain_when_salvaging() {
     )
     .expect("decode catalog")
     .fencing_epoch();
-    let (first, link) = crate::wal::format::segment::SegmentBuilder::new(
+    let (first, link) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
         1,
         epoch,
-        crate::wal::format::ChainLink::GENESIS,
+        cntryl_midge_durability::wal::format::ChainLink::GENESIS,
     )
     .record(&record(1))
     .seal();
-    let forged = crate::wal::format::ChainLink {
+    let forged = cntryl_midge_durability::wal::format::ChainLink {
         digest: [0x42; 16],
         ..link
     };
-    let (second, _) = crate::wal::format::segment::SegmentBuilder::new(2, epoch, forged)
-        .record(&record(2))
-        .seal();
+    let (second, _) =
+        cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(2, epoch, forged)
+            .record(&record(2))
+            .seal();
     publish_segments(dir.path(), &[(1, first, 1), (2, second, 2)]);
     let salvage = OpenOptions::cloud_simulated(dir.path(), "bucket", "streaming-recovery")
         .local_storage_budget(1024 * 1024)
@@ -142,10 +143,10 @@ fn should_set_aside_cataloged_segment_that_breaks_the_chain_when_salvaging() {
 
 fn publish_records(
     path: &std::path::Path,
-    make_records: impl FnOnce() -> Vec<crate::wal::WalRecord>,
+    make_records: impl FnOnce() -> Vec<cntryl_midge_durability::wal::WalRecord>,
 ) -> Vec<u8> {
     let catalog_path = path.join("cloud_store/wal/publication-catalog.v1.json");
-    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+    let mut catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(&catalog_path).expect("read catalog"),
     )
     .expect("decode catalog");
@@ -155,17 +156,18 @@ fn publish_records(
         .map(|record| record.seq)
         .max()
         .expect("records");
-    let mut segment = crate::wal::format::segment::SegmentBuilder::new(
+    let mut segment = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
         1,
         catalog.fencing_epoch(),
-        crate::wal::format::ChainLink::GENESIS,
+        cntryl_midge_durability::wal::format::ChainLink::GENESIS,
     );
     for record in &records {
         segment = segment.record(record);
     }
     let (bytes, _) = segment.seal();
     let publication =
-        crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).expect("sealed WAL");
+        cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+            .expect("sealed WAL");
     assert_eq!(publication.max_sequence(), maximum);
     let object = path.join("cloud_store").join(publication.object_key());
     std::fs::create_dir_all(object.parent().expect("parent")).expect("object directory");
@@ -303,7 +305,7 @@ fn should_recover_entire_wal_after_process_exits_between_checkpoints() {
     let catalog_path = dir
         .path()
         .join("cloud_store/wal/publication-catalog.v1.json");
-    let before = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+    let before = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(&catalog_path).expect("catalog"),
     )
     .expect("decode");
@@ -323,7 +325,7 @@ fn should_recover_entire_wal_after_process_exits_between_checkpoints() {
         std::fs::read(dir.path().join("checkpoint-crash-observed")).expect("exact crash marker"),
         b"after durable checkpoint"
     );
-    let after = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+    let after = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(&catalog_path).expect("catalog"),
     )
     .expect("decode");
@@ -368,8 +370,8 @@ fn should_recover_entire_wal_after_process_exits_between_checkpoints() {
 
 #[cfg(feature = "failpoints")]
 fn expire_child_lease(path: &std::path::Path) {
-    let lease = crate::storage::simulated::simulated_cloud_root(path)
-        .join(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY);
+    let lease = cntryl_midge_storage::simulated::simulated_cloud_root(path)
+        .join(cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY);
     let text = std::fs::read_to_string(&lease).expect("crashed lease record");
     let text = text
         .lines()
@@ -511,11 +513,16 @@ fn publish_two_family_records(path: &std::path::Path, second_id: u32) -> Vec<u8>
         operation.txn_id = Some(1);
         operation.key = bytes::Bytes::from_static(b"atomic");
         operation.cf_id = second_id;
-        let payload =
-            crate::wal::encoding::encode_txn_batch_payload(1, 2, 4, second_id, &[operation])
-                .expect("transaction payload");
-        let mut batch = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::TxnBatch,
+        let payload = cntryl_midge_durability::wal::encoding::encode_txn_batch_payload(
+            1,
+            2,
+            4,
+            second_id,
+            &[operation],
+        )
+        .expect("transaction payload");
+        let mut batch = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::TxnBatch,
             bytes::Bytes::from_static(b"txn"),
             Some(payload),
             4,
@@ -549,7 +556,7 @@ fn should_recover_every_family_after_only_first_family_checkpoint_is_published()
     let catalog_path = dir
         .path()
         .join("cloud_store/wal/publication-catalog.v1.json");
-    let before = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+    let before = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(&catalog_path).expect("catalog"),
     )
     .expect("decode catalog");
@@ -560,14 +567,14 @@ fn should_recover_every_family_after_only_first_family_checkpoint_is_published()
     // Assert
     assert_child_output(&output, 73);
     assert_observed_peak(dir.path(), budget);
-    let manifest =
-        crate::metadata::ManifestPersistence::load(dir.path()).expect("checkpoint manifest");
+    let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path())
+        .expect("checkpoint manifest");
     assert!(manifest.files.iter().any(|file| file.cf_id == 0));
     assert!(
         !manifest.files.iter().any(|file| file.cf_id == second_id),
         "crash must interrupt publication between transaction families"
     );
-    let after = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+    let after = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(catalog_path).expect("catalog"),
     )
     .expect("decode catalog");
@@ -668,7 +675,7 @@ fn should_recover_accepted_spilled_transaction_above_configured_spill_threshold(
         .env("MIDGE_RECOVERY_SPILL_CHILD", dir.path()).output().expect("run spill child");
     assert_child_output(&output, 74);
     assert!(dir.path().join("spill-commit-observed").exists());
-    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+    let catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(
             dir.path()
                 .join("cloud_store/wal/publication-catalog.v1.json"),
@@ -680,7 +687,8 @@ fn should_recover_accepted_spilled_transaction_above_configured_spill_threshold(
         !catalog.entries().is_empty(),
         "accepted transaction must have replayable remote WAL"
     );
-    let manifest = crate::metadata::ManifestPersistence::load(dir.path()).expect("manifest");
+    let manifest =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("manifest");
     assert!(
         manifest.files.is_empty(),
         "test must recover spilled transaction from WAL"
@@ -735,8 +743,8 @@ fn should_abandon_orphan_names_when_checkpoint_publication_is_interrupted() {
             .env("MIDGE_RECOVERY_CRASH_POINT", crash_point)
             .output().expect("crash child");
         assert_child_output(&output, 73);
-        let before =
-            crate::metadata::ManifestPersistence::load(dir.path()).expect("crashed manifest");
+        let before = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path())
+            .expect("crashed manifest");
         let cloud_ssts = dir.path().join("cloud_store/sst");
         let orphan_names: Vec<_> = std::fs::read_dir(&cloud_ssts)
             .into_iter()
@@ -754,8 +762,8 @@ fn should_abandon_orphan_names_when_checkpoint_publication_is_interrupted() {
         let mut recovered = Engine::open(opts).expect("resume interrupted recovery");
 
         // Assert
-        let after =
-            crate::metadata::ManifestPersistence::load(dir.path()).expect("recovered manifest");
+        let after = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path())
+            .expect("recovered manifest");
         assert!(
             after.next_sst_seqs.get(&0) >= before.next_sst_seqs.get(&0),
             "{crash_point}"
@@ -879,7 +887,8 @@ fn should_not_reuse_flush_sst_name_when_crash_follows_remote_upload() {
         .output()
         .expect("crash child");
     assert_child_output(&output, 75);
-    let crashed = crate::metadata::ManifestPersistence::load(dir.path()).expect("crashed manifest");
+    let crashed = cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path())
+        .expect("crashed manifest");
     let orphans: Vec<String> = std::fs::read_dir(dir.path().join("cloud_store/sst"))
         .into_iter()
         .flatten()
@@ -914,7 +923,8 @@ fn should_not_reuse_flush_sst_name_when_crash_follows_remote_upload() {
         .expect("flush must not collide with the orphaned SST name");
 
     // Assert
-    let recovered = crate::metadata::ManifestPersistence::load(dir.path()).expect("manifest");
+    let recovered =
+        cntryl_midge_durability::metadata::ManifestPersistence::load(dir.path()).expect("manifest");
     for orphan in &orphans {
         assert!(
             !recovered.files.iter().any(|file| &file.name == orphan),
@@ -1028,7 +1038,7 @@ fn should_keep_accepted_cloud_commit_replayable_when_batch_is_between_half_and_f
 #[test]
 fn should_reject_startup_publication_when_validity_expires_without_watchdog() {
     // Arrange
-    let validity = std::sync::Arc::new(crate::lease::LeaseValidity::new());
+    let validity = std::sync::Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity
         .activate(
             1,
@@ -1047,5 +1057,8 @@ fn should_reject_startup_publication_when_validity_expires_without_watchdog() {
     // Act
     let result = super::validate_lease(&config);
     // Assert
-    assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Fenced(_))
+    ));
 }

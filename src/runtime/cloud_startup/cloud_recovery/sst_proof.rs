@@ -1,7 +1,7 @@
 use super::{CloudStartupRecovery, MidgeError, MidgeResult};
-use crate::io::{Fs, FsError, FsPath};
-use crate::sst::identity::{ProofPolicy, SstIdentity};
-use crate::types::ExpectedSst;
+use cntryl_midge_core::io::{Fs, FsError, FsPath};
+use cntryl_midge_core::types::ExpectedSst;
+use cntryl_midge_table::sst::identity::{ProofPolicy, SstIdentity};
 use std::sync::Arc;
 
 /// Describe a manifest proof for the shared identity checker.
@@ -49,20 +49,20 @@ impl CloudStartupRecovery {
         sst_name: &str,
         expected_size_bytes: Option<u64>,
         expected_crc32c: Option<u32>,
-        scope: Option<&crate::common::DeadlineScope>,
+        scope: Option<&cntryl_midge_core::common::DeadlineScope>,
     ) -> MidgeResult<bool> {
         let check = |context: &str| scope.map_or(Ok(()), |scope| scope.check(context));
         check("local recovery SST proof")?;
         let fs = scope.map_or_else(
             || Arc::clone(fs),
-            |scope| crate::io::scope_fs(Arc::clone(fs), scope.clone()),
+            |scope| cntryl_midge_core::io::scope_fs(Arc::clone(fs), scope.clone()),
         );
         let prove = || -> MidgeResult<bool> {
             let file = fs
                 .open(
                     path,
-                    crate::io::OpenOptions {
-                        mode: crate::io::OpenMode::ReadOnly,
+                    cntryl_midge_core::io::OpenOptions {
+                        mode: cntryl_midge_core::io::OpenMode::ReadOnly,
                         create: false,
                         create_new: false,
                         truncate: false,
@@ -82,7 +82,7 @@ impl CloudStartupRecovery {
                 return Ok(false);
             }
             check("local recovery SST checksum")?;
-            let reader = crate::sst::fs::SstFileIo::open(&path.0, Arc::clone(&fs))?;
+            let reader = cntryl_midge_table::sst::fs::SstFileIo::open(&path.0, Arc::clone(&fs))?;
             // A matching whole-file CRC already proves the bytes; without one,
             // the only remaining evidence is a full block-level pass.
             if expected_crc32c.is_none() {
@@ -101,8 +101,8 @@ impl CloudStartupRecovery {
     pub(crate) fn local_sst_file_matches_manifest_within(
         fs: &Arc<dyn Fs>,
         path: &FsPath,
-        file: &crate::metadata::FileMeta,
-        scope: Option<&crate::common::DeadlineScope>,
+        file: &cntryl_midge_durability::metadata::FileMeta,
+        scope: Option<&cntryl_midge_core::common::DeadlineScope>,
     ) -> MidgeResult<bool> {
         // A manifest size of 0 means "not recorded" on every recovery path.
         Self::local_sst_file_matches_proof_within(
@@ -119,20 +119,21 @@ impl CloudStartupRecovery {
 #[cfg(test)]
 mod tests {
     use super::CloudStartupRecovery;
-    use crate::io::{Fs, FsPath, MockFs};
-    use crate::metadata::FileMeta;
-    use crate::types::EntryType;
+    use cntryl_midge_core::io::{Fs, FsPath, MockFs};
+    use cntryl_midge_core::types::EntryType;
+    use cntryl_midge_durability::metadata::FileMeta;
     use std::sync::Arc;
 
     fn write_sst(fs: &Arc<dyn Fs>, name: &str) -> Vec<u8> {
-        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(fs), 4096);
-        let mut writer = crate::sst::traits::SstFactory::create(&factory).expect("create writer");
+        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(fs), 4096);
+        let mut writer =
+            cntryl_midge_table::sst::traits::SstFactory::create(&factory).expect("create writer");
         writer
             .add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)
             .expect("add entry");
-        crate::sst::fs::finish_writer_to_path(writer, std::path::Path::new(name))
+        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, std::path::Path::new(name))
             .expect("finish sst");
-        crate::io::read_all(fs.as_ref(), &FsPath::new(name))
+        cntryl_midge_core::io::read_all(fs.as_ref(), &FsPath::new(name))
             .expect("read sst")
             .to_vec()
     }

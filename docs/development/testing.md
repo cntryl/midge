@@ -1,23 +1,27 @@
 # Testing
 
-Midge has unit tests in `src/` and integration tests in `tests/`. For early-adopter trust work, the important question is not raw test count, but which guarantees are actually proven.
+Engine tests live in the root `src/` and `tests/` directories. Tests for Core,
+Table, Storage, and Durability live with their packages under `crates/`.
 
 ## Running Tests
 
 ```bash
-cargo test
+cargo test --locked --workspace
 ```
 
 Run a specific integration file:
 
 ```bash
-cargo test --test durability -- durability_recovery
+cargo test --locked -p cntryl-midge --test durability -- durability_recovery
+cargo test --locked -p cntryl-midge-core --test compression_compatibility
+cargo test --locked -p cntryl-midge-table --test block_cache_lifecycle
+cargo test --locked -p cntryl-midge-durability --test wal_encoding_allocations
 ```
 
 Run the trust-critical smoke suite:
 
 ```bash
-cargo test --test fault_injection --features failpoints -- --test-threads=1 external_adopter_smoke
+cargo test --locked -p cntryl-midge --test fault_injection --features failpoints -- --test-threads=1 external_adopter_smoke
 ```
 
 Validate naming and AAA structure:
@@ -27,30 +31,29 @@ cntryl-tools validate-tests
 ```
 
 Model-check and interpret the lock-free skiplist (#931). All three runs are
-part of the local gate for any change under `src/memtable/`:
+part of the local gate for changes under `crates/table/src/memtable/`:
 
 ```bash
 # Every interleaving of the loom models, with the skiplist's atomics swapped
 # for loom's. Only the models run: ordinary tests build lists outside a model.
 # The separate target directory keeps the cfg from rebuilding the normal one.
-RUSTFLAGS="--cfg midge_loom" cargo test --lib --release --target-dir target/loom \
+RUSTFLAGS="--cfg midge_loom" cargo test --locked -p cntryl-midge-table --lib --release --target-dir target/loom \
   memtable::skiplist::loom_tests
 
 # The models are compiled only under the cfg, so lint them the same way.
-RUSTFLAGS="--cfg midge_loom" cargo clippy --lib --tests --release --target-dir target/loom \
+RUSTFLAGS="--cfg midge_loom" cargo clippy --locked -p cntryl-midge-table --lib --tests --release --target-dir target/loom \
   -- -D warnings -D clippy::pedantic
 
 # The skiplist unit tests under miri (nightly toolchain with the miri component).
-# Default features pull in provider clients whose native dependencies miri
-# cannot build; isolation is off because proptest looks up the working
-# directory; the case count keeps the interpreted run under a minute.
+# Isolation is off because proptest looks up the working directory.
+# The case count bounds the interpreted run.
 MIRIFLAGS="-Zmiri-disable-isolation" PROPTEST_CASES=16 \
-  cargo +nightly miri test --lib --no-default-features memtable::skiplist
+  cargo +nightly miri test --locked -p cntryl-midge-table --lib --no-default-features memtable::skiplist
 
 # Deeper, about three minutes: the same tests under four scheduler seeds, so
 # the threaded tests take different interleavings.
 MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-many-seeds=0..4" PROPTEST_CASES=16 \
-  cargo +nightly miri test --lib --no-default-features memtable::skiplist::tests
+  cargo +nightly miri test --locked -p cntryl-midge-table --lib --no-default-features memtable::skiplist::tests
 ```
 
 The cfg is crate-specific because dependencies such as tokio react to a global
@@ -63,12 +66,16 @@ data-race detector covers that for the schedules it runs.
 Run the repository and packaging qualification gates:
 
 ```bash
-cargo test --workspace --all-features --doc
-cargo check --example documented_quick_start --all-features
+cargo test --locked --workspace --all-features --doc
+cargo check --locked -p cntryl-midge --example documented_quick_start --all-features
 cargo machete
-cargo package --locked
+cargo package --workspace --locked
 docker compose up -d sqrzl
 docker build --network=host --file Dockerfile.tests --tag midge-tests:local .
+cargo test --locked -p cntryl-midge-storage --lib --features sqrzl-tests \
+  providers::qualification -- --test-threads=1
+cargo test --locked -p cntryl-midge --test cloud_provider_engine_qualification \
+  --features sqrzl-tests,failpoints -- --test-threads=1
 ```
 
 Pull requests into `develop` and `main` run `ci.yml` on Ubuntu. It validates
@@ -110,10 +117,11 @@ Documentation and packaging checks run in the tagged publish workflow.
 To check provider features independently when changing their dependencies:
 
 ```bash
-cargo check --workspace --all-targets --no-default-features --features cloud-aws
-cargo check --workspace --all-targets --no-default-features --features cloud-azure
-cargo check --workspace --all-targets --no-default-features --features cloud-gcp
-cargo check --workspace --all-targets --no-default-features --features cloud-oci
+cargo check --locked -p cntryl-midge --all-targets --no-default-features
+cargo check --locked -p cntryl-midge --all-targets --no-default-features --features cloud-aws
+cargo check --locked -p cntryl-midge --all-targets --no-default-features --features cloud-azure
+cargo check --locked -p cntryl-midge --all-targets --no-default-features --features cloud-gcp
+cargo check --locked -p cntryl-midge --all-targets --no-default-features --features cloud-oci
 ```
 
 These commands check compilation only. The provider integrations run transport contracts

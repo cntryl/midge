@@ -4,7 +4,7 @@ use super::*;
 fn should_keep_owned_large_spill_tail_charged_to_original_transaction_pool() -> MidgeResult<()> {
     // Arrange: the first two accepted operations create real spill runs. The
     // last stays in its original9MiB pool and exceeds the validation8MiB pool.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::super::super::tests::create_test_local_event_loop()?;
     seed_spanning_sst(&mut event_loop);
     let pool =
@@ -38,7 +38,7 @@ fn should_keep_owned_large_spill_tail_charged_to_original_transaction_pool() -> 
         request_id: 946_080,
         source,
         assertions: Vec::new(),
-        durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+        durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict),
         start_sequence: 4,
         conflict_policy: ConflictPolicy::AbortOnWriteConflict,
         validation: None,

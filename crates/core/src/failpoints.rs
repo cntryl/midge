@@ -1,0 +1,305 @@
+//! Compile-time boundary for deterministic fault injection.
+//!
+//! Production and default builds do not link the `fail` crate. Call sites use
+//! this adapter so the injection branches disappear unless the explicitly
+//! non-production `failpoints` feature is enabled.
+
+#[macro_export]
+macro_rules! fail_point {
+    ($name:expr) => {{
+        #[cfg(feature = "failpoints")]
+        {
+            let _midge_failpoint_read_guard = $crate::failpoints::read_gate();
+            $crate::failpoints::fail::fail_point!($name);
+        }
+    }};
+    ($name:expr, $($rest:tt)*) => {{
+        #[cfg(feature = "failpoints")]
+        {
+            let _midge_failpoint_read_guard = $crate::failpoints::read_gate();
+            $crate::failpoints::fail::fail_point!($name, $($rest)*);
+        }
+    }};
+}
+
+pub use crate::fail_point;
+
+#[cfg(feature = "failpoints")]
+pub use fail;
+
+/// Return whether a boolean failpoint is active.
+#[inline]
+#[must_use]
+pub fn is_active(name: &str) -> bool {
+    #[cfg(feature = "failpoints")]
+    {
+        fail::eval(name, |_| true).unwrap_or(false)
+    }
+
+    #[cfg(not(feature = "failpoints"))]
+    {
+        let _ = name;
+        false
+    }
+}
+
+#[cfg(feature = "failpoints")]
+use parking_lot::RecursiveRwLockWriteGuard;
+#[cfg(feature = "failpoints")]
+use parking_lot::{RecursiveRwLock, RecursiveRwLockReadGuard};
+#[cfg(feature = "failpoints")]
+use std::cell::Cell;
+#[cfg(feature = "failpoints")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "failpoints")]
+use std::sync::OnceLock;
+
+#[cfg(feature = "failpoints")]
+static FAILPOINT_GATE: OnceLock<RecursiveRwLock<()>> = OnceLock::new();
+
+/// Identifies the current holder of the gate's write side. Every test guard
+/// changes it on acquire and again before release.
+#[cfg(feature = "failpoints")]
+static GATE_OWNER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "failpoints")]
+thread_local! {
+    static OWNS_FAILPOINT_GATE: Cell<bool> = const { Cell::new(false) };
+    static FAILPOINT_READ_SCOPE_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static INHERITED_GATE_OWNER: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+#[cfg(feature = "failpoints")]
+fn skips_gate() -> bool {
+    OWNS_FAILPOINT_GATE.with(Cell::get)
+        || FAILPOINT_READ_SCOPE_DEPTH.with(Cell::get) > 0
+        || INHERITED_GATE_OWNER.with(Cell::get)
+            == Some(GATE_OWNER_GENERATION.load(Ordering::Acquire))
+}
+
+/// Failpoint-gate ownership a worker inherits from the thread that spawns it.
+///
+/// A failpoint test holds the gate's write side for its whole body. A worker
+/// its runtime joins before that guard drops (for example in
+/// `EventLoop::drop`) would wait on the read side forever. The inherited
+/// ownership lapses as soon as that test's guard is released.
+#[derive(Clone, Copy)]
+pub struct WorkerGate {
+    #[cfg(feature = "failpoints")]
+    owner: Option<u64>,
+}
+
+/// Capture the calling thread's gate ownership for a worker it will spawn.
+#[must_use]
+pub fn worker_gate() -> WorkerGate {
+    WorkerGate {
+        #[cfg(feature = "failpoints")]
+        owner: if OWNS_FAILPOINT_GATE.with(Cell::get) {
+            Some(GATE_OWNER_GENERATION.load(Ordering::Acquire))
+        } else {
+            INHERITED_GATE_OWNER.with(Cell::get)
+        },
+    }
+}
+
+impl WorkerGate {
+    /// Run a worker body under the spawner's gate ownership, if any.
+    #[cfg_attr(not(feature = "failpoints"), allow(clippy::unused_self))]
+    pub fn run<T>(self, operation: impl FnOnce() -> T) -> T {
+        #[cfg(feature = "failpoints")]
+        INHERITED_GATE_OWNER.with(|owner| owner.set(self.owner));
+        operation()
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn gate() -> &'static RecursiveRwLock<()> {
+    FAILPOINT_GATE.get_or_init(|| RecursiveRwLock::new(()))
+}
+
+/// Read-side gate held while production code evaluates a failpoint.
+///
+/// Failpoint configuration is process-global. The test guard below takes the
+/// write side so unrelated tests cannot observe a configured failure while a
+/// fault-injection scenario is running. The owner thread skips the read lock
+/// because it already holds the write side.
+#[cfg(feature = "failpoints")]
+#[must_use]
+pub fn read_gate() -> Option<RecursiveRwLockReadGuard<'static, ()>> {
+    if skips_gate() {
+        None
+    } else {
+        // `RecursiveRwLock::read` never waits behind a queued writer. A reader that
+        // blocked there could deadlock across threads: an outer read scope
+        // waiting on a worker whose own failpoint read queued behind a
+        // failpoint test's pending write (#434).
+        Some(gate().read())
+    }
+}
+
+#[cfg(feature = "failpoints")]
+struct FailpointReadScope;
+
+#[cfg(feature = "failpoints")]
+impl FailpointReadScope {
+    fn enter() -> Self {
+        FAILPOINT_READ_SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+#[cfg(feature = "failpoints")]
+impl Drop for FailpointReadScope {
+    fn drop(&mut self) {
+        FAILPOINT_READ_SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Keep a multi-step operation inside one failpoint read-side scope.
+///
+/// This establishes a consistent lock order for operations that also acquire
+/// subsystem mutexes. Individual failpoint evaluations inside the scope reuse
+/// the outer read lock instead of recursively acquiring the global gate.
+pub fn with_read_gate<T>(operation: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "failpoints")]
+    {
+        if skips_gate() {
+            return operation();
+        }
+        let _guard = gate().read();
+        let _scope = FailpointReadScope::enter();
+        operation()
+    }
+
+    #[cfg(not(feature = "failpoints"))]
+    {
+        operation()
+    }
+}
+
+/// Guard used by failpoint tests to isolate process-global configurations.
+#[cfg(feature = "failpoints")]
+pub struct TestFailpointGuard {
+    guard: Option<RecursiveRwLockWriteGuard<'static, ()>>,
+}
+
+#[cfg(feature = "failpoints")]
+impl Drop for TestFailpointGuard {
+    fn drop(&mut self) {
+        // Revoke inherited worker ownership before another test can acquire.
+        GATE_OWNER_GENERATION.fetch_add(1, Ordering::AcqRel);
+        self.guard.take();
+        OWNS_FAILPOINT_GATE.with(|owner| owner.set(false));
+    }
+}
+
+/// Enter an isolated failpoint test scope.
+///
+/// Take this guard before `fail::FailScenario::setup()`. The scenario holds
+/// the `fail` crate's global mutex, so a test that sets up the scenario first
+/// and then waits here deadlocks against a test holding this gate while it
+/// waits for that mutex.
+#[cfg(feature = "failpoints")]
+pub fn test_failpoint_guard() -> TestFailpointGuard {
+    let guard = gate().write();
+    GATE_OWNER_GENERATION.fetch_add(1, Ordering::AcqRel);
+    OWNS_FAILPOINT_GATE.with(|owner| owner.set(true));
+    TestFailpointGuard { guard: Some(guard) }
+}
+
+#[cfg(all(test, feature = "failpoints"))]
+mod tests {
+    fn injected_result() -> Result<(), &'static str> {
+        super::fail_point!("midge::adapter::return_error", |_| Err("injected"));
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_deadlock_when_failpoint_test_joins_worker_that_evaluates_failpoint() {
+        // Arrange: the test thread holds the write side, as a failpoint test
+        // does while its runtime joins a worker on drop.
+        let guard = super::test_failpoint_guard();
+        let inherited = super::worker_gate();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        // Act
+        let worker = std::thread::spawn(move || {
+            inherited.run(|| {
+                let _gate = super::read_gate();
+                done_tx.send(()).expect("report worker completion");
+            });
+        });
+        let completed = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+
+        // Assert
+        assert!(
+            completed.is_ok(),
+            "a worker of the gate owner must not wait on the owner's write side"
+        );
+        worker.join().expect("join worker");
+        drop(guard);
+        let gated = std::thread::spawn(move || inherited.run(|| super::read_gate().is_some()))
+            .join()
+            .expect("join late worker");
+        assert!(
+            gated,
+            "inherited ownership must lapse once the owning test releases the gate"
+        );
+    }
+
+    #[test]
+    fn should_not_deadlock_when_read_scope_waits_on_worker_while_writer_is_queued() {
+        // Arrange: an outer read scope waits on a worker that evaluates a
+        // failpoint while a failpoint test has queued for the write side.
+        let (worker_done_tx, worker_done_rx) = std::sync::mpsc::channel();
+        let (scope_entered_tx, scope_entered_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            super::with_read_gate(|| {
+                scope_entered_tx.send(()).expect("report read scope");
+                // Give the writer time to queue behind this read scope.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let worker = std::thread::spawn(|| {
+                    // Every `fail_point!` evaluation takes this read gate.
+                    let _gate = super::read_gate();
+                });
+                let _ = worker.join();
+                worker_done_tx.send(()).expect("report worker completion");
+            });
+        });
+        scope_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reader entered its scope");
+        let writer = std::thread::spawn(|| drop(super::test_failpoint_guard()));
+
+        // Act
+        let completed = worker_done_rx.recv_timeout(std::time::Duration::from_secs(5));
+
+        // Assert
+        assert!(
+            completed.is_ok(),
+            "a worker's failpoint read must not wait behind a queued writer"
+        );
+        reader.join().expect("join reader");
+        writer.join().expect("join writer");
+    }
+
+    #[test]
+    fn should_activate_adapter_paths_given_configured_failpoints() {
+        // Arrange
+        let _test_guard = super::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("midge::adapter::boolean", "return").expect("configure boolean failpoint");
+        fail::cfg("midge::adapter::return_error", "return").expect("configure result failpoint");
+
+        // Act
+        let active = super::is_active("midge::adapter::boolean");
+        let result = injected_result();
+
+        // Assert
+        assert!(active);
+        assert_eq!(result, Err("injected"));
+        fail::remove("midge::adapter::boolean");
+        fail::remove("midge::adapter::return_error");
+        scenario.teardown();
+    }
+}

@@ -1,9 +1,9 @@
 use super::format::{previous_sparse_offset, read_op_primary_key_frame, RunFile, RunHeader};
 use super::range::{read_ordered_range, RangeEntry, RangeHeader, RangeOrder};
 use super::{lookup_run_points, IntentLookup, SpillRun, TransactionWriteSet, RUN_HEADER_LEN};
-use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::range_cover::RangeCoverSweep;
 use bytes::Bytes;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use std::sync::Arc;
 
 enum ReverseChunkSource {
@@ -29,7 +29,7 @@ enum RunKeyDirection {
 
 pub(super) struct RunKeyCursor {
     root: super::SpillRoot,
-    path: crate::io::FsPath,
+    path: cntryl_midge_core::io::FsPath,
     cursor: u64,
     data_end: u64,
     start: Option<Vec<u8>>,
@@ -294,7 +294,7 @@ impl Ord for HeadEntry {
 /// It holds a position and nothing else, so it costs no pool memory.
 struct RunRangeCursor {
     root: super::SpillRoot,
-    path: crate::io::FsPath,
+    path: cntryl_midge_core::io::FsPath,
     header: RangeHeader,
     order: RangeOrder,
     /// Forward cursors count up from `0`; reverse cursors count down from

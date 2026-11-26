@@ -1,75 +1,87 @@
 use super::*;
 
 struct MetadataFailFs {
-    inner: crate::io::MockFs,
+    inner: cntryl_midge_core::io::MockFs,
 }
 
-impl crate::io::ReadFs for MetadataFailFs {
+impl cntryl_midge_core::io::ReadFs for MetadataFailFs {
     fn open_read(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
-        crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
+        cntryl_midge_core::io::Fs::open(self, path, cntryl_midge_core::io::OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+    fn exists(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
     fn metadata(
         &self,
-        _path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
-        Err(crate::io::FsError::Io(
+        _path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<cntryl_midge_core::io::traits::Metadata> {
+        Err(cntryl_midge_core::io::FsError::Io(
             "injected output metadata failure".into(),
         ))
     }
 
     fn list_dir(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Vec<cntryl_midge_core::io::traits::DirEntry>> {
         self.inner.list_dir(path)
     }
 }
 
-impl crate::io::Fs for MetadataFailFs {
+impl cntryl_midge_core::io::Fs for MetadataFailFs {
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
     fn open(
         &self,
-        path: &crate::io::FsPath,
-        opts: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        path: &cntryl_midge_core::io::FsPath,
+        opts: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
         self.inner.open(path, opts)
     }
-    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_file(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn create_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
-    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_dir_all(
+        &self,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
     fn sync_dir(
         &self,
-        path: &crate::io::FsPath,
-        durability: crate::io::Durability,
-    ) -> crate::io::FsResult<()> {
+        path: &cntryl_midge_core::io::FsPath,
+        durability: cntryl_midge_core::io::Durability,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.sync_dir(path, durability)
     }
     fn rename_atomic(
         &self,
-        from: &crate::io::FsPath,
-        to: &crate::io::FsPath,
-    ) -> crate::io::FsResult<()> {
+        from: &cntryl_midge_core::io::FsPath,
+        to: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.rename_atomic(from, to)
     }
 }
@@ -77,8 +89,8 @@ impl crate::io::Fs for MetadataFailFs {
 #[test]
 fn should_fail_partition_when_output_metadata_cannot_be_read() -> MidgeResult<()> {
     // Arrange
-    let mock = crate::io::MockFs::new();
-    let factory = crate::sst::FsSstFactoryIo::new(
+    let mock = cntryl_midge_core::io::MockFs::new();
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
         std::sync::Arc::new(MetadataFailFs {
             inner: mock.clone(),
         }),
@@ -89,7 +101,7 @@ fn should_fail_partition_when_output_metadata_cannot_be_read() -> MidgeResult<()
         b"key",
         Some(b"value"),
         1,
-        crate::types::EntryType::Put,
+        cntryl_midge_core::types::EntryType::Put,
         None,
     )?;
     let fs = factory.output_fs();
@@ -114,8 +126,11 @@ fn should_fail_partition_when_output_metadata_cannot_be_read() -> MidgeResult<()
     );
 
     // Assert
-    assert!(matches!(result, Err(crate::common::MidgeError::Io(_))));
-    let name = crate::cloud_layout::compaction_file_name(0, 1, 1, 0);
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Io(_))
+    ));
+    let name = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 1, 0);
     assert!(mock.get_file(&format!("output/{name}")).is_none());
     Ok(())
 }
@@ -123,14 +138,14 @@ fn should_fail_partition_when_output_metadata_cannot_be_read() -> MidgeResult<()
 #[test]
 fn should_remove_partial_output_through_injected_fs_when_compaction_aborts() -> MidgeResult<()> {
     // Arrange
-    let mock = std::sync::Arc::new(crate::io::MockFs::new());
-    let factory = crate::sst::FsSstFactoryIo::new(mock.clone(), 4096);
+    let mock = std::sync::Arc::new(cntryl_midge_core::io::MockFs::new());
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(mock.clone(), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(
         b"key",
         Some(b"value"),
         1,
-        crate::types::EntryType::Put,
+        cntryl_midge_core::types::EntryType::Put,
         None,
     )?;
     writer.finish_to_path(std::path::Path::new("input.sst"))?;
@@ -138,9 +153,9 @@ fn should_remove_partial_output_through_injected_fs_when_compaction_aborts() -> 
     plan.add_test_source("input.sst");
     let sink = |_name: &str,
                 _path: &std::path::Path,
-                _budget: &crate::common::resource_budget::ResourceBudget,
-                _summary: Option<&crate::sst::traits::FinalizedSst>| {
-        Err(crate::common::MidgeError::Aborted(
+                _budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
+                _summary: Option<&cntryl_midge_table::sst::traits::FinalizedSst>| {
+        Err(cntryl_midge_core::common::MidgeError::Aborted(
             "injected after first output".into(),
         ))
     };
@@ -156,16 +171,19 @@ fn should_remove_partial_output_through_injected_fs_when_compaction_aborts() -> 
     );
 
     // Assert
-    assert!(matches!(result, Err(crate::common::MidgeError::Aborted(_))));
+    assert!(matches!(
+        result,
+        Err(cntryl_midge_core::common::MidgeError::Aborted(_))
+    ));
     assert!(mock.get_file("input.sst").is_some());
-    let output = crate::cloud_layout::compaction_file_name(0, 1, 2, 0);
+    let output = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 2, 0);
     assert!(mock.get_file(&format!("output/{output}")).is_none());
     Ok(())
 }
 
 #[test]
 fn should_initialize_merge_with_one_raw_version_per_input() {
-    use crate::sst::traits::RawSstVersionCursor;
+    use cntryl_midge_table::sst::traits::RawSstVersionCursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -210,7 +228,7 @@ fn should_initialize_merge_with_one_raw_version_per_input() {
     // Act
     let _merge = VersionMergeIterator::new(
         cursors,
-        crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        cntryl_midge_core::common::resource_budget::ResourceBudget::new(1024 * 1024),
     )
     .expect("initialize lazy merge");
 
@@ -259,7 +277,7 @@ fn should_merge_version_streams_by_key_then_descending_sequence() {
     // Act
     let mut merge = VersionMergeIterator::new(
         vec![cursor_from_versions(left), cursor_from_versions(right)],
-        crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        cntryl_midge_core::common::resource_budget::ResourceBudget::new(1024 * 1024),
     )
     .expect("initialize merge");
     let mut merged = Vec::new();
@@ -291,7 +309,7 @@ fn should_use_input_index_given_equal_key_sequence_when_merging() {
     // Act
     let mut merge = VersionMergeIterator::new(
         vec![cursor_from_versions(first), cursor_from_versions(second)],
-        crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        cntryl_midge_core::common::resource_budget::ResourceBudget::new(1024 * 1024),
     )
     .expect("initialize merge");
     let mut merged = Vec::new();
@@ -307,13 +325,13 @@ fn should_use_input_index_given_equal_key_sequence_when_merging() {
 
 #[test]
 fn should_collect_tombstones_given_stateful_reader_input() {
-    use crate::sst::traits::SstStateReader;
+    use cntryl_midge_table::sst::traits::SstStateReader;
 
     // Arrange
     struct FakeReader;
 
     impl SstStateReader for FakeReader {
-        crate::sst::traits::test_reader_required_methods!();
+        cntryl_midge_table::sst::traits::test_reader_required_methods!();
 
         fn range_tombstone_memory_usage(&self) -> usize {
             self.range_tombstones()
@@ -343,7 +361,7 @@ fn should_collect_tombstones_given_stateful_reader_input() {
                         bytes::Bytes::from_static(b"v1"),
                         42,
                         Some(900),
-                        crate::types::EntryType::Put,
+                        cntryl_midge_core::types::EntryType::Put,
                     ),
                 ),
                 (bytes::Bytes::from_static(b"beta"), KeyState::Tombstone(41)),
@@ -416,13 +434,13 @@ fn should_keep_compaction_work_linear_when_partition_holds_many_range_tombstones
         bounds: AtomicUsize,
     }
 
-    impl crate::sst::traits::DynSstWriter for CountingWriter {
+    impl cntryl_midge_table::sst::traits::DynSstWriter for CountingWriter {
         fn estimated_size_bytes(&self) -> usize {
             0
         }
 
         fn finish_to_path(self: Box<Self>, _path: &std::path::Path) -> MidgeResult<()> {
-            Err(crate::common::MidgeError::NotSupported(
+            Err(cntryl_midge_core::common::MidgeError::NotSupported(
                 "counting writer has no filesystem".into(),
             ))
         }
@@ -485,7 +503,7 @@ fn should_keep_compaction_work_linear_when_partition_holds_many_range_tombstones
         }
     }
 
-    let budget = crate::common::resource_budget::ResourceBudget::new(16 * 1024 * 1024);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(16 * 1024 * 1024);
     let writer = CountingWriter {
         bounds: AtomicUsize::new(0),
     };
@@ -527,7 +545,7 @@ fn should_keep_compaction_work_linear_when_partition_holds_many_range_tombstones
 #[test]
 fn should_track_encoded_bytes_when_partition_tombstones_are_added_and_cleared() -> MidgeResult<()> {
     // Arrange
-    let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(1024 * 1024);
     let mut partition = PartitionTombstones::new();
     let first = mk_tombstone(1, 7);
     let second = mk_tombstone(2, 9);
@@ -557,7 +575,7 @@ fn should_track_encoded_bytes_when_partition_tombstones_are_added_and_cleared() 
 fn should_report_highest_sequence_cover_when_many_obsolete_tombstones_are_active() -> MidgeResult<()>
 {
     // Arrange
-    let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(1024 * 1024);
     let mut active = ActiveTombstones::new();
     let live = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 400);
     let highest = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 300);
@@ -593,7 +611,7 @@ fn should_report_highest_sequence_cover_when_many_obsolete_tombstones_are_active
 #[test]
 fn should_carry_live_ranges_after_retiring_obsolete_ranges_between_partitions() -> MidgeResult<()> {
     // Arrange
-    let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(1024 * 1024);
     let mut tracker = RangeTombstoneTracker::new();
     let obsolete = RangeTombstone::new(b"a".to_vec(), b"m".to_vec(), 4);
     let live = RangeTombstone::new(b"b".to_vec(), b"z".to_vec(), 12);
@@ -632,11 +650,13 @@ fn should_carry_live_ranges_after_retiring_obsolete_ranges_between_partitions() 
 fn should_roll_only_after_a_written_partition_reaches_its_boundary() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
-    let factory = crate::sst::FsSstFactoryIo::new(
-        std::sync::Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+        std::sync::Arc::new(
+            cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        ),
         4096,
     );
-    let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(1024 * 1024);
     let mut roller = PartitionRoller::new(
         &factory,
         directory.path(),
@@ -791,7 +811,7 @@ mod key_group_reduction {
         // Assert
         assert!(matches!(
             selected,
-            Err(crate::common::MidgeError::Corruption(message))
+            Err(cntryl_midge_core::common::MidgeError::Corruption(message))
                 if message.contains("conflicting compaction versions")
         ));
     }
@@ -811,7 +831,7 @@ mod key_group_reduction {
         // Assert
         assert!(matches!(
             selected,
-            Err(crate::common::MidgeError::Corruption(_))
+            Err(cntryl_midge_core::common::MidgeError::Corruption(_))
         ));
     }
 
@@ -862,7 +882,7 @@ mod key_group_reduction {
         // Assert
         assert!(matches!(
             selected,
-            Err(crate::common::MidgeError::Corruption(_))
+            Err(cntryl_midge_core::common::MidgeError::Corruption(_))
         ));
     }
 

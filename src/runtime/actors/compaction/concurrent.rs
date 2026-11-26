@@ -1,10 +1,10 @@
 //! Bounded independent job owners sharing admission and compute workers.
 use super::{jobs, pool, CompactionJobActor, CompactionStorage};
-use crate::common::resource_budget::ResourceBudget;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::compaction::{CompactionPlan, LeveledCompactionConfig};
 use crate::runtime::{RuntimeMsg, RuntimeState};
-use crate::sst::SstFactory;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_table::sst::SstFactory;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -113,7 +113,7 @@ impl CompactionActor {
     pub(crate) fn can_admit_plan(
         &self,
         plan: &CompactionPlan,
-        files: &[crate::metadata::FileMeta],
+        files: &[cntryl_midge_durability::metadata::FileMeta],
     ) -> bool {
         self.has_capacity() && self.jobs.available(plan, files)
     }

@@ -6,13 +6,13 @@
 //! - Merging SST files across levels
 
 use super::super::state::RuntimeState;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::compaction::{Compactor, LeveledCompactionConfig};
-use crate::io::FsError;
 use crate::runtime::{next_request_id, RuntimeMsg};
-use crate::sst::SstFactory;
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::io::FsError;
 #[cfg(test)]
-use crate::types::EntryType;
+use cntryl_midge_core::types::EntryType;
+use cntryl_midge_table::sst::SstFactory;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -51,10 +51,10 @@ pub use concurrent::CompactionActor;
 /// verification remains on the worker, as does exact source validation/upload.
 #[derive(Clone)]
 pub(crate) struct PreparedCompactionOutput {
-    pub(crate) metadata: crate::runtime::FileMeta,
+    pub(crate) metadata: cntryl_midge_durability::metadata::intent::FileMeta,
     /// Present only for a partition already uploaded to the authoritative
     /// cloud. A local-only partition has nothing to prove remotely.
-    pub(crate) proof: Option<crate::storage::hybrid::backend::GuardedObjectProof>,
+    pub(crate) proof: Option<cntryl_midge_storage::hybrid::backend::GuardedObjectProof>,
 }
 
 type PreparedCompactionOutputs =
@@ -76,16 +76,16 @@ fn cleanup_failed_prepared_outputs(
 
 #[derive(Clone, Copy)]
 pub(crate) struct CompactionOutputAdmission<'a> {
-    budget: &'a crate::common::resource_budget::ResourceBudget,
+    budget: &'a cntryl_midge_core::common::resource_budget::ResourceBudget,
     manual_deadline: Option<OperationDeadline>,
-    finalized: Option<&'a crate::sst::traits::FinalizedSst>,
+    finalized: Option<&'a cntryl_midge_table::sst::traits::FinalizedSst>,
 }
 
 #[derive(Clone, Copy)]
 struct CompactionOutputWork<'a> {
     prepared: &'a PreparedCompactionOutputs,
     manual_deadline: Option<OperationDeadline>,
-    budget: Option<&'a crate::common::resource_budget::ResourceBudget>,
+    budget: Option<&'a cntryl_midge_core::common::resource_budget::ResourceBudget>,
     grandparent_overlap_rolls: &'a Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -135,21 +135,26 @@ pub(crate) trait CompactionStorage: Send + Sync {
         &self,
         bytes: u64,
     ) -> Result<
-        crate::storage::hybrid::actor::StorageReservationToken,
-        crate::storage::hybrid::actor::ReservationResult,
+        cntryl_midge_storage::hybrid::actor::StorageReservationToken,
+        cntryl_midge_storage::hybrid::actor::ReservationResult,
     >;
-    fn plan(&self, input_sizes: &[u64]) -> crate::storage::hybrid::actor::StorageReservationToken;
+    fn plan(
+        &self,
+        input_sizes: &[u64],
+    ) -> cntryl_midge_storage::hybrid::actor::StorageReservationToken;
     fn retain_inputs(
         &self,
-        token: crate::storage::hybrid::actor::StorageReservationToken,
+        token: cntryl_midge_storage::hybrid::actor::StorageReservationToken,
         output_sizes: &[u64],
     );
-    fn abort(&self, token: crate::storage::hybrid::actor::StorageReservationToken);
-    fn maintenance_memory(&self) -> Option<crate::common::resource_budget::ResourceBudget>;
+    fn abort(&self, token: cntryl_midge_storage::hybrid::actor::StorageReservationToken);
+    fn maintenance_memory(
+        &self,
+    ) -> Option<cntryl_midge_core::common::resource_budget::ResourceBudget>;
     fn immutable_file_partition_target(&self, pool: usize) -> usize;
     fn stage_output_partition(
         &self,
-        fs: &Arc<dyn crate::io::Fs>,
+        fs: &Arc<dyn cntryl_midge_core::io::Fs>,
         cf_id: u32,
         level: u32,
         name: &str,
@@ -164,7 +169,7 @@ pub(crate) trait CompactionStorage: Send + Sync {
     );
 }
 
-impl CompactionStorage for crate::storage::HybridStorage {
+impl CompactionStorage for cntryl_midge_storage::HybridStorage {
     fn cleanup_failed_outputs(
         &self,
         outputs: &mut std::collections::HashMap<String, PreparedCompactionOutput>,
@@ -209,39 +214,44 @@ impl CompactionStorage for crate::storage::HybridStorage {
         &self,
         bytes: u64,
     ) -> Result<
-        crate::storage::hybrid::actor::StorageReservationToken,
-        crate::storage::hybrid::actor::ReservationResult,
+        cntryl_midge_storage::hybrid::actor::StorageReservationToken,
+        cntryl_midge_storage::hybrid::actor::ReservationResult,
     > {
         self.reserve_compaction_staging_with_token(bytes)
     }
 
-    fn plan(&self, input_sizes: &[u64]) -> crate::storage::hybrid::actor::StorageReservationToken {
+    fn plan(
+        &self,
+        input_sizes: &[u64],
+    ) -> cntryl_midge_storage::hybrid::actor::StorageReservationToken {
         self.compaction_planned_with_token(input_sizes)
     }
 
     fn retain_inputs(
         &self,
-        token: crate::storage::hybrid::actor::StorageReservationToken,
+        token: cntryl_midge_storage::hybrid::actor::StorageReservationToken,
         output_sizes: &[u64],
     ) {
         self.compaction_inputs_retained_with_token(token, output_sizes);
     }
 
-    fn abort(&self, token: crate::storage::hybrid::actor::StorageReservationToken) {
+    fn abort(&self, token: cntryl_midge_storage::hybrid::actor::StorageReservationToken) {
         self.compaction_aborted_with_token(token);
     }
 
-    fn maintenance_memory(&self) -> Option<crate::common::resource_budget::ResourceBudget> {
+    fn maintenance_memory(
+        &self,
+    ) -> Option<cntryl_midge_core::common::resource_budget::ResourceBudget> {
         self.maintenance_memory()
     }
 
     fn immutable_file_partition_target(&self, pool: usize) -> usize {
-        crate::storage::HybridStorage::immutable_file_partition_target(self, pool)
+        cntryl_midge_storage::HybridStorage::immutable_file_partition_target(self, pool)
     }
 
     fn stage_output_partition(
         &self,
-        fs: &Arc<dyn crate::io::Fs>,
+        fs: &Arc<dyn cntryl_midge_core::io::Fs>,
         cf_id: u32,
         level: u32,
         name: &str,
@@ -250,9 +260,9 @@ impl CompactionStorage for crate::storage::HybridStorage {
     ) -> MidgeResult<PreparedCompactionOutput> {
         let (metadata, size, crc) =
             summarize_output_partition(fs, cf_id, level, name, path, admission)?;
-        let key = crate::cloud_layout::object_key(name);
-        let fs_path = crate::sst::fs::fs_relative_sst_path(fs, path)?;
-        let source = crate::storage::hybrid::backend::ImmutableFileSource {
+        let key = cntryl_midge_core::cloud_layout::object_key(name);
+        let fs_path = cntryl_midge_table::sst::fs::fs_relative_sst_path(fs, path)?;
+        let source = cntryl_midge_storage::hybrid::backend::ImmutableFileSource {
             key: &key,
             fs: fs.as_ref(),
             path: &fs_path,
@@ -281,27 +291,31 @@ impl CompactionStorage for crate::storage::HybridStorage {
 /// The trait implementation below owns remote staging; local-only compaction
 /// takes this same worker-side path without creating a remote proof.
 fn summarize_output_partition(
-    fs: &Arc<dyn crate::io::Fs>,
+    fs: &Arc<dyn cntryl_midge_core::io::Fs>,
     cf_id: u32,
     level: u32,
     name: &str,
     path: &std::path::Path,
     admission: CompactionOutputAdmission<'_>,
-) -> MidgeResult<(crate::runtime::FileMeta, u64, u32)> {
+) -> MidgeResult<(
+    cntryl_midge_durability::metadata::intent::FileMeta,
+    u64,
+    u32,
+)> {
     check_manual_deadline(admission.manual_deadline, "before output summary")?;
-    let fs_path = crate::sst::fs::fs_relative_sst_path(fs, path)?;
+    let fs_path = cntryl_midge_table::sst::fs::fs_relative_sst_path(fs, path)?;
     let (summary, size, crc) = if let Some(finalized) = admission.finalized {
         let summary = finalized.summary.clone().ok_or_else(|| {
             MidgeError::Corruption("compaction finalized an empty partition".into())
         })?;
         (summary, finalized.size_bytes, finalized.content_crc32c)
     } else {
-        let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
+        let summary = cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
             &fs_path.0,
             Arc::clone(fs),
             admission.budget.clone(),
         )?;
-        let (size, crc) = crate::sst::fs::file_identity_with_fs(fs, path)?;
+        let (size, crc) = cntryl_midge_table::sst::fs::file_identity_with_fs(fs, path)?;
         (summary, size, crc)
     };
     check_manual_deadline(admission.manual_deadline, "after output summary")?;
@@ -312,7 +326,7 @@ fn summarize_output_partition(
         ));
     }
     Ok((
-        crate::runtime::FileMeta {
+        cntryl_midge_durability::metadata::intent::FileMeta {
             name: name.to_string(),
             level,
             size_bytes: summary.size_bytes,
@@ -331,7 +345,7 @@ fn summarize_output_partition(
 }
 
 fn stage_local_output_partition(
-    fs: &Arc<dyn crate::io::Fs>,
+    fs: &Arc<dyn cntryl_midge_core::io::Fs>,
     cf_id: u32,
     level: u32,
     name: &str,
@@ -352,7 +366,7 @@ fn stage_local_output_partition(
 #[allow(clippy::too_many_arguments)]
 fn record_staged_output_partition(
     storage: Option<&dyn CompactionStorage>,
-    fs: &Arc<dyn crate::io::Fs>,
+    fs: &Arc<dyn cntryl_midge_core::io::Fs>,
     prepared: &PreparedCompactionOutputs,
     cf_id: u32,
     level: u32,
@@ -367,11 +381,14 @@ fn record_staged_output_partition(
     };
     let output = storage.stage_output_partition(fs, cf_id, level, name, path, admission)?;
     prepared.lock().insert(name.to_string(), output);
-    crate::failpoints::fail_point!("midge::compaction::after_remote_partition_evicted", |_| {
-        Err(MidgeError::Internal(
-            "failpoint: compaction interrupted after remote partition eviction".into(),
-        ))
-    });
+    cntryl_midge_core::failpoints::fail_point!(
+        "midge::compaction::after_remote_partition_evicted",
+        |_| {
+            Err(MidgeError::Internal(
+                "failpoint: compaction interrupted after remote partition eviction".into(),
+            ))
+        }
+    );
     Ok(())
 }
 
@@ -398,18 +415,18 @@ pub struct CompactionJobActor {
     compactor: Compactor,
     target_sst_size: usize,
     compaction_memory_limit: usize,
-    memory_budget: Option<crate::common::resource_budget::ResourceBudget>,
+    memory_budget: Option<cntryl_midge_core::common::resource_budget::ResourceBudget>,
     /// Last column family selected for the global compaction slot. Planning
     /// resumes after this ID so a perpetually eligible low ID cannot starve
     /// unrelated families.
-    last_scheduled_cf: Option<crate::types::ColumnFamilyId>,
+    last_scheduled_cf: Option<cntryl_midge_core::types::ColumnFamilyId>,
     /// Accounting reservation for the one active compaction. The actor
     /// serializes compactions, but the token still prevents a delayed terminal
     /// message from settling a later operation.
-    storage_reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    storage_reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
     /// Exact manifest inputs owned by the active operation.
     active_input_ssts: Vec<String>,
-    active_input_metadata: Vec<crate::metadata::FileMeta>,
+    active_input_metadata: Vec<cntryl_midge_durability::metadata::FileMeta>,
     active_operation: ActiveCompactionOperation,
     active_source_fragmentation: Option<Vec<u8>>,
     /// Kept through completion so failed publication can charge its residue.
@@ -439,7 +456,7 @@ impl CompactionJobActor {
     /// This is an admission estimate, not a prediction of physical rewrite I/O.
     pub(crate) fn estimated_pending_bytes<'a>(
         &self,
-        files: impl IntoIterator<Item = &'a crate::metadata::FileMeta>,
+        files: impl IntoIterator<Item = &'a cntryl_midge_durability::metadata::FileMeta>,
     ) -> u64 {
         let mut levels = std::collections::BTreeMap::<(u32, u32), (u64, usize)>::new();
         for file in files {
@@ -570,7 +587,9 @@ impl CompactionJobActor {
     pub fn open_sst_reader(
         &self,
         path: &std::path::Path,
-    ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+    ) -> cntryl_midge_core::common::MidgeResult<
+        Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>,
+    > {
         self.sst_factory.open(path)
     }
 
@@ -713,7 +732,10 @@ impl CompactionJobActor {
         Ok(None)
     }
 
-    fn round_robin_cf_ids(&self, state: &RuntimeState) -> Vec<crate::types::ColumnFamilyId> {
+    fn round_robin_cf_ids(
+        &self,
+        state: &RuntimeState,
+    ) -> Vec<cntryl_midge_core::types::ColumnFamilyId> {
         let mut cf_ids: Vec<u32> = state.column_families.keys().copied().collect();
         cf_ids.sort_unstable();
         if let Some(last_scheduled) = self.last_scheduled_cf {
@@ -797,7 +819,7 @@ impl CompactionJobActor {
     pub(crate) fn settle_compaction_error_reservation(
         &self,
         hybrid: &dyn CompactionStorage,
-        token: crate::storage::hybrid::actor::StorageReservationToken,
+        token: cntryl_midge_storage::hybrid::actor::StorageReservationToken,
         error: Option<&MidgeError>,
     ) {
         if hybrid.ephemeral_sst_cache_enabled()
@@ -819,7 +841,7 @@ impl CompactionJobActor {
     pub(crate) fn settle_failed_compaction_reservation(
         &self,
         hybrid: &dyn CompactionStorage,
-        token: crate::storage::hybrid::actor::StorageReservationToken,
+        token: cntryl_midge_storage::hybrid::actor::StorageReservationToken,
     ) {
         if hybrid.ephemeral_sst_cache_enabled() && !self.repair_scratch_cleanup_verified() {
             tracing::warn!(?token, "retaining compaction staging allowance because overlap-repair scratch cleanup is unverified");
@@ -841,8 +863,8 @@ impl CompactionJobActor {
 
     fn repair_scratch_cleanup_verified(&self) -> bool {
         let fs = self.sst_factory.output_fs();
-        let path = Path::new(OUTPUT_DIR).join(crate::sst::fs::REPAIR_DIR_NAME);
-        let key = match crate::sst::fs::fs_relative_sst_path(&fs, &path) {
+        let path = Path::new(OUTPUT_DIR).join(cntryl_midge_table::sst::fs::REPAIR_DIR_NAME);
+        let key = match cntryl_midge_table::sst::fs::fs_relative_sst_path(&fs, &path) {
             Ok(key) => key,
             Err(error) => {
                 tracing::warn!(%error, "cannot verify overlap-repair scratch cleanup");
@@ -866,13 +888,13 @@ impl CompactionJobActor {
         }
     }
 
-    pub(crate) fn captured_input_metadata(&self) -> &[crate::metadata::FileMeta] {
+    pub(crate) fn captured_input_metadata(&self) -> &[cntryl_midge_durability::metadata::FileMeta] {
         &self.active_input_metadata
     }
 
     pub(crate) fn validate_reserved_inputs(
         &self,
-        files: &[crate::metadata::FileMeta],
+        files: &[cntryl_midge_durability::metadata::FileMeta],
     ) -> MidgeResult<()> {
         if let Some(job) = &self.active_job_reservation {
             job.validate_inputs(files)?;
@@ -961,9 +983,11 @@ impl CompactionJobActor {
             MidgeError::Internal("failed compaction output identity is unavailable".into())
         })?;
         let fs = self.sst_factory.output_fs();
-        let sample =
-            crate::sst::fs::fs_relative_sst_path(&fs, &output_dir.join("placeholder.sst"))?;
-        let directory = crate::io::FsPath::new(
+        let sample = cntryl_midge_table::sst::fs::fs_relative_sst_path(
+            &fs,
+            &output_dir.join("placeholder.sst"),
+        )?;
+        let directory = cntryl_midge_core::io::FsPath::new(
             std::path::Path::new(&sample.0)
                 .parent()
                 .unwrap_or(std::path::Path::new(""))
@@ -971,7 +995,7 @@ impl CompactionJobActor {
         );
         let entries = match fs.list_dir(&directory) {
             Ok(entries) => entries,
-            Err(crate::io::FsError::NotFound(_)) => return Ok(0),
+            Err(cntryl_midge_core::io::FsError::NotFound(_)) => return Ok(0),
             Err(error) => return Err(error.into_midge()),
         };
         let mut bytes = 0_u64;
@@ -979,7 +1003,7 @@ impl CompactionJobActor {
             let name = entry.name.as_str();
             let name = name.strip_suffix(".tmp").unwrap_or(name);
             let Some((cf, level, output_generation, _)) =
-                crate::cloud_layout::parse_compaction_file_name(name)
+                cntryl_midge_core::cloud_layout::parse_compaction_file_name(name)
             else {
                 continue;
             };
@@ -991,8 +1015,10 @@ impl CompactionJobActor {
                     "compaction residue is not a regular file".into(),
                 ));
             }
-            let entry_path =
-                crate::sst::fs::fs_relative_sst_path(&fs, &output_dir.join(&entry.name))?;
+            let entry_path = cntryl_midge_table::sst::fs::fs_relative_sst_path(
+                &fs,
+                &output_dir.join(&entry.name),
+            )?;
             bytes = bytes
                 .checked_add(fs.metadata(&entry_path).map_err(FsError::into_midge)?.len)
                 .ok_or_else(|| {
@@ -1008,7 +1034,7 @@ impl CompactionJobActor {
         state: &mut RuntimeState,
         input_ssts: &[String],
         output_ssts: &[String],
-    ) -> Option<crate::storage::hybrid::actor::StorageReservationToken> {
+    ) -> Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken> {
         // Invariant: completion only clears in-memory "running" state. The
         // actual authority switch happens when manifest publication removes the
         // old SSTs and adds the replacement set.
@@ -1031,7 +1057,7 @@ impl CompactionJobActor {
         state: &mut RuntimeState,
         input_ssts: &[String],
         output_ssts: &[String],
-    ) -> Option<crate::storage::hybrid::actor::StorageReservationToken> {
+    ) -> Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken> {
         self.finish_active_bookkeeping(state, input_ssts);
 
         tracing::info!(
@@ -1067,7 +1093,7 @@ impl CompactionJobActor {
         let fs = self.sst_factory.output_fs();
         for output in staged_outputs {
             let path = Path::new(OUTPUT_DIR).join(&output);
-            let result = crate::sst::fs::fs_relative_sst_path(&fs, &path)
+            let result = cntryl_midge_table::sst::fs::fs_relative_sst_path(&fs, &path)
                 .and_then(|fs_path| fs.remove_file(&fs_path).map_err(FsError::into_midge));
             match result {
                 Ok(()) => {
@@ -1155,7 +1181,7 @@ impl CompactionJobActor {
         sba: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<()> {
         if self.compaction_running {
-            return Err(crate::common::MidgeError::WriteStall(
+            return Err(cntryl_midge_core::common::MidgeError::WriteStall(
                 "compaction already in progress".to_string(),
             ));
         }
@@ -1272,10 +1298,10 @@ impl CompactionJobActor {
         let cf_id = input_ssts
             .first()
             .and_then(|name| {
-                crate::cloud_layout::parse_file_name(name)
+                cntryl_midge_core::cloud_layout::parse_file_name(name)
                     .map(|(cf, _, _)| cf)
                     .or_else(|| {
-                        crate::cloud_layout::parse_compaction_file_name(name)
+                        cntryl_midge_core::cloud_layout::parse_compaction_file_name(name)
                             .map(|(cf, _, _, _)| cf)
                     })
             })
@@ -1330,25 +1356,26 @@ impl CompactionJobActor {
     ) -> MidgeResult<Vec<String>> {
         check_manual_deadline(work.manual_deadline, "before compute")?;
         let output_fs = factory.output_fs();
-        let sink = |name: &str,
-                    path: &std::path::Path,
-                    budget: &crate::common::resource_budget::ResourceBudget,
-                    finalized: Option<&crate::sst::traits::FinalizedSst>| {
-            record_staged_output_partition(
-                storage.map(Arc::as_ref),
-                &output_fs,
-                work.prepared,
-                plan.cf_id,
-                plan.target_level,
-                name,
-                path,
-                CompactionOutputAdmission {
-                    budget,
-                    manual_deadline: work.manual_deadline,
-                    finalized,
-                },
-            )
-        };
+        let sink =
+            |name: &str,
+             path: &std::path::Path,
+             budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
+             finalized: Option<&cntryl_midge_table::sst::traits::FinalizedSst>| {
+                record_staged_output_partition(
+                    storage.map(Arc::as_ref),
+                    &output_fs,
+                    work.prepared,
+                    plan.cf_id,
+                    plan.target_level,
+                    name,
+                    path,
+                    CompactionOutputAdmission {
+                        budget,
+                        manual_deadline: work.manual_deadline,
+                        finalized,
+                    },
+                )
+            };
         // Installed even without cloud storage: summarizing on the worker is
         // what keeps a local-only compaction's full-file re-read and CRC off
         // the event loop.
@@ -1372,7 +1399,7 @@ impl CompactionJobActor {
                     .cloned()
                     .or_else(|| storage.and_then(|storage| storage.maintenance_memory()))
                     .unwrap_or_else(|| {
-                        crate::common::resource_budget::ResourceBudget::new(
+                        cntryl_midge_core::common::resource_budget::ResourceBudget::new(
                             plan.compaction_memory_limit,
                         )
                     }),
@@ -1438,7 +1465,7 @@ impl CompactionJobActor {
             )
             .entered();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::failpoints::fail_point!("midge::compaction::before_compute");
+                cntryl_midge_core::failpoints::fail_point!("midge::compaction::before_compute");
                 let abort_check = || worker_cancel.load(Ordering::Acquire);
                 let result = if trivial_move {
                     let mut names = plan_clone.input_files.clone(); names.sort_unstable(); Ok(names)
@@ -1554,7 +1581,7 @@ impl CompactionJobActor {
     pub(crate) fn prepared_outputs_exact(
         &self,
         output_ssts: &[String],
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
     ) -> MidgeResult<Vec<PreparedCompactionOutput>> {
         let prepared = self.prepared_outputs.lock();
@@ -1591,11 +1618,11 @@ impl CompactionJobActor {
     pub(crate) fn prepare_outputs_from_local_files_for_test(
         &self,
         output_ssts: &[String],
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
         sst_dir: &std::path::Path,
     ) -> MidgeResult<Vec<PreparedCompactionOutput>> {
-        let budget = crate::common::resource_budget::ResourceBudget::new(
+        let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(
             self.compaction_memory_limit.max(1),
         );
         let mut prepared = self.prepared_outputs.lock();
@@ -1700,24 +1727,31 @@ mod tests {
         // Arrange
         let temp = tempfile::tempdir()?;
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-        let mut actor = CompactionActor::new(Arc::new(crate::sst::FsSstFactoryIo::new(
-            crate::io::subdirectory(Arc::clone(&state.fs), crate::sst::fs::SST_DIR),
-            4096,
-        )));
-        let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
+        let mut actor =
+            CompactionActor::new(Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(
+                cntryl_midge_core::io::subdirectory(
+                    Arc::clone(&state.fs),
+                    cntryl_midge_table::sst::fs::SST_DIR,
+                ),
+                4096,
+            )));
+        let cloud = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
             temp.path().join("cloud"),
         )?);
-        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+        let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
             cloud,
-            crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::new(1_000),
         ));
         hybrid.enable_ephemeral_sst_cache(1_000);
         let compaction_storage: Arc<dyn CompactionStorage> = hybrid.clone();
         let plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(42);
         actor.prepare_compaction(&mut state, &plan, Some(&compaction_storage))?;
-        let residue = state
-            .host_sst_dir()
-            .join(crate::cloud_layout::compaction_file_name(0, 1, 42, 0));
+        let residue =
+            state
+                .host_sst_dir()
+                .join(cntryl_midge_core::cloud_layout::compaction_file_name(
+                    0, 1, 42, 0,
+                ));
         std::fs::create_dir_all(state.host_sst_dir())?;
         std::fs::write(&residue, [0_u8; 300])?;
 
@@ -1732,13 +1766,13 @@ mod tests {
     }
 
     struct BlockingFinalizeFactory {
-        delegate: Arc<dyn crate::sst::SstFactory>,
+        delegate: Arc<dyn cntryl_midge_table::sst::SstFactory>,
         reached_finalize: std::sync::mpsc::SyncSender<()>,
         cancel_probe: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>>,
     }
 
-    impl crate::sst::SstFactory for BlockingFinalizeFactory {
-        fn output_fs(&self) -> Arc<dyn crate::io::Fs> {
+    impl cntryl_midge_table::sst::SstFactory for BlockingFinalizeFactory {
+        fn output_fs(&self) -> Arc<dyn cntryl_midge_core::io::Fs> {
             self.delegate.output_fs()
         }
 
@@ -1748,8 +1782,8 @@ mod tests {
 
         fn create_for_compaction(
             &self,
-            budget: crate::common::resource_budget::ResourceBudget,
-        ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
             Ok(Box::new(BlockingFinalizeWriter {
                 inner: self.delegate.create_for_compaction(budget)?,
                 reached_finalize: self.reached_finalize.clone(),
@@ -1760,13 +1794,13 @@ mod tests {
         fn open_for_compaction(
             &self,
             path: &std::path::Path,
-            budget: crate::common::resource_budget::ResourceBudget,
-        ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
             self.delegate.open_for_compaction(path, budget)
         }
 
         #[cfg(test)]
-        fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+        fn create(&self) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>> {
             Ok(Box::new(BlockingFinalizeWriter {
                 inner: self.delegate.create()?,
                 reached_finalize: self.reached_finalize.clone(),
@@ -1777,18 +1811,18 @@ mod tests {
         fn open(
             &self,
             path: &std::path::Path,
-        ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+        ) -> MidgeResult<Box<dyn cntryl_midge_table::sst::traits::SstReaderExt>> {
             self.delegate.open(path)
         }
     }
 
     struct BlockingFinalizeWriter {
-        inner: Box<dyn crate::sst::traits::DynSstWriter>,
+        inner: Box<dyn cntryl_midge_table::sst::traits::DynSstWriter>,
         reached_finalize: std::sync::mpsc::SyncSender<()>,
         cancel_probe: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>>,
     }
 
-    impl crate::sst::traits::DynSstWriter for BlockingFinalizeWriter {
+    impl cntryl_midge_table::sst::traits::DynSstWriter for BlockingFinalizeWriter {
         fn estimated_size_bytes(&self) -> usize {
             self.inner.estimated_size_bytes()
         }
@@ -1890,8 +1924,8 @@ mod tests {
         cf_id: u32,
         smallest_key: &[u8],
         largest_key: &[u8],
-    ) -> crate::metadata::FileMeta {
-        crate::metadata::FileMeta {
+    ) -> cntryl_midge_durability::metadata::FileMeta {
+        cntryl_midge_durability::metadata::FileMeta {
             name: name.to_string(),
             level: 0,
             size_bytes: 1,
@@ -1909,8 +1943,8 @@ mod tests {
         size_bytes: u64,
         smallest_key: &[u8],
         largest_key: &[u8],
-    ) -> crate::metadata::FileMeta {
-        crate::metadata::FileMeta {
+    ) -> cntryl_midge_durability::metadata::FileMeta {
+        cntryl_midge_durability::metadata::FileMeta {
             name: name.to_string(),
             level,
             size_bytes,
@@ -1923,16 +1957,16 @@ mod tests {
 
     fn create_test_compaction_actor() -> CompactionActor {
         // Use the modern io::Fs-backed factory
-        let fs = Arc::new(crate::io::MockFs::new());
-        let sst_factory = Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
+        let fs = Arc::new(cntryl_midge_core::io::MockFs::new());
+        let sst_factory = Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         CompactionActor::new(sst_factory)
     }
 
     fn create_test_compaction_actor_with_config(
         config: LeveledCompactionConfig,
     ) -> CompactionActor {
-        let fs = Arc::new(crate::io::MockFs::new());
-        let sst_factory = Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
+        let fs = Arc::new(cntryl_midge_core::io::MockFs::new());
+        let sst_factory = Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         CompactionActor::new_with_config(sst_factory, config)
     }
 
@@ -2357,14 +2391,14 @@ mod tests {
                 None,
             )
             .expect("write input value");
-        crate::sst::fs::finish_writer_to_path(input_writer, &input_path)
+        cntryl_midge_table::sst::fs::finish_writer_to_path(input_writer, &input_path)
             .expect("finalize input SST");
         let input_bytes = std::fs::read(&input_path).expect("read input fixture");
         state
             .manifest
             .test_mut()
             .files
-            .push(crate::metadata::FileMeta {
+            .push(cntryl_midge_durability::metadata::FileMeta {
                 name: input_name.to_string(),
                 level: 0,
                 size_bytes: u64::try_from(input_bytes.len()).expect("input size fits u64"),
@@ -2386,20 +2420,21 @@ mod tests {
         let output_name = "000000_01_00000000000000000002.sst".to_string();
         let input_path = state.host_sst_dir().join(&input_name);
         let output_path = state.host_sst_dir().join(&output_name);
-        let real_fs =
-            Arc::new(crate::io::RealFs::new(state.host_sst_dir()).expect("create real SST fs"));
-        let delegate: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::FsSstFactoryIo::new(real_fs, 4096));
+        let real_fs = Arc::new(
+            cntryl_midge_core::io::RealFs::new(state.host_sst_dir()).expect("create real SST fs"),
+        );
+        let delegate: Arc<dyn cntryl_midge_table::sst::SstFactory> =
+            Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(real_fs, 4096));
         let input_bytes =
             write_shutdown_compaction_input(&mut state, delegate.as_ref(), &input_name);
 
         let cloud = Arc::new(
-            crate::storage::filesystem::FileSystem::new(temp.path().join("hybrid-cloud"))
+            cntryl_midge_storage::filesystem::FileSystem::new(temp.path().join("hybrid-cloud"))
                 .expect("create cloud storage"),
         );
-        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+        let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
             cloud,
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
         let cancel_probe = Arc::new(std::sync::Mutex::new(None));

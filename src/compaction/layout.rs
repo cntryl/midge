@@ -1,6 +1,6 @@
 //! Complete-bound L1+ layout defects shared by read selection and repair.
 
-use crate::metadata::FileMeta;
+use cntryl_midge_durability::metadata::FileMeta;
 use std::collections::BTreeMap;
 
 struct EndpointGroup {

@@ -1,11 +1,11 @@
 use super::*;
-use crate::storage::{StorageBackend, StorageCallback};
+use cntryl_midge_storage::{StorageBackend, StorageCallback};
 
 /// Several versions keep the retained WAL nonempty while metadata is committed.
 const WAL_DEBT_RECORDS: usize = 128;
 
 struct SlowWalRanges {
-    inner: Arc<crate::storage::filesystem::FileSystem>,
+    inner: Arc<cntryl_midge_storage::filesystem::FileSystem>,
     calls: Arc<AtomicUsize>,
     pause: Option<Arc<FirstWalRangePause>>,
 }
@@ -19,9 +19,9 @@ struct FirstWalRangePause {
 impl StorageBackend for SlowWalRanges {
     fn submit_range_read_request(
         &self,
-        request: crate::storage::StorageRequest,
+        request: cntryl_midge_storage::StorageRequest,
         range: std::ops::Range<u64>,
-        callback: crate::storage::RangeReadCallback,
+        callback: cntryl_midge_storage::RangeReadCallback,
     ) {
         self.inner
             .submit_range_read_request(request, range, callback);
@@ -29,7 +29,7 @@ impl StorageBackend for SlowWalRanges {
 
     fn submit_range_head_request(
         &self,
-        request: crate::storage::StorageRequest,
+        request: cntryl_midge_storage::StorageRequest,
         callback: StorageCallback,
     ) {
         if request.key.starts_with("wal/") {
@@ -56,15 +56,15 @@ impl StorageBackend for SlowWalRanges {
 
     fn submit_metadata_read_request(
         &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::MetadataReadCallback,
+        request: cntryl_midge_storage::StorageRequest,
+        callback: cntryl_midge_storage::MetadataReadCallback,
     ) {
         self.inner.submit_metadata_read_request(request, callback);
     }
 
     fn submit_head_request(
         &self,
-        request: crate::storage::StorageRequest,
+        request: cntryl_midge_storage::StorageRequest,
         callback: StorageCallback,
     ) {
         self.inner.submit_head_request(request, callback);
@@ -72,7 +72,7 @@ impl StorageBackend for SlowWalRanges {
 
     fn submit_delete_request(
         &self,
-        request: crate::storage::StorageRequest,
+        request: cntryl_midge_storage::StorageRequest,
         callback: StorageCallback,
     ) {
         self.inner.submit_delete_request(request, callback);
@@ -80,9 +80,9 @@ impl StorageBackend for SlowWalRanges {
 
     fn submit_write_request(
         &self,
-        request: crate::storage::StorageRequest,
+        request: cntryl_midge_storage::StorageRequest,
         data: Vec<u8>,
-        callback: crate::storage::StorageCallback,
+        callback: cntryl_midge_storage::StorageCallback,
     ) {
         self.inner.submit_write_request(request, data, callback);
     }
@@ -90,7 +90,7 @@ impl StorageBackend for SlowWalRanges {
 
 #[test]
 fn should_preserve_full_compaction_allowance_when_retirement_is_idle(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let (mut el, _) = local_debt()?;
     let plan = el
@@ -112,20 +112,20 @@ fn should_preserve_full_compaction_allowance_when_retirement_is_idle(
 
 #[test]
 fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: accepted data is already covered by SSTs and remote WAL. No
     // reclamation worker owns an in-flight retirement or storage mutation yet.
     let (mut el, _worker, _) = cloud_debt_with_wal_records(1, WAL_DEBT_RECORDS)?;
     let cloud = Arc::new(SlowWalRanges {
-        inner: Arc::new(crate::storage::filesystem::FileSystem::new(
+        inner: Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
             el.state.db_path.join("cloud_store"),
         )?),
         calls: Arc::new(AtomicUsize::new(0)),
         pause: None,
     });
-    let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud.clone(),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     hybrid.enable_ephemeral_sst_cache(64 * 1024 * 1024);
     el.set_hybrid_storage(hybrid);
@@ -186,7 +186,7 @@ fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
 
 #[test]
 fn should_retain_wal_when_shutdown_completion_requests_optional_reclamation(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: flush and upload completions share this reclamation entry
     // point, even before shutdown reaches its final worker join.
     let (mut el, _worker, _) = cloud_debt_with_wal_records(1, WAL_DEBT_RECORDS)?;
@@ -218,8 +218,8 @@ fn should_retain_wal_when_shutdown_completion_requests_optional_reclamation(
 
 #[test]
 fn should_join_owned_wal_retirement_head_before_acknowledging_shutdown(
-) -> crate::common::MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: hold one already-admitted target HEAD open. Its worker owns the
         // publication gate before shutdown begins, so it must retain that ownership
         // until the provider completes rather than being detached at shutdown.
@@ -237,7 +237,7 @@ fn should_join_owned_wal_retirement_head_before_acknowledging_shutdown(
             shutdown_release,
             calls: Arc::clone(&calls),
         };
-        let inherited = crate::failpoints::worker_gate();
+        let inherited = cntryl_midge_core::failpoints::worker_gate();
         let shutdown =
             std::thread::spawn(move || inherited.run(|| run_owned_retirement_shutdown(control)));
         let response = response_ready
@@ -286,11 +286,11 @@ struct RetirementShutdownControl {
 
 fn run_owned_retirement_shutdown(
     control: RetirementShutdownControl,
-) -> crate::common::MidgeResult<(crate::runtime::event_loop::HandleOutcome, bool)> {
+) -> cntryl_midge_core::common::MidgeResult<(crate::runtime::event_loop::HandleOutcome, bool)> {
     // Construct, run, and destroy thread-bound roots on the owning thread.
     let (mut el, _worker, _) = cloud_debt_with_wal_records(1, WAL_DEBT_RECORDS)?;
     let cloud = Arc::new(SlowWalRanges {
-        inner: Arc::new(crate::storage::filesystem::FileSystem::new(
+        inner: Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
             el.state.db_path.join("cloud_store"),
         )?),
         calls: control.calls,
@@ -300,9 +300,9 @@ fn run_owned_retirement_shutdown(
             claimed: std::sync::atomic::AtomicBool::new(false),
         })),
     });
-    let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud.clone(),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     hybrid.enable_ephemeral_sst_cache(64 * 1024 * 1024);
     el.set_hybrid_storage(hybrid);

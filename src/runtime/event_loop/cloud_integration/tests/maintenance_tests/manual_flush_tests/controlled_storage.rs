@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::{StorageBackend, StorageCallback, StorageRequest};
+use cntryl_midge_storage::{StorageBackend, StorageCallback, StorageRequest};
 
 struct WalReadGate {
     reached: crossbeam::channel::Sender<()>,
@@ -23,7 +23,7 @@ impl Drop for ProviderRelease {
 }
 
 pub(super) struct ControlledStorage {
-    inner: Arc<crate::storage::filesystem::FileSystem>,
+    inner: Arc<cntryl_midge_storage::filesystem::FileSystem>,
     wal_gate: Mutex<Option<WalReadGate>>,
     fail_upload: AtomicBool,
     pub(super) uploads: Mutex<Vec<String>>,
@@ -41,7 +41,7 @@ pub(super) fn install(
     let (reached, arrived) = crossbeam::channel::bounded(1);
     let (release, resumed) = crossbeam::channel::bounded(1);
     let cloud = Arc::new(ControlledStorage {
-        inner: Arc::new(crate::storage::filesystem::FileSystem::new(
+        inner: Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
             el.state.db_path.join("cloud_store"),
         )?),
         wal_gate: Mutex::new(hold_wal.then_some(WalReadGate {
@@ -51,9 +51,9 @@ pub(super) fn install(
         fail_upload: AtomicBool::new(fail_upload),
         uploads: Mutex::new(Vec::new()),
     });
-    let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud.clone(),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     hybrid.enable_ephemeral_sst_cache(64 * 1024 * 1024);
     el.set_hybrid_storage(hybrid);
@@ -65,7 +65,7 @@ impl StorageBackend for ControlledStorage {
         &self,
         request: StorageRequest,
         range: std::ops::Range<u64>,
-        callback: crate::storage::RangeReadCallback,
+        callback: cntryl_midge_storage::RangeReadCallback,
     ) {
         if request.key.starts_with("wal/") {
             let gate = self
@@ -92,7 +92,7 @@ impl StorageBackend for ControlledStorage {
     fn submit_metadata_read_request(
         &self,
         request: StorageRequest,
-        callback: crate::storage::MetadataReadCallback,
+        callback: cntryl_midge_storage::MetadataReadCallback,
     ) {
         self.inner.submit_metadata_read_request(request, callback);
     }
@@ -117,10 +117,10 @@ impl StorageBackend for ControlledStorage {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(request.key.clone());
             if self.fail_upload.swap(false, Ordering::AcqRel) {
-                let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
+                let _ = callback.send(cntryl_midge_storage::StorageEvent::WriteComplete {
                     key: request.key,
-                    result: crate::storage::StorageOutcome::Err(
-                        crate::storage::StorageError::timeout(
+                    result: cntryl_midge_storage::StorageOutcome::Err(
+                        cntryl_midge_storage::StorageError::timeout(
                             "one fixture SST upload timeout before provider write",
                         ),
                     ),

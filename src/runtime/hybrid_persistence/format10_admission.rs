@@ -1,9 +1,9 @@
 //! Durable, bounded admission for immutable FORMAT 10 cloud publications.
 
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::lease::CloudMetadataObject;
-use crate::storage::cloud::CloudStorage;
-use crate::storage::{
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::CloudMetadataObject;
+use cntryl_midge_storage::cloud::CloudStorage;
+use cntryl_midge_storage::{
     StorageBackend, StorageError, StorageEvent, StorageObjectMetadata, StorageOutcome,
     StoragePrecondition, StorageRequest, StorageWriteReceipt,
 };
@@ -525,7 +525,7 @@ fn validate_objects(
             ));
         }
         let max_object_len = match object.file_name.as_str() {
-            crate::metadata::files::FORMAT => {
+            cntryl_midge_durability::metadata::files::FORMAT => {
                 has_format = true;
                 if object.len != b"midge-format-version=10\n".len() as u64 {
                     return Err(MidgeError::Corruption(
@@ -537,18 +537,23 @@ fn validate_objects(
                 })?;
                 continue;
             }
-            crate::metadata::local_authority::HEAD_PATH => {
+            cntryl_midge_durability::metadata::local_authority::HEAD_PATH => {
                 has_head = true;
-                crate::metadata::local_authority::MAX_HEAD_BYTES as u64
+                cntryl_midge_durability::metadata::local_authority::MAX_HEAD_BYTES as u64
             }
-            crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME => {
-                crate::runtime::MetadataCutProof::MAX_CLOUD_OBJECT_BYTES as u64
+            cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF => {
+                cntryl_midge_durability::metadata::files::MAX_CLOUD_CUT_PROOF_BYTES as u64
             }
-            name if crate::metadata::local_authority::closure_path_parts(name).is_ok() => {
-                let (_, body) = crate::metadata::local_authority::closure_path_parts(name)?;
+            name if cntryl_midge_durability::metadata::local_authority::closure_path_parts(
+                name,
+            )
+            .is_ok() =>
+            {
+                let (_, body) =
+                    cntryl_midge_durability::metadata::local_authority::closure_path_parts(name)?;
                 has_manifest_base |= body == "manifest/base";
                 has_intent_base |= body == "intent/base";
-                crate::metadata::local_authority::MAX_CLOSURE_BYTES
+                cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES
             }
             _ => {
                 return Err(MidgeError::Corruption(
