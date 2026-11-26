@@ -1,8 +1,20 @@
 use super::{fs, Path, StorageOutcome, Write};
 
-/// Prefix of in-flight object temp files. Listing skips them, so a crash
-/// mid-write never exposes a partial object.
+/// Marker between the object name and the writer identity in a staging file.
 pub(super) const TEMP_OBJECT_MARKER: &str = ".tmp.";
+
+/// Whether the name belongs to a temporary filesystem object publication.
+#[must_use]
+pub fn is_publication_staging_file(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .and_then(|name| name.rsplit_once(TEMP_OBJECT_MARKER))
+        .is_some_and(|(object, writer)| {
+            object.starts_with('.')
+                && writer.split_once('.').is_some_and(|(pid, nonce)| {
+                    pid.parse::<u32>().is_ok() && nonce.parse::<u64>().is_ok()
+                })
+        })
+}
 
 static TEMP_OBJECT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The last modified time, in nanoseconds since the epoch, stamped on a

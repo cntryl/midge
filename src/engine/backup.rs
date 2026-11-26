@@ -3,6 +3,7 @@
 use super::verification::VerificationBarrierGuard;
 use super::{Engine, OpenOptions, Storage};
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_storage::filesystem::is_publication_staging_file;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -359,9 +360,9 @@ fn pin_format_10_files(
         })
         .collect::<MidgeResult<Vec<_>>>()?;
     paths.extend(ledger_wal_paths(root)?);
-    collect_files(&root.join("sst"), root, &mut paths)?;
+    collect_files(&root.join("sst"), false, &mut paths)?;
     if simulated_cloud {
-        collect_files(&root.join("cloud_store"), root, &mut paths)?;
+        collect_files(&root.join("cloud_store"), true, &mut paths)?;
     }
     pin_paths(root, paths, scratch_dir)
 }
@@ -405,8 +406,8 @@ fn pin_cloud_simulated_format_10_files(
         .map(|(relative, body)| pin_bytes(relative, body, scratch_dir))
         .collect::<MidgeResult<Vec<_>>>()?;
     let mut paths = ledger_wal_paths(root)?;
-    collect_files(&root.join("sst"), root, &mut paths)?;
-    collect_files(&root.join("cloud_store"), root, &mut paths)?;
+    collect_files(&root.join("sst"), false, &mut paths)?;
+    collect_files(&root.join("cloud_store"), true, &mut paths)?;
     pinned.extend(pin_paths(root, paths, scratch_dir)?);
 
     // Recheck after pinning the provider pointer file so the capture cannot
@@ -468,9 +469,9 @@ fn pin_durable_files(
         }
     }
     paths.extend(ledger_wal_paths(root)?);
-    collect_files(&root.join("sst"), root, &mut paths)?;
+    collect_files(&root.join("sst"), false, &mut paths)?;
     if simulated_cloud {
-        collect_files(&root.join("cloud_store"), root, &mut paths)?;
+        collect_files(&root.join("cloud_store"), true, &mut paths)?;
     }
     pin_paths(root, paths, scratch_dir)
 }
@@ -588,8 +589,10 @@ fn ledger_wal_paths(root: &Path) -> MidgeResult<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn collect_files(path: &Path, root: &Path, files: &mut Vec<PathBuf>) -> MidgeResult<()> {
-    if !path.exists() {
+fn collect_files(path: &Path, simulated_cloud: bool, files: &mut Vec<PathBuf>) -> MidgeResult<()> {
+    if (simulated_cloud && path.file_name().is_some_and(is_publication_staging_file))
+        || !path.exists()
+    {
         return Ok(());
     }
     let metadata = fs::symlink_metadata(path)?;
@@ -611,9 +614,8 @@ fn collect_files(path: &Path, root: &Path, files: &mut Vec<PathBuf>) -> MidgeRes
     }
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        collect_files(&entry.path(), root, files)?;
+        collect_files(&entry.path(), simulated_cloud, files)?;
     }
-    let _ = root;
     Ok(())
 }
 

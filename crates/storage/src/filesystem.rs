@@ -199,6 +199,7 @@ impl FileSystem {
 mod backend;
 mod inventory;
 mod publication;
+pub use publication::is_publication_staging_file;
 mod range;
 
 use range::process_lock_stripe_name;

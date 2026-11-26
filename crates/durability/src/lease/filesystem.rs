@@ -465,6 +465,25 @@ mod tests {
 
     #[test]
     fn should_log_crash_takeover_only_when_previous_holder_did_not_release() {
+        const CHILD: &str = "MIDGE_LEASE_TAKEOVER_LOG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Tracing callsite interest is shared by the process. Isolate
+            // the log capture from concurrent lease tests.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("lease::filesystem::tests::should_log_crash_takeover_only_when_previous_holder_did_not_release")
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed;"),
+                "{stdout}\n{stderr}"
+            );
+            return;
+        }
+
         // Arrange
         let dir = tempfile::tempdir().unwrap();
         let first = Arc::new(FileSystemLease::new(dir.path(), false).unwrap());

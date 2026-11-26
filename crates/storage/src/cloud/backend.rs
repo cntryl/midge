@@ -232,11 +232,13 @@ pub trait CloudBackend:
 /// A reader can be implemented and consumed without any mutation capability:
 ///
 /// ```no_run
-/// use cntryl_midge::__internal::storage::cloud::{CloudReadCapability, CloudReadOptions, CloudCallback};
+/// use cntryl_midge_storage::cloud::{CloudReadCapability, CloudReadOptions, CloudCallback};
 /// struct ReadOnly;
 /// impl CloudReadCapability for ReadOnly {
 ///     fn submit_get(&self, _key: &str, _callback: CloudCallback) {}
 ///     fn submit_get_with_metadata(&self, _key: &str, _callback: CloudCallback) {}
+/// #   #[cfg(feature = "internal-testing")]
+/// #   fn submit_get_range(&self, _: &str, _: u64, _: Option<u64>, _: CloudCallback) {}
 /// }
 /// fn read_object(reader: &dyn CloudReadCapability, callback: CloudCallback) {
 ///     reader.read("object", CloudReadOptions::default(), callback);
@@ -244,15 +246,17 @@ pub trait CloudBackend:
 /// ```
 ///
 /// ```compile_fail
-/// use cntryl_midge::__internal::storage::cloud::{CloudReadCapability, CloudCallback};
+/// use cntryl_midge_storage::cloud::{CloudReadCapability, CloudCallback};
 /// struct MissingMetadataRead;
 /// impl CloudReadCapability for MissingMetadataRead {
 ///     fn submit_get(&self, _key: &str, _callback: CloudCallback) {}
+/// #   #[cfg(feature = "internal-testing")]
+/// #   fn submit_get_range(&self, _: &str, _: u64, _: Option<u64>, _: CloudCallback) {}
 /// }
 /// ```
 ///
 /// ```compile_fail
-/// use cntryl_midge::__internal::storage::cloud::{CloudReadCapability, CloudCallback, CloudRequestOptions};
+/// use cntryl_midge_storage::cloud::{CloudReadCapability, CloudCallback, CloudRequestOptions};
 /// fn delete_with_reader(reader: &dyn CloudReadCapability, callback: CloudCallback) {
 ///     reader.delete("object", CloudRequestOptions::default(), callback);
 /// }
@@ -509,7 +513,7 @@ pub trait CloudReadCapability: Send + Sync {
 /// Object creation and replacement.
 ///
 /// ```compile_fail
-/// use cntryl_midge::__internal::storage::cloud::CloudWriteCapability;
+/// use cntryl_midge_storage::cloud::CloudWriteCapability;
 /// struct MissingWrite;
 /// impl CloudWriteCapability for MissingWrite {}
 /// ```
@@ -619,7 +623,7 @@ pub trait CloudWriteCapability: Send + Sync {
 /// Idempotent object removal.
 ///
 /// ```compile_fail
-/// use cntryl_midge::__internal::storage::cloud::CloudDeleteCapability;
+/// use cntryl_midge_storage::cloud::CloudDeleteCapability;
 /// struct MissingDelete;
 /// impl CloudDeleteCapability for MissingDelete {}
 /// ```
@@ -645,7 +649,7 @@ pub trait CloudDeleteCapability: Send + Sync {
 /// Prefix enumeration.
 ///
 /// ```compile_fail
-/// use cntryl_midge::__internal::storage::cloud::CloudListCapability;
+/// use cntryl_midge_storage::cloud::CloudListCapability;
 /// struct MissingList;
 /// impl CloudListCapability for MissingList {}
 /// ```
@@ -692,7 +696,7 @@ pub trait CloudListCapability: Send + Sync {
 /// Object metadata lookup.
 ///
 /// ```compile_fail
-/// use cntryl_midge::__internal::storage::cloud::CloudHeadCapability;
+/// use cntryl_midge_storage::cloud::CloudHeadCapability;
 /// struct MissingHead;
 /// impl CloudHeadCapability for MissingHead {}
 /// ```
