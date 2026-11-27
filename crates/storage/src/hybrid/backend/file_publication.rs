@@ -149,7 +149,7 @@ impl HybridStorage {
                 "failpoint: cloud SST upload failed".into()
             ))
         );
-        let metadata = self.publish_file_bytes(key, &bytes, &admission)?;
+        let metadata = self.publish_file_bytes(key, &bytes, checksum, &admission)?;
         Ok(super::GuardedObjectProof::range_identity(
             Arc::clone(&self.stores.sst),
             key.into(),
@@ -161,6 +161,7 @@ impl HybridStorage {
         &self,
         key: &str,
         bytes: &[u8],
+        verified_checksum: u32,
         admission: &PublicationAdmission,
     ) -> MidgeResult<StorageObjectMetadata> {
         for attempt in 0..=self.immutable_retry.max_retries {
@@ -171,7 +172,7 @@ impl HybridStorage {
             let outcome = self.put_file_bytes_with_receipt(key, bytes, admission);
             match outcome {
                 Ok(Some(receipt)) => {
-                    if !receipt.matches(bytes) {
+                    if !receipt.matches_identity(bytes.len() as u64, verified_checksum) {
                         return Err(MidgeError::Corruption(
                             "immutable upload checksum receipt does not match sent bytes".into(),
                         ));

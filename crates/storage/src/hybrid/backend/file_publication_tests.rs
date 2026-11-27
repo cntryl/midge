@@ -28,6 +28,35 @@ fn publish_source(
     )
 }
 
+#[test]
+fn should_reject_same_length_source_corruption_before_immutable_upload() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let expected = b"expected";
+    std::fs::write(directory.path().join("source"), b"modified")?;
+    let backend = Arc::new(MockCloudBackend::new());
+    let storage = HybridStorage::with_policy(
+        Arc::new(CloudStorage::new(backend.clone(), String::new())),
+        crate::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let budget = ResourceBudget::new(2 * 1024 * 1024);
+
+    // Act
+    let result = publish_source(
+        &storage,
+        "sst/corrupt-source",
+        directory.path(),
+        expected,
+        &budget,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    assert_eq!(backend.get_uploads(), [] as [(String, u64); 0]);
+    assert_eq!(budget.used(), 0);
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_retain_replacement_when_unpublished_output_cleanup_consumes_original_guard(
