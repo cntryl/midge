@@ -271,13 +271,17 @@ fn should_keep_a_single_event_charged_until_its_key_group_drops() -> MidgeResult
         mk_version("b", 2, false, Some("next"), None),
     ]);
     let mut merge = VersionMergeIterator::new(vec![cursor], budget.clone())?.0;
-    let first = merge.next_event()?.expect("first merge event");
-    let charge = first.retained_bytes();
     let before = budget.used();
+    let first = merge.next_event()?.expect("first merge event");
+    let next_charge = merge
+        .peek_event()
+        .expect("next merge event")
+        .retained_bytes();
+    let while_yielded = budget.used();
     let mut seen = 1;
 
     // Act
-    let group = collect_same_key_events(&mut merge, first, &budget, &mut seen, None)?;
+    let group = collect_same_key_events(&mut merge, first, &mut seen, None)?;
     let while_held = budget.used();
 
     // Assert
@@ -289,9 +293,11 @@ fn should_keep_a_single_event_charged_until_its_key_group_drops() -> MidgeResult
         merge.peek_event().map(CompactionEvent::key),
         Some(&b"b"[..])
     );
-    assert_eq!(while_held, before + charge);
+    assert_eq!(while_yielded, before + next_charge);
+    assert_eq!(while_held, while_yielded);
+    let group_charge = event.event.retained_bytes();
     drop(group);
-    assert_eq!(budget.used(), before);
+    assert_eq!(budget.used(), while_yielded - group_charge);
     Ok(())
 }
 

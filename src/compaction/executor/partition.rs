@@ -2,7 +2,7 @@ use super::ensure_compaction_not_aborted;
 #[cfg(test)]
 use super::merge::{collect_reader_input, CompactionEventCursor};
 use super::merge::{
-    CompactionEvent, CompactionStreamInputs, EventMergeIterator, TombstoneGcPolicy,
+    BudgetedEvent, CompactionEvent, CompactionStreamInputs, EventMergeIterator, TombstoneGcPolicy,
 };
 use super::{tombstone_is_obsolete, CompactionVersion};
 use cntryl_midge_core::common::MidgeResult;
@@ -181,24 +181,6 @@ fn finish_partition(
         path,
         summary,
     }))
-}
-
-struct BudgetedEvent {
-    event: CompactionEvent,
-    _reservation: cntryl_midge_core::common::resource_budget::ResourceReservation,
-}
-
-impl BudgetedEvent {
-    fn new(
-        event: CompactionEvent,
-        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<Self> {
-        let reservation = budget.reserve(event.retained_bytes(), "same-key event group")?;
-        Ok(Self {
-            event,
-            _reservation: reservation,
-        })
-    }
 }
 
 fn reserve_tombstone(
@@ -935,17 +917,16 @@ impl<'a> PartitionRoller<'a> {
 }
 
 fn collect_fragment_key_events(
-    first: CompactionEvent,
+    first: BudgetedEvent,
     merged: &mut EventMergeIterator<'_>,
-    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<Vec<BudgetedEvent>> {
-    let mut events = vec![BudgetedEvent::new(first, budget)?];
+    let mut events = vec![first];
     while merged
         .peek_event()
         .is_some_and(|candidate| candidate.key() == events[0].event.key())
     {
         let event = merged.next_event()?.expect("peeked fragment event exists");
-        events.push(BudgetedEvent::new(event, budget)?);
+        events.push(event);
     }
     Ok(events)
 }
@@ -1070,7 +1051,7 @@ pub(crate) fn write_fragmented_compaction_outputs(
     let mut has_key_after_cut = false;
     while let Some(first) = merged.next_event()? {
         ensure_compaction_not_aborted(abort_check)?;
-        let events = collect_fragment_key_events(first, &mut merged, budget)?;
+        let events = collect_fragment_key_events(first, &mut merged)?;
         let key = events[0].event.key();
         has_key_after_cut |= key > split_key.as_slice();
         let forced_roll = cut_pending && key >= split_key.as_slice();
@@ -1136,12 +1117,10 @@ impl KeyEventGroup {
 
 fn collect_same_key_events(
     merged: &mut EventMergeIterator<'_>,
-    first: CompactionEvent,
-    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
+    first: BudgetedEvent,
     seen: &mut usize,
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<KeyEventGroup> {
-    let first = BudgetedEvent::new(first, budget)?;
     if merged
         .peek_event()
         .is_none_or(|candidate| candidate.key() != first.event.key())
@@ -1155,7 +1134,7 @@ fn collect_same_key_events(
         let event = merged
             .next_event()?
             .expect("peeked compaction event exists");
-        events.push(BudgetedEvent::new(event, budget)?);
+        events.push(event);
         *seen = seen.saturating_add(1);
         if seen.is_multiple_of(1024) {
             ensure_compaction_not_aborted(abort_check)?;
@@ -1234,8 +1213,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
             ensure_compaction_not_aborted(abort_check)?;
         }
         seen = seen.saturating_add(1);
-        let group =
-            collect_same_key_events(&mut merged, first_event, budget, &mut seen, abort_check)?;
+        let group = collect_same_key_events(&mut merged, first_event, &mut seen, abort_check)?;
         let key_events = group.as_slice();
         let event_key = key_events[0].event.key();
 
@@ -1369,7 +1347,7 @@ impl VersionMergeIterator<'_> {
     }
 
     fn next_version(&mut self) -> MidgeResult<Option<CompactionVersion>> {
-        match self.0.next_event()? {
+        match self.0.next_event()?.map(|retained| retained.event) {
             Some(CompactionEvent::Version(version)) => Ok(Some(version)),
             Some(
                 CompactionEvent::RangeEnd(_)
