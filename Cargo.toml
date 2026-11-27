@@ -16,7 +16,7 @@ members = ["crates/core", "crates/table", "crates/storage", "crates/durability"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
@@ -24,10 +24,10 @@ repository = "https://github.com/cntryl/midge"
 
 [workspace.dependencies]
 # Keep version requirements for these path dependencies aligned with workspace.package.version.
-cntryl-midge-core = { version = "=0.6.0", path = "crates/core" }
-cntryl-midge-durability = { version = "=0.6.0", path = "crates/durability", default-features = false }
-cntryl-midge-storage = { version = "=0.6.0", path = "crates/storage", default-features = false }
-cntryl-midge-table = { version = "=0.6.0", path = "crates/table" }
+cntryl-midge-core = { version = "=0.6.1", path = "crates/core" }
+cntryl-midge-durability = { version = "=0.6.1", path = "crates/durability", default-features = false }
+cntryl-midge-storage = { version = "=0.6.1", path = "crates/storage", default-features = false }
+cntryl-midge-table = { version = "=0.6.1", path = "crates/table" }
 
 arc-swap = "1.9"
 base64 = "0.23"

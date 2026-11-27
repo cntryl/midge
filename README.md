@@ -1,8 +1,8 @@
-[![CI](https://github.com/cntryl/midge/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/cntryl/midge/actions/workflows/ci.yml)
+[![CI](https://github.com/cntryl/midge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cntryl/midge/actions/workflows/ci.yml)
 
 # Midge
 
-Midge `0.6.0` is an embedded Rust 2021 LSM key-value engine. It uses explicit
+Midge `0.6.1` is an embedded Rust 2021 LSM key-value engine. It uses explicit
 transactions and explicit write durability policies. The crate MSRV is Rust
 `1.97`.
 

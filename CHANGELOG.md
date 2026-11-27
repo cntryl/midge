@@ -9,7 +9,29 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
 
 ## [Unreleased]
 
-## [0.6.0] - Unreleased
+## [0.6.1] - 2026-11-27
+
+### Changed
+
+- Split engine internals into four workspace crates for core utilities,
+  storage, durability, and tables. Applications still depend on
+  `cntryl-midge` and use the same public API and Cargo features (#1107).
+- Reduce temporary allocation and repeated processing in compaction, SST
+  construction, and WAL encoding and replay (#1111, #1113, #1119, #1121,
+  #1123, #1125, #1129, #1131, #1133, #1136).
+
+### Fixed
+
+- Exclude in-progress CloudSim WAL catalog staging files from backups
+  so a concurrent catalog update cannot invalidate the backup (#1108).
+
+### Compatibility and rollback
+
+- Rollback to 0.6.0 is supported. FORMAT 9 remains the default, FORMAT 10
+  remains opt-in, and the SST and WAL formats are unchanged from 0.6.0.
+  Databases written by 0.6.1 need no conversion to reopen with 0.6.0.
+
+## [0.6.0] - 2026-11-22
 
 ### Added
 
@@ -745,7 +767,9 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
   to the capabilities and qualification conditions in the support matrix; API,
   operational, and on-disk compatibility may change in a future 0.x minor release.
 
-[Unreleased]: https://github.com/cntryl/midge/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cntryl/midge/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/cntryl/midge/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/cntryl/midge/compare/v0.5.3...v0.6.0
 [0.3.0]: https://github.com/cntryl/midge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cntryl/midge/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/cntryl/midge/compare/v0.1.0...v0.1.1

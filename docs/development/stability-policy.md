@@ -2,10 +2,9 @@
 
 ## Current Status
 
-Midge 0.5.3 is the latest published crate. The 0.6.0 minor release adds an
-explicit, opt-in migration from FORMAT 9 to FORMAT 10. It is usable for
-evaluation and targeted deployments, but it is not yet making a blanket
-1.0-style production or compatibility promise.
+The Midge 0.6 line supports an explicit, opt-in migration from FORMAT 9
+to FORMAT 10. It is usable for evaluation and targeted deployments under
+the pre-1.0 compatibility policy below.
 
 ## What Pre-1.0 Means
 
