@@ -53,10 +53,11 @@ read-only preflight alone does not establish those properties. Local signer
 tests and Sqrzl qualification exercise the modeled contracts; deployment
 credentials, permissions and live Azure acceptance need separate evidence.
 
-The recommended deployment uses one unversioned bucket/container, with provider
-soft-delete retention disabled, and one database prefix. Midge keeps WAL, SST,
-metadata, and lease keys in disjoint namespaces beneath that prefix. Use a
-multi-location topology only when separate IAM, ownership, or lifecycle
+The recommended deployment uses one bucket or container and one database
+prefix. Midge keeps WAL, SST, metadata, and lease keys beneath that prefix.
+Keep versioning disabled by default. To use AWS Backup for S3, follow the
+[S3 versioning and lifecycle guidance](#s3-versioning-and-lifecycle).
+Use a multi-location topology only when separate IAM, ownership, or lifecycle
 boundaries are operationally valuable.
 
 ```rust,no_run
@@ -87,23 +88,22 @@ authoritative for those behaviors.
 
 The shared location contains `wal/`, `sst/`, `metadata/`,
 `wal/publication-catalog.v1.json`, `metadata/ddl.registry.json`, and
-`midge_primary_lease.json`. Configure the shared location without object
-versioning. Never point a writer at an empty control namespace while another
-writer can still hold a lease for the same database.
+`midge_primary_lease.json`. Keep all keys that the current recovery point
+references. Take the original writer out of service before routing traffic
+to a restored namespace, which has its own lease.
 
-Current provider-backed databases commit their mirrored local control files
-through the version 2 lease document. Each generation points to immutable
-copies of `FORMAT`, the manifest snapshot, journal, and intent log under
-`metadata/generations/`; the lease compare-and-swap is the publication step.
+Provider-backed databases fence writers with the lease. The committed
+metadata pointer selects the immutable metadata required for recovery.
+The [format compatibility policy](../development/format-compatibility.md)
+describes the current lease, pointer, and format gates.
 The remote DDL registry uses a strict version 2 document. On takeover, the new
 holder conditionally rewrites it with its lease epoch before recovery or serving
 requests; a delayed conditional write from the prior holder cannot land after
 that fence. A write that wins earlier is read and reconciled by the successor.
-The `metadata/authority-initialized.v1` marker is pending until the first lease
-is stored, then becomes permanent and active. An active marker prevents a
-missing lease object from being mistaken for a new database. Never delete the
-marker, lease document, or objects referenced by its committed
-generation. An unreferenced staged generation is not recovery authority.
+The `metadata/authority-initialized.v1` marker becomes permanent and active
+after the first lease and pointer claim complete. An active marker prevents a
+missing lease or pointer from being mistaken for a new database. Retain the
+marker, current lease and pointer, and objects selected by the pointer.
 
 An existing cloud database with a legacy lease and mutable `metadata/` files
 requires an **offline migration to a new, empty database prefix** before this
@@ -111,8 +111,8 @@ version can write it. Stop every old writer, use the previous binary to export
 the logical contents through its public API, then import them with this version
 into the new prefix and a fresh local cache. Preserve application data needed
 to reconstruct TTL expirations. Verify the imported data before switching
-clients, and retain the original prefix as the rollback copy. A V2 writer
-rejects a legacy lease; do not copy the legacy lease, DDL registry, or mutable
+clients, and retain the original prefix as the rollback copy. Current writers
+reject a legacy lease. Do not copy the legacy lease, DDL registry, or mutable
 metadata objects into the new prefix. There is no safe automatic in-place
 upgrade while an old writer might resume a metadata PUT.
 
@@ -170,7 +170,7 @@ Provider lifecycle policy is bucket/container provisioning, not a Midge data
 plane operation. Midge does not query, warn about, or reject provider
 versioning state. Prefer versioning disabled. If operators enable versioning,
 Midge exposes stable suffixes through `CloudObjectLayout` so provisioning can
-bound cleanup of noncurrent versions. Also disable GCS soft delete and Azure
+bound cleanup of noncurrent versions. Disable GCS soft delete and Azure
 Blob soft delete for the Midge location; otherwise deleted objects continue to
 consume storage until the provider retention period expires. GCS enables soft
 delete with a seven-day retention period on new buckets by default, unless an
@@ -182,21 +182,40 @@ bucket names, Midge automatically uses AWS path-style addressing for them. S3 Ex
 directory buckets, access-point ARNs, and their specialized endpoints are not
 supported by `CloudProviderConfig::aws_s3`.
 
-Provision lifecycle behavior by object class:
+### S3 versioning and lifecycle
 
-| Object class | Store | Lifecycle requirement |
-| --- | --- | --- |
-| `wal/` | WAL | Never age-expire current objects. Bound cleanup of noncurrent versions after Midge's guarded prune. |
-| `sst/` | SST | Never age-expire current objects. Give noncurrent versions a bounded recovery window. |
-| `metadata/` | control | Never age-expire current objects. Retain every immutable object named by the committed lease generation and the permanent authority marker. Bound cleanup of noncurrent versions only. |
-| `midge_primary_lease.json` | control | Keep the current lease document permanently; use the shortest practical noncurrent-version lifetime. |
+AWS Backup requires bucket versioning. For first-time enablement on an existing
+bucket, stop its writers so Midge lease renewals and background deletes pause.
+Allow [15 minutes for propagation][aws-enable-versioning] before resuming
+writes or deletes. Use the [backup and restore guide](../user-guides/backup-and-restore.md#aws-backup-for-s3)
+to choose and verify a recovery policy.
+
+Keep current Midge objects readable for as long as Midge needs them. Apply
+age-based expiration exclusively to **noncurrent** versions. The clock starts
+when an object is overwritten or deleted. This protects current WAL, SST,
+metadata, and fencing state even when those objects have old creation dates.
+
+| Keys under the database prefix | Noncurrent retention |
+| --- | --- |
+| Immutable WAL segments, SSTs, and metadata objects | Start with seven days if a week of object history is useful. Use age alone. A minimum number of newer versions can leave the only data version of a retired key in storage indefinitely. |
+| `midge_primary_lease.json` | Use a shorter window, such as one day, when the backup vault supplies the longer recovery window. At a 10-second renewal interval, one writer produces about 8,640 lease versions per day. |
+| WAL catalog copies and other mutable control objects | Choose a bounded window after measuring overwrite frequency and object size. The two catalog keys are rewritten as full objects, and AWS Backup can capture multiple versions of each. |
+
+Enable **expired object delete marker** cleanup so S3 removes a marker after
+the underlying versions are gone. Use a separate action for abandoned multipart
+uploads. Lifecycle acts asynchronously, so a days-based rule sets eligibility
+and allows the live version inventory to exceed a simple daily count estimate.
+Track noncurrent bytes, versions per key, and delete marker counts separately
+from the live database size. See the [S3 lifecycle rules][aws-lifecycle].
+
+### WAL authority and retirement
 
 The WAL store contains epoch-scoped immutable segment objects and two identical
 copies of the mutable publication authority document:
 `wal/publication-catalog.v1.json` and
 `wal/publication-catalog.v1.mirror.json`. The `v1` in these names is not the
-document's format version: current binaries read and write only catalog
-format version 2, described in the
+document's format version. Current binaries use catalog format version 3,
+described in the
 [format compatibility policy](../development/format-compatibility.md). Lease
 acquisition conditionally advances both catalog copies before recovery.
 Uploads are recoverable only after both copies converge on a conditional
@@ -207,14 +226,9 @@ referenced SST dependency has passed stable object proof.
 Midge then conditionally retires the matching catalog entry before best-effort
 deleting the now-ignored object; retirement removes only the catalog's oldest
 entries, in order. Missing, mismatched, changed, or timed-out proof
-retains catalog authority and the WAL object. Operators must not edit or
-reconstruct either catalog copy.
-
-Do not configure age-based expiration for current WAL, SST, or metadata
-objects. Their safe-deletion decision depends on manifest coverage and is owned
-by Midge. Lifecycle rules should remove only noncurrent versions and incomplete
-multipart uploads. A lifecycle rule bounds future cost; it does not remove
-already retained versions immediately.
+retains catalog authority and the WAL object. Restore the catalog copies from
+the same recovery point as metadata and data objects. An older primary
+catalog made current on its own can replace a newer mirror during repair.
 
 ## Qualification
 
@@ -228,6 +242,8 @@ Manual real-cloud integration testing validates Sqrzl fidelity and
 deployment-specific assumptions. When it exposes a provider difference, that
 behavior should be reproduced in Sqrzl and retained as a Midge regression test.
 Live cloud credentials are deliberately not required for ordinary repository CI.
+Before enabling versioning in production, test the selected lifecycle rules,
+writer takeover, WAL pruning, and compaction in a versioned test bucket.
 
 A Sqrzl pass is evidence for the protocol paths and failure scenarios it models;
 it is not evidence for a deployment's provider availability, IAM, quotas,
@@ -241,3 +257,6 @@ recovery error; do not remove database files as a generic fix.
 
 See the [durability contract](../user-guides/transaction-durability-contract.md)
 and [operator runbook](operator-runbook.md).
+
+[aws-enable-versioning]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/manage-versioning-examples.html
+[aws-lifecycle]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html
