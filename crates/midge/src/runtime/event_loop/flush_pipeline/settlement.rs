@@ -282,19 +282,30 @@ impl EventLoop {
         ) {
             attempted_cfs.insert(candidate.cf_id);
             if candidate.reason != crate::runtime::state::FlushReason::PendingImmutable {
-                match self.freeze_active_memtable(candidate.cf_id) {
-                    Ok(Some(_)) => frozen_count = frozen_count.saturating_add(1),
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(cf_id = candidate.cf_id, %error, "automatic freeze deferred");
-                    }
-                }
+                frozen_count = frozen_count.saturating_add(self.try_auto_freeze(candidate.cf_id));
+            }
+        }
+        if rule == crate::runtime::state::EventualFlush::WalBytes
+            && self.actors.cloud_coordinator.hybrid_storage.is_none()
+        {
+            if let Some(cf_id) = self.state.aggregate_pressure_flush_family(&attempted_cfs) {
+                frozen_count = frozen_count.saturating_add(self.try_auto_freeze(cf_id));
             }
         }
         self.schedule_next_flush_worker();
         self.drain_inline_flush_worker();
         self.refresh_write_stall_timing();
         frozen_count
+    }
+
+    fn try_auto_freeze(&mut self, cf_id: u32) -> usize {
+        match self.freeze_active_memtable(cf_id) {
+            Ok(flush_id) => usize::from(flush_id.is_some()),
+            Err(error) => {
+                tracing::warn!(cf_id, %error, "automatic freeze deferred");
+                0
+            }
+        }
     }
 
     pub(in crate::runtime::event_loop) fn refresh_write_stall_timing(&mut self) {

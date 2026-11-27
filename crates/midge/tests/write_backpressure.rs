@@ -217,3 +217,68 @@ fn should_clear_dropped_family_debt_while_an_old_snapshot_pins_its_ssts() -> Mid
     drop(snapshot);
     engine.shutdown(Duration::from_secs(10))
 }
+
+#[test]
+fn should_clear_aggregate_memtable_pressure_when_local_writers_go_idle() -> MidgeResult<()> {
+    // Arrange: each of three families stays below its own flush threshold.
+    const VALUE_BYTES: usize = 32 * 1024;
+    const WAIT: Duration = Duration::from_secs(5);
+    let directory = tempfile::tempdir()?;
+    let options = OpenOptions::local(directory.path())
+        .memory_budget(cntryl_midge::MemoryBudget::Bytes(64 * 1024 * 1024))
+        .with_memtable_flush_threshold(1024 * 1024)
+        .background_compaction(false)
+        .build()?;
+    let mut engine = Engine::open(options.clone())?;
+    let families = [
+        engine.get_column_family("default").unwrap(),
+        engine.create_column_family("pressure-one")?,
+        engine.create_column_family("pressure-two")?,
+    ];
+    let mut acknowledged = [None; 3];
+    let mut wait_family = families[0].id();
+
+    // Act: overwrite the same key in each family and stop writing at the
+    // first stall or after enough writes to cross the aggregate limit.
+    for version in 0_u8..72 {
+        let index = usize::from(version) % families.len();
+        wait_family = families[index].id();
+        let result = (|| {
+            let mut tx = engine.begin_tx(wait_family, TransactionMode::ReadWrite)?;
+            tx.put(b"hot".to_vec(), vec![version; VALUE_BYTES], None)?;
+            tx.commit(WriteOptions::sync())
+        })();
+        match result {
+            Ok(()) => acknowledged[index] = Some(version),
+            Err(MidgeError::WriteStall(_)) => break,
+            Err(error) => return Err(error),
+        }
+    }
+
+    // Assert: admission reopens without additional writes or an explicit flush.
+    assert!(
+        engine.wait_for_write_stall_clear(wait_family, WAIT)?,
+        "aggregate memtable pressure did not clear while writers were idle"
+    );
+    assert!(engine.metrics().get_runtime_metrics()?.sst_count > 0);
+    write(&engine, 0)?;
+    let verify = |engine: &Engine| -> MidgeResult<()> {
+        for (family, version) in families.iter().zip(acknowledged) {
+            let expected = vec![version.expect("each family accepted writes"); VALUE_BYTES];
+            let read = engine.begin_tx(family.id(), TransactionMode::ReadOnly)?;
+            assert_eq!(read.get(b"hot")?.as_deref(), Some(expected.as_slice()));
+        }
+        let read = engine.begin_tx(families[0].id(), TransactionMode::ReadOnly)?;
+        assert_eq!(
+            read.get(&0_u32.to_be_bytes())?.as_deref(),
+            Some(b"value".as_slice())
+        );
+        Ok(())
+    };
+    verify(&engine)?;
+    engine.shutdown(WAIT)?;
+    drop(engine);
+    let mut reopened = Engine::open(options)?;
+    verify(&reopened)?;
+    reopened.shutdown(WAIT)
+}

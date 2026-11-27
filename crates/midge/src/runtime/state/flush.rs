@@ -228,8 +228,43 @@ impl RuntimeState {
             .filter(|cf| cf.partially_applied_commit().is_some())
             .map(|cf| cf.memtable.size_bytes())
             .fold(0_usize, usize::saturating_add);
-        self.total_memtable_bytes.saturating_sub(held)
-            >= self.limits.memtable_flush_threshold.saturating_mul(2)
+        self.total_memtable_bytes.saturating_sub(held) >= self.total_memtable_hard_limit()
+    }
+
+    fn total_memtable_hard_limit(&self) -> usize {
+        self.limits.memtable_flush_threshold.saturating_mul(2)
+    }
+
+    pub(crate) fn aggregate_pressure_flush_family(
+        &self,
+        attempted_cfs: &HashSet<u32>,
+    ) -> Option<u32> {
+        let limit = self.total_memtable_hard_limit();
+        if self.total_memtable_bytes < limit {
+            return None;
+        }
+
+        // Count the bytes that would still be charged after all existing
+        // immutables publish. Freeze only if that relief would be insufficient.
+        let mut active_bytes = 0_usize;
+        let mut largest = None;
+        for (&cf_id, cf) in &self.column_families {
+            if cf.partially_applied_commit().is_some() {
+                continue;
+            }
+            let bytes = cf.memtable.size_bytes();
+            active_bytes = active_bytes.saturating_add(bytes);
+            if bytes > 0
+                && cf.immutable_flushes.is_empty()
+                && !self.is_immutable_memtable_queue_full(cf_id)
+                && !attempted_cfs.contains(&cf_id)
+            {
+                largest = largest.max(Some((bytes, std::cmp::Reverse(cf_id))));
+            }
+        }
+        largest
+            .filter(|_| active_bytes >= limit)
+            .map(|(_, std::cmp::Reverse(cf_id))| cf_id)
     }
 
     /// Maximum number of published or reserved L0 generations for one column
