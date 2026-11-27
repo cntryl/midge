@@ -3,6 +3,7 @@
 use bytes::{Buf, Bytes};
 use cntryl_midge_core::codec::compress_wal_value;
 use cntryl_midge_durability::wal::encoding::{decode, decode_view, encode, encode_into};
+use cntryl_midge_durability::wal::sequenced::SequencedWalUnit;
 use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -185,4 +186,47 @@ fn should_consume_only_contiguous_input_when_wal_decode_rejects_payload() {
     assert_eq!(truncated, b"");
     assert!(split_result.is_err());
     assert_eq!(split.remaining(), 2);
+}
+
+#[test]
+fn should_allocate_only_the_payload_when_sizing_and_encoding_a_sequenced_batch() {
+    // Arrange
+    let mut record = WalRecord::new_cf(
+        7,
+        WalOpKind::Put,
+        Bytes::from_static(b"key"),
+        Some(Bytes::from_static(b"value")),
+        20,
+    );
+    record.txn_id = Some(4);
+    let batch = SequencedWalUnit {
+        txn_id: 4,
+        begin_sequence: 19,
+        commit_sequence: 21,
+        cf_id: 7,
+        operations: vec![record],
+    };
+    let mut len = 0;
+    let mut encoded = None;
+
+    // Act
+    let sizing_allocations = measured_allocations(|| {
+        len = batch.nested_payload_len().expect("size sequenced batch");
+    });
+    let encoding_allocations = measured_allocations(|| {
+        encoded = Some(batch.encode_record().expect("encode sequenced batch"));
+    });
+
+    // Assert
+    let payload = encoded
+        .expect("encoded batch")
+        .value
+        .expect("batch payload");
+    let expected = b"TB\x01\
+        \x04\0\0\0\0\0\0\0\x13\0\0\0\0\0\0\0\x15\0\0\0\0\0\0\0\x01\0\0\0\
+        \0\x07\0\0\0\x14\0\0\0\0\0\0\0\0\x03\0\0\0key\x01\x05\0\0\0value\0";
+    assert_eq!(payload.as_ref(), expected);
+    assert_eq!(payload.len(), len);
+    assert_eq!(sizing_allocations, 0);
+    assert_eq!(encoding_allocations, 1);
 }
