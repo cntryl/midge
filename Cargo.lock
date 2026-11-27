@@ -244,7 +244,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cntryl-midge"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "cntryl-midge-core"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "cntryl-stress",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "cntryl-midge-durability"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "cntryl-midge-storage"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "cntryl-midge-table"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arc-swap",
  "bytes",

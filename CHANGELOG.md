@@ -9,6 +9,29 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-27
+
+### Fixed
+
+- Automatically flush a local memtable when aggregate pressure stalls writes
+  across column families, even when each family is below its own flush
+  threshold (#1141, #1144).
+
+### Changed
+
+- Iterate candidate SST blocks without allocating a temporary list (#1139).
+- Move the engine and CLI crate to `crates/midge`. Local Cargo path
+  dependencies must use the new crate path (#1140).
+
+### Documentation
+
+- Document S3 backup and point-in-time recovery procedures (#1138).
+
+### Compatibility and rollback
+
+- Rollback to 0.6.1 is supported. FORMAT 9 remains the default, FORMAT 10
+  remains opt-in, and the SST and WAL formats are unchanged.
+
 ## [0.6.1] - 2026-11-27
 
 ### Changed
