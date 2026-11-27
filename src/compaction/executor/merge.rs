@@ -79,12 +79,12 @@ struct EventMergeInput<'a> {
     cursor: CompactionEventCursor<'a>,
 }
 
-struct RetainedEvent {
-    event: CompactionEvent,
+pub(super) struct BudgetedEvent {
+    pub(super) event: CompactionEvent,
     _reservation: cntryl_midge_core::common::resource_budget::ResourceReservation,
 }
 
-impl RetainedEvent {
+impl BudgetedEvent {
     fn new(
         event: CompactionEvent,
         budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
@@ -105,7 +105,7 @@ impl RetainedEvent {
 /// Heap item that orders compaction versions by key ascending and sequence
 /// descending. `BinaryHeap` is a max heap, so the key ordering is inverted.
 struct VersionHeapItem {
-    retained: RetainedEvent,
+    retained: BudgetedEvent,
     input_idx: usize,
 }
 
@@ -176,7 +176,7 @@ impl<'a> EventMergeIterator<'a> {
             let current = cursor
                 .next()
                 .transpose()?
-                .map(|event| RetainedEvent::new(event, &budget))
+                .map(|event| BudgetedEvent::new(event, &budget))
                 .transpose()?;
             if let Some(retained) = current {
                 heap.push(VersionHeapItem {
@@ -196,7 +196,7 @@ impl<'a> EventMergeIterator<'a> {
         })
     }
 
-    pub(super) fn next_event(&mut self) -> MidgeResult<Option<CompactionEvent>> {
+    pub(super) fn next_event(&mut self) -> MidgeResult<Option<BudgetedEvent>> {
         let Some(mut head) = self.heap.peek_mut() else {
             return Ok(None);
         };
@@ -207,7 +207,7 @@ impl<'a> EventMergeIterator<'a> {
         })?;
         ensure_compaction_not_aborted(self.abort_check)?;
         let current = if let Some(next) = input.cursor.next().transpose()? {
-            let next = RetainedEvent::new(next, &self.budget)?;
+            let next = BudgetedEvent::new(next, &self.budget)?;
             // Dropping PeekMut repairs the heap once after replacement. The
             // key used for comparisons lives in the retained event itself.
             std::mem::replace(&mut head.retained, next)
@@ -215,7 +215,8 @@ impl<'a> EventMergeIterator<'a> {
             std::collections::binary_heap::PeekMut::pop(head).retained
         };
 
-        Ok(Some(current.event))
+        // Carry the heap reservation into the caller's key group.
+        Ok(Some(current))
     }
 
     pub(super) fn peek_event(&self) -> Option<&CompactionEvent> {
@@ -485,7 +486,7 @@ pub(crate) fn merge_repair_inputs_to_run(
     ensure_compaction_not_aborted(abort_check)?;
     let mut writer = sst_factory.create_for_compaction(budget.clone())?;
     let mut seen = 0usize;
-    while let Some(event) = merged.next_event()? {
+    while let Some(event) = merged.next_event()?.map(|retained| retained.event) {
         if seen.is_multiple_of(1024) {
             ensure_compaction_not_aborted(abort_check)?;
         }

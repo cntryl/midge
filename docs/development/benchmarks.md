@@ -6,6 +6,8 @@ benchmarks live with their owning packages under `crates/`.
 
 For regression thresholds, cloud and hybrid guardrails, and external LSM
 comparison rules, see [Performance Targets](performance-targets.md).
+For previously evaluated leads and the evidence needed to reopen them, see
+[Optimization Decisions](optimization-decisions.md).
 
 ## Running Benchmarks
 
