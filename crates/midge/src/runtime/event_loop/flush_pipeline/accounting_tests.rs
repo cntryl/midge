@@ -50,6 +50,27 @@ impl Fixture {
             .expect("nonempty actual memtable"))
     }
 
+    fn seed_active(&mut self, cf_id: u32, end_key_bytes: usize) -> MidgeResult<usize> {
+        let state = &mut self.event_loop.state;
+        state.sequence += 1;
+        let memtable = &state.get_cf(cf_id).expect("family exists").memtable;
+        // Range tombstones have deterministic accounting across families.
+        memtable.delete_range_with_seq(b"a", &vec![b'z'; end_key_bytes], state.sequence)?;
+        let size = memtable.size_bytes();
+        state.recompute_total_memtable_bytes();
+        Ok(size)
+    }
+
+    fn seed_aggregate_limit(&mut self) -> MidgeResult<usize> {
+        let size = self.seed_active(0, 1024)?;
+        for name in ["one", "two", "three"] {
+            let family = self.event_loop.state.create_cf(name.to_string())?;
+            assert_eq!(self.seed_active(family, 1024)?, size);
+        }
+        self.event_loop.state.limits.memtable_flush_threshold = size * 2;
+        Ok(size * 4)
+    }
+
     fn snapshot(&self) -> Snapshot {
         self.event_loop
             .state
@@ -108,6 +129,119 @@ impl Fixture {
         );
         Ok(())
     }
+}
+
+#[test]
+fn should_reopen_admission_only_on_publication_when_active_bytes_equal_aggregate_limit(
+) -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new(8 * 1024 * 1024)?;
+    let limit = fixture.seed_aggregate_limit()?;
+    let event_loop = &mut fixture.event_loop;
+    let owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
+    assert!(event_loop
+        .publication
+        .publication_gate
+        .try_acquire(owner.clone()));
+    let slots_before = event_loop.state.l0_slot_usage(0);
+    event_loop.state.limits.memtable_flush_threshold += 1;
+    assert_eq!(event_loop.drain_auto_flush_memtables(), 0);
+    assert!(!event_loop.should_stall_writes(0));
+    event_loop.state.limits.memtable_flush_threshold -= 1;
+
+    // Act: hit the exact limit while publication is blocked.
+    assert_eq!(event_loop.drain_auto_flush_memtables(), 1);
+
+    // Assert: the oldest family ID wins the size tie, and moving the
+    // generation to the immutable queue preserves its charges.
+    assert!(event_loop.column_family_flush_pipeline_active(0));
+    assert_eq!(event_loop.state.total_memtable_bytes, limit);
+    assert_eq!(event_loop.state.l0_slot_usage(0), slots_before);
+    assert!(event_loop.should_stall_writes(0));
+    assert!(event_loop.state.manifest.files.is_empty());
+    event_loop.publication.publication_gate.release(&owner);
+    assert_eq!(event_loop.drain_auto_flush_memtables(), 0);
+    assert_eq!(event_loop.state.total_memtable_bytes, limit * 3 / 4);
+    assert_eq!(event_loop.state.l0_slot_usage(0), slots_before);
+    assert!(!event_loop.should_stall_writes(0));
+    assert_eq!(event_loop.state.manifest.files.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn should_use_owned_immutable_when_its_publication_can_clear_aggregate_pressure() -> MidgeResult<()>
+{
+    // Arrange: the worker already owns enough bytes to clear the stall.
+    let mut fixture = Fixture::new(8 * 1024 * 1024)?;
+    fixture.seed_aggregate_limit()?;
+    let event_loop = &mut fixture.event_loop;
+    let flush_id = event_loop
+        .freeze_active_memtable(0)?
+        .expect("active writes");
+    event_loop.schedule_next_flush_worker();
+    assert!(event_loop.actors.flush_actor.owns_pipeline(0, flush_id));
+    assert!(event_loop.should_stall_writes(0));
+
+    // Act
+    let frozen = event_loop.drain_auto_flush_memtables();
+
+    // Assert
+    assert_eq!(frozen, 0);
+    assert!(!event_loop.should_stall_writes(0));
+    assert_eq!(event_loop.state.manifest.files.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn should_publish_largest_eligible_family_when_partly_applied_and_backed_off_families_are_larger(
+) -> MidgeResult<()> {
+    // Arrange: the largest families have a partial apply or older retry.
+    let mut fixture = Fixture::new(8 * 1024 * 1024)?;
+    let backed_off = fixture.event_loop.state.create_cf("backed-off".into())?;
+    let eligible = fixture.event_loop.state.create_cf("eligible".into())?;
+    let smaller = fixture.event_loop.state.create_cf("smaller".into())?;
+    fixture.seed_active(backed_off, 512)?;
+    let flush_id = fixture
+        .event_loop
+        .freeze_active_memtable(backed_off)?
+        .expect("active writes");
+    fixture.event_loop.fail_flush_pipeline(
+        flush_id,
+        None,
+        &MidgeError::Busy("retry the flush".into()),
+    );
+    fixture
+        .event_loop
+        .state
+        .immutable_flush_by_id_mut(flush_id)
+        .expect("retained immutable")
+        .1
+        .retry
+        .defer_for(Duration::from_secs(60));
+    fixture.seed_active(0, 1280)?;
+    let backed_off_size = fixture.seed_active(backed_off, 1152)?;
+    let eligible_size = fixture.seed_active(eligible, 1024)?;
+    let smaller_size = fixture.seed_active(smaller, 896)?;
+    let event_loop = &mut fixture.event_loop;
+    let state = &mut event_loop.state;
+    let partial_commit = state.sequence;
+    state
+        .get_cf_mut(0)
+        .expect("default family")
+        .mark_partially_applied(partial_commit);
+    state.limits.memtable_flush_threshold = (backed_off_size + eligible_size + smaller_size) / 2;
+    assert!(event_loop.should_stall_writes(eligible));
+
+    // Act
+    let frozen = event_loop.drain_auto_flush_memtables();
+
+    // Assert: only the largest safe family published and reopened admission.
+    assert_eq!(frozen, 1);
+    assert_eq!(event_loop.state.manifest.files.len(), 1);
+    assert_eq!(event_loop.state.manifest.files[0].cf_id, eligible);
+    assert!(event_loop.state.immutable_flush_by_id(flush_id).is_some());
+    assert!(!event_loop.should_stall_writes(eligible));
+    Ok(())
 }
 
 fn ordinary(snapshot: &Snapshot) -> &cntryl_midge_durability::metadata::accounting::Counters {
