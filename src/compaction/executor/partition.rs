@@ -1120,22 +1120,38 @@ pub(crate) fn write_fragmented_compaction_outputs(
     Ok(names)
 }
 
-/// Merge, normalize, deduplicate, and write target-sized compaction partitions
-/// without materializing a second deduplicated result vector.
-#[allow(clippy::too_many_arguments)]
+enum KeyEventGroup {
+    One(BudgetedEvent),
+    Many(Vec<BudgetedEvent>),
+}
+
+impl KeyEventGroup {
+    fn as_slice(&self) -> &[BudgetedEvent] {
+        match self {
+            Self::One(event) => std::slice::from_ref(event),
+            Self::Many(events) => events,
+        }
+    }
+}
+
 fn collect_same_key_events(
     merged: &mut EventMergeIterator<'_>,
     first: CompactionEvent,
-    key: &[u8],
     budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
     seen: &mut usize,
     abort_check: Option<&dyn Fn() -> bool>,
-) -> MidgeResult<Vec<BudgetedEvent>> {
-    let mut events = vec![BudgetedEvent::new(first, budget)?];
-    while merged
+) -> MidgeResult<KeyEventGroup> {
+    let first = BudgetedEvent::new(first, budget)?;
+    if merged
         .peek_event()
-        .is_some_and(|candidate| candidate.key() == key)
+        .is_none_or(|candidate| candidate.key() != first.event.key())
     {
+        return Ok(KeyEventGroup::One(first));
+    }
+
+    let mut events = Vec::with_capacity(2);
+    events.push(first);
+    loop {
         let event = merged
             .next_event()?
             .expect("peeked compaction event exists");
@@ -1144,8 +1160,13 @@ fn collect_same_key_events(
         if seen.is_multiple_of(1024) {
             ensure_compaction_not_aborted(abort_check)?;
         }
+        if merged
+            .peek_event()
+            .is_none_or(|candidate| candidate.key() != events[0].event.key())
+        {
+            return Ok(KeyEventGroup::Many(events));
+        }
     }
-    Ok(events)
 }
 
 fn range_starts(events: &[BudgetedEvent]) -> impl Iterator<Item = &RangeTombstone> + Clone {
@@ -1168,6 +1189,8 @@ pub(crate) struct PartitionOutputConfig<'a> {
     pub grandparent_overlap_rolls: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
+/// Merge, normalize, deduplicate, and write target-sized compaction partitions
+/// without materializing a second deduplicated result vector.
 pub(crate) fn write_partitioned_compaction_outputs(
     sst_factory: &dyn SstFactory,
     output_dir: &Path,
@@ -1211,21 +1234,16 @@ pub(crate) fn write_partitioned_compaction_outputs(
             ensure_compaction_not_aborted(abort_check)?;
         }
         seen = seen.saturating_add(1);
-        let event_key = first_event.key().to_vec();
-        let key_events = collect_same_key_events(
-            &mut merged,
-            first_event,
-            &event_key,
-            budget,
-            &mut seen,
-            abort_check,
-        )?;
+        let group =
+            collect_same_key_events(&mut merged, first_event, budget, &mut seen, abort_check)?;
+        let key_events = group.as_slice();
+        let event_key = key_events[0].event.key();
 
         let (selected_version, starts) =
-            select_partition_key_output(&key_events, &mut tombstones, config.tombstone_gc)?;
+            select_partition_key_output(key_events, &mut tombstones, config.tombstone_gc)?;
 
         let has_output = roller.partition_point_count > 0 || tombstones.has_partition_tombstones();
-        let grandparent_roll = has_output && overlap.should_roll(&event_key);
+        let grandparent_roll = has_output && overlap.should_roll(event_key);
         if roller.should_roll(
             selected_version,
             starts.clone(),
@@ -1239,12 +1257,12 @@ pub(crate) fn write_partitioned_compaction_outputs(
                 }
             }
             let (finished, boundary_reservation) =
-                roller.finish_for_roll(&event_key, &tombstones, abort_check)?;
+                roller.finish_for_roll(event_key, &tombstones, abort_check)?;
             let partition_emitted = finished.is_some();
             cleanup.record_finished_partition(finished, &mut output_names, budget, output_sink)?;
             ensure_compaction_not_aborted(abort_check)?;
             roller.start_next_partition(
-                event_key.clone(),
+                event_key.to_vec(),
                 boundary_reservation,
                 &mut tombstones,
                 partition_emitted,
@@ -1264,7 +1282,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
         }
         roller.ensure_current_fits(&tombstones)?;
         if roller.partition_point_count > 0 || tombstones.has_partition_tombstones() {
-            overlap.observe(&event_key)?;
+            overlap.observe(event_key)?;
         }
     }
 
