@@ -87,6 +87,39 @@ fn should_bound_point_decoding_to_one_restart_interval_after_binary_search() -> 
 }
 
 #[test]
+fn should_reject_an_entry_that_crosses_a_restart_offset() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let reader = unique_reader(&directory)?;
+    let block = reader.read_block(&reader.index_entries()?.handle(0))?;
+    let layout = DataBlockLayout::read(&block)?;
+    let (offset, continued) = layout.restart(1)?;
+    assert!(!continued);
+    let mut malformed = block.to_vec();
+    let trailer_word = layout.data_end + 4;
+    malformed[trailer_word..trailer_word + 4].copy_from_slice(
+        &u32::try_from(offset - 1)
+            .expect("offset fits in a restart word")
+            .to_le_bytes(),
+    );
+    let block = Bytes::from(malformed);
+    let mut decoder = BlockEntryDecoder::default();
+
+    // Act
+    for sequence in 1..16 {
+        let entry = decoder
+            .next(&block, SST_FORMAT_V5, None, "test decoder key")?
+            .expect("entry before the malformed restart");
+        assert_eq!(entry.sequence, sequence);
+    }
+    let result = decoder.next(&block, SST_FORMAT_V5, None, "test decoder key");
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    Ok(())
+}
+
+#[test]
 fn should_preserve_snapshot_visibility_across_restart_intervals_in_both_directions(
 ) -> MidgeResult<()> {
     // Arrange: the target begins mid-interval and spans eight restarts.

@@ -5,10 +5,19 @@
 //! and candidate source revisions; it does not infer a format delta in-run.
 
 use cntryl_midge::{
-    __internal::sst::PointLookupReaderForBenchmarks, Engine, OpenOptions, TransactionMode,
+    __internal::sst::PointLookupReaderForBenchmarks, Bytes, Engine, OpenOptions, TransactionMode,
     WriteOptions,
 };
+use cntryl_midge_core::{
+    io::RealFs,
+    types::{EntryType, KeyState},
+};
+use cntryl_midge_table::sst::{
+    fs::finish_writer_to_path, fs::SstFileIo, FsSstFactoryIo, SstFactory,
+};
 use cntryl_stress::{stress, stress_main, ObservationDirection, ObservationUnit, StressContext};
+use std::hint::black_box;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -267,6 +276,134 @@ fn run(ctx: &mut StressContext) {
 )]
 fn tier4_system_sst_v5(ctx: &mut StressContext) {
     run(ctx);
+}
+
+const BLOCK_LOOKUPS: usize = 64;
+const BLOCK_REPEATED_KEY: u64 = BLOCK_LOOKUPS as u64;
+const BLOCK_LATEST_SEQ: u64 = BLOCK_REPEATED_KEY + REPEATED_VERSIONS as u64;
+
+#[derive(Clone, Copy)]
+struct BlockProbe {
+    key: [u8; 16],
+    snapshot: u64,
+    sequence: u64,
+}
+
+fn prepare_data_block(directory: &TempDir) -> (SstFileIo, Bytes) {
+    let fs = Arc::new(RealFs::new(directory.path()).expect("open fixture root"));
+    let factory = FsSstFactoryIo::new(fs.clone(), 64 * 1024);
+    let mut writer = factory.create().expect("create fixture SST");
+    for index in 0..BLOCK_REPEATED_KEY {
+        let sequence = index + 1;
+        writer
+            .add_sorted_with_meta(
+                &key(index),
+                Some(&value(sequence)),
+                sequence,
+                EntryType::Put,
+                None,
+            )
+            .expect("add unique fixture key");
+    }
+    let repeated_key = key(BLOCK_REPEATED_KEY);
+    for sequence in (BLOCK_REPEATED_KEY + 1..=BLOCK_LATEST_SEQ).rev() {
+        writer
+            .add_sorted_with_meta(
+                &repeated_key,
+                Some(&value(sequence)),
+                sequence,
+                EntryType::Put,
+                None,
+            )
+            .expect("add repeated fixture version");
+    }
+    writer
+        .add_range_tombstone(b"zrange/start", b"zrange/stop", 1)
+        .expect("add fixture range metadata outside the probe keys");
+    let filename = "point-decoder.sst";
+    finish_writer_to_path(writer, &directory.path().join(filename)).expect("finish fixture SST");
+    let reader = SstFileIo::open(filename, fs).expect("open fixture SST");
+    let block = reader
+        .decoder_fixture_blocks()
+        .expect("preload fixture block")
+        .data;
+    (reader, block)
+}
+
+fn measure_block_probes(
+    ctx: &mut StressContext,
+    name: &str,
+    reader: &SstFileIo,
+    block: &Bytes,
+    probes: &[BlockProbe; BLOCK_LOOKUPS],
+) {
+    let mut decoded = 0;
+    for probe in probes {
+        let (state, entries) = reader
+            .key_state_from_encoded_block_with_stats(block, &probe.key, probe.snapshot)
+            .expect("validate in-memory point probe");
+        assert_eq!(
+            state,
+            KeyState::Value(
+                Bytes::copy_from_slice(&value(probe.sequence)),
+                probe.sequence,
+                None,
+                EntryType::Put
+            )
+        );
+        decoded += entries;
+    }
+    let _ = ctx.measure_batch(name, BLOCK_LOOKUPS as u64, || {
+        for probe in black_box(probes) {
+            black_box(
+                reader
+                    .key_state_from_encoded_block_with_stats(block, &probe.key, probe.snapshot)
+                    .expect("decode in-memory point probe"),
+            );
+        }
+    });
+    ctx.record_observation(
+        "entries_decoded_per_batch",
+        exact_metric_value(decoded),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+}
+
+#[stress(
+    tier = 4,
+    role = "diagnostic",
+    metadata(component = "sst_format", scenario = "v5_in_memory_point_decode")
+)]
+fn sst_v5_in_memory_point_lookups(ctx: &mut StressContext) {
+    ctx.parameter("logical_unit", "point_lookup");
+    let directory = TempDir::new().expect("create SST block fixture directory");
+    let (reader, block) = prepare_data_block(&directory);
+    let unique = std::array::from_fn(|index| {
+        let index = u64::try_from(index).expect("fixture key fits in u64");
+        BlockProbe {
+            key: key(index),
+            snapshot: u64::MAX,
+            sequence: index + 1,
+        }
+    });
+    let repeated_key = key(BLOCK_REPEATED_KEY);
+    let latest = [BlockProbe {
+        key: repeated_key,
+        snapshot: u64::MAX,
+        sequence: BLOCK_LATEST_SEQ,
+    }; BLOCK_LOOKUPS];
+    let old = std::array::from_fn(|index| {
+        let sequence = BLOCK_REPEATED_KEY + 1 + u64::try_from(index).expect("snapshot fits in u64");
+        BlockProbe {
+            key: repeated_key,
+            snapshot: sequence,
+            sequence,
+        }
+    });
+    measure_block_probes(ctx, "in_memory_unique_key", &reader, &block, &unique);
+    measure_block_probes(ctx, "in_memory_latest_version", &reader, &block, &latest);
+    measure_block_probes(ctx, "in_memory_old_snapshot", &reader, &block, &old);
 }
 
 stress_main!();
