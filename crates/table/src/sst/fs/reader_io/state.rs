@@ -192,8 +192,13 @@ impl SstFileIo {
             .map(|(state, _)| state)
     }
 
+    /// Read a key from a preloaded data block and report the entries decoded.
+    ///
+    /// # Errors
+    /// Returns an error if the block cannot be decoded or versions disagree.
     #[cfg(any(test, feature = "internal-testing"))]
-    pub(super) fn key_state_from_encoded_block_with_stats(
+    #[doc(hidden)]
+    pub fn key_state_from_encoded_block_with_stats(
         &self,
         block_data: &Bytes,
         key: &[u8],
