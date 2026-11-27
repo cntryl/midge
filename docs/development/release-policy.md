@@ -4,25 +4,17 @@ This document defines how Midge moves from development builds to release candida
 
 ## Branching Model
 
-- `develop` (default): active development; feature and fix PRs target this branch and are squash merged after CI passes
-- `main`: release branch; promote only through a PR from this repository's `develop` branch, using a merge commit to preserve the tested commit history
-- `release-candidate/*`: optional release hardening branches; merge their changes into `develop` before promotion, with frozen durability semantics and format/API changes
+- `main`: default and release branch. Squash-merge PRs after checks pass on their current head.
+- `release-candidate/*`: optional release hardening branches with frozen durability semantics and format/API changes. Merge through a PR into `main`.
 - tagged releases: create tags from commits on `main` only after qualification and release checks pass
 
 CI on Ubuntu, Cloud against Sqrzl, and GitHub-managed CodeQL run on PRs into
-`develop` and promotion PRs into `main`. Verify that each promotion PR
-comes from this repository's `develop` branch. Require passing checks on the
-current PR head before merging; verify the resulting `main` checks before
-tagging or publishing. The manually dispatched **Release Qualification**
+`main`. Verify the resulting `main` checks before tagging or publishing.
+The manually dispatched **Release Qualification**
 workflow combines CI, macOS tests, clean all-feature Sqrzl tests,
 package/compatibility checks and bounded fuzzing on the selected candidate
-commit. Scheduled qualification tests the default `develop` revision. Run
-Release Qualification on the resulting `main` commit before publishing it.
-
-Promote one PR at a time against the latest `main`. Promotion checks run on
-the proposed merge commit. The `main` ruleset does not require `develop` to
-contain the previous promotion's merge commit, because that commit exists
-only on `main` after a release promotion.
+commit. Run Release Qualification on the resulting `main` commit before
+publishing it.
 
 ## Versioning Rules
 

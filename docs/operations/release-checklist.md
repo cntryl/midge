@@ -59,10 +59,9 @@ mandatory qualification jobs remain required.
 ## Review promotion and release evidence
 
 - [ ] **Release Qualification** passed on the candidate SHA; run link and artifacts reviewed
-- [ ] development work is merged into `develop` with passing current-head CI
-- [ ] the `develop` → `main` promotion PR comes from this repository's `develop` branch and has passing CI, Cloud, and GitHub-managed CodeQL checks on its current head
-- [ ] the promotion uses a merge commit and post-merge `main` checks pass
-- [ ] the release tag points to a commit on `main`
+- [ ] the release PR has passing CI, Cloud, and GitHub-managed CodeQL checks on its current head
+- [ ] the release PR is squash-merged and post-merge `main` checks pass
+- [ ] after publishing, the release tag points to the qualified commit on `main`
 
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`
@@ -74,7 +73,7 @@ mandatory qualification jobs remain required.
 - [ ] `cargo test --workspace --all-features --doc`
 - [ ] `cargo check --example documented_quick_start --all-features`
 - [ ] `cargo machete`
-- [ ] `cargo package --locked`
+- [ ] `cargo package --workspace --locked`
 - [ ] with the local Sqrzl fixture running, `docker build --network=host --file Dockerfile.tests --tag midge-tests:release .`
 - [ ] `cargo test --test fault_injection --all-features -- --test-threads=1`
 - [ ] `cntryl-tools validate-tests`
@@ -99,5 +98,14 @@ mandatory qualification jobs remain required.
 - [ ] rollback statement added to release notes
 - [ ] supported/stable matrix reviewed
 - [ ] known-risk summary attached
+
+## Publish the workspace
+
+Confirm that `main` is clean and points to the qualified commit. Read the
+version from Cargo metadata and confirm that all five packages share it.
+`cargo publish --workspace --locked` publishes the workspace in dependency
+order. Verify every package version on crates.io before tagging the qualified
+commit. If publication stops partway through, check the registry to identify
+which uploads succeeded before retrying.
 
 Do not call a release production-ready unless qualification evidence is attached and the support matrix says the targeted topology is in scope.

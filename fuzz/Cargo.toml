@@ -1,9 +1,10 @@
 [package]
 name = "cntryl-midge-fuzz"
 version = "0.0.0"
-publish = false
 edition = "2021"
+publish = false
 
+# Keep cargo-fuzz and its targets in a separate workspace from the release crates.
 [workspace]
 
 [package.metadata]
@@ -14,10 +15,10 @@ cargo-fuzz = true
 ignored = ["bytes"]
 
 [dependencies]
-libfuzzer-sys = "0.4"
-tempfile = "3.27"
 bytes = "1.12"
 cntryl-midge = { path = "..", features = ["internal-testing"] }
+libfuzzer-sys = "0.4"
+tempfile = "3.27"
 
 [[bin]]
 name = "wal_frame_recovery"

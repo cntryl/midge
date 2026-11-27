@@ -3,10 +3,10 @@ name = "cntryl-midge"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-autobenches = false
 description = "A high-performance embedded key-value database with LSM-tree storage"
 license.workspace = true
 repository.workspace = true
+autobenches = false
 readme = "README.md"
 keywords = ["database", "kv", "lsm", "embedded", "storage"]
 categories = ["database-implementations"]
@@ -16,7 +16,7 @@ members = ["crates/core", "crates/table", "crates/storage", "crates/durability"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
@@ -24,10 +24,10 @@ repository = "https://github.com/cntryl/midge"
 
 [workspace.dependencies]
 # Keep version requirements for these path dependencies aligned with workspace.package.version.
-cntryl-midge-core = { version = "=0.6.0", path = "crates/core" }
-cntryl-midge-durability = { version = "=0.6.0", path = "crates/durability", default-features = false }
-cntryl-midge-storage = { version = "=0.6.0", path = "crates/storage", default-features = false }
-cntryl-midge-table = { version = "=0.6.0", path = "crates/table" }
+cntryl-midge-core = { version = "=0.6.1", path = "crates/core" }
+cntryl-midge-durability = { version = "=0.6.1", path = "crates/durability", default-features = false }
+cntryl-midge-storage = { version = "=0.6.1", path = "crates/storage", default-features = false }
+cntryl-midge-table = { version = "=0.6.1", path = "crates/table" }
 
 arc-swap = "1.9"
 base64 = "0.23"
@@ -70,13 +70,6 @@ bench = false
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
-[profile.bench]
-inherits = "release"
-
-# =============================================================================
-# Dependencies
-# =============================================================================
 
 [dependencies]
 cntryl-midge-core.workspace = true
@@ -129,10 +122,6 @@ xxhash-rust.workspace = true
 # without those modules being public API for downstream consumers.
 cntryl-midge = { path = ".", default-features = false, features = ["internal-testing"] }
 
-# =============================================================================
-# Features
-# =============================================================================
-
 [features]
 default = ["cloud-all"]
 failpoints = [
@@ -145,10 +134,7 @@ failpoints = [
 # Installs mimalloc as the global allocator of the `midge` binary. The library
 # never installs an allocator; embedding applications choose their own.
 alloc-mimalloc = ["dep:mimalloc"]
-telemetry = [
-    "cloud-common",
-    "cntryl-midge-core/telemetry",
-]
+telemetry = ["cloud-common", "cntryl-midge-core/telemetry"]
 telemetry-otlp = ["telemetry", "cntryl-midge-core/telemetry-otlp"]
 
 # Cloud storage backends, enabled by default for current deployment profiles.
@@ -177,7 +163,6 @@ checkpoint-bench = ["internal-testing"]
 # backpressure benchmark; without it the row runs with hard stalls only.
 candidate-write-backpressure-bench = []
 
-
 # Fault injection is run explicitly and serially because failpoints are
 # process-global. Broad test selections must not run this target.
 [[test]]
@@ -190,11 +175,9 @@ required-features = ["failpoints"]
 name = "benchmark_investigation"
 required-features = ["internal-testing"]
 
-# =============================================================================
-# Benchmarks — Active Targets
-# =============================================================================
-# Keep this manifest to active, harness-free benches. Experimental or disabled
-# bench files stay under `benches/` until we want them in the supported set.
+[[example]]
+name = "checkpoint_campaign_readback"
+required-features = ["internal-testing"]
 
 # Tier 1
 [[bench]]
@@ -351,11 +334,6 @@ required-features = ["stress-soak"]
 name = "tier6_mixed_workload_soak"
 harness = false
 required-features = ["stress-soak"]
-
-[[example]]
-name = "checkpoint_campaign_readback"
-path = "examples/checkpoint_campaign_readback.rs"
-required-features = ["internal-testing"]
 
 [lints]
 workspace = true
