@@ -57,10 +57,10 @@ jobs:
         run: cargo fuzz build
 
       - name: Replay preserved intent timeout under sanitizers
-        run: cargo fuzz run intent_log_replay tests/fixtures/fuzz/intent_timeout_18.bin -- -runs=32 -timeout=10
+        run: cargo fuzz run intent_log_replay crates/midge/tests/fixtures/fuzz/intent_timeout_18.bin -- -runs=32 -timeout=10
 
       - name: Replay preserved one-byte intent timeout under sanitizers
-        run: cargo fuzz run intent_log_replay tests/fixtures/fuzz/intent_timeout_1.bin -- -runs=128 -timeout=10
+        run: cargo fuzz run intent_log_replay crates/midge/tests/fixtures/fuzz/intent_timeout_1.bin -- -runs=128 -timeout=10
 
       - name: Replay original intent mutation seed under sanitizers
         run: |
@@ -73,7 +73,7 @@ jobs:
           ruby -rjson -rfileutils -e '
             destination = "fuzz/timeout-regression-corpus"
             FileUtils.mkdir_p(destination)
-            JSON.parse(File.read("tests/fixtures/fuzz/intent_timeout_corpus.json")).each do |name, encoded|
+            JSON.parse(File.read("crates/midge/tests/fixtures/fuzz/intent_timeout_corpus.json")).each do |name, encoded|
               raise "invalid corpus entry" unless File.basename(name) == name && encoded.match?(/\A(?:[0-9a-fA-F]{2})*\z/)
               File.binwrite(File.join(destination, name), [encoded].pack("H*"))
             end

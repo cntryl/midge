@@ -1,1 +1,1 @@
-include!("../../tests/support/fuzz_recovery.rs");
+include!("../../crates/midge/tests/support/fuzz_recovery.rs");

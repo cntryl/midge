@@ -3,6 +3,7 @@ name = "cntryl-midge-fuzz"
 version = "0.0.0"
 edition = "2021"
 publish = false
+readme = "README.md"
 
 # Keep cargo-fuzz and its targets in a separate workspace from the release crates.
 [workspace]
@@ -10,13 +11,13 @@ publish = false
 [package.metadata]
 cargo-fuzz = true
 
-# engine_differential path-includes tests/support/differential.rs, which uses bytes.
+# engine_differential path-includes crates/midge/tests/support/differential.rs, which uses bytes.
 [package.metadata.cargo-machete]
 ignored = ["bytes"]
 
 [dependencies]
 bytes = "1.12"
-cntryl-midge = { path = "..", features = ["internal-testing"] }
+cntryl-midge = { path = "../crates/midge", features = ["internal-testing"] }
 libfuzzer-sys = "0.4"
 tempfile = "3.27"
 

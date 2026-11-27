@@ -1,7 +1,7 @@
 # Benchmarks
 
 Midge benchmarks use `cntryl-stress` across every tier. Engine and composition
-suites live in the root `benches/` directory. Compression, table, and WAL
+suites live in `crates/midge/benches/`. Compression, table, and WAL
 benchmarks live with their owning packages under `crates/`.
 
 For regression thresholds, cloud and hybrid guardrails, and external LSM
@@ -53,7 +53,7 @@ Emit machine-readable output:
 cargo bench --bench tier4_ycsb_workload_c -- --json
 ```
 
-Stress artifacts are written under `target/stress/{suite}/` as `latest.json`,
+Stress artifacts are written under `crates/midge/target/stress/{suite}/` as `latest.json`,
 `latest.md`, and `latest.txt` plus timestamped copies.
 
 The bounded compaction qualification needs explicit dataset, path, and output
@@ -166,7 +166,7 @@ the benchmark workflows set it for their local emulator jobs.
 Tier 5/6 workflows set a 60-second `cntryl-stress` no-progress watchdog.
 Only successful client operations advance workload progress; retryable
 rejections and background database growth do not reset that watchdog during
-client stages or shutdown. Workload artifacts under `target/midge-stress/`
+client stages or shutdown. Workload artifacts under `crates/midge/target/midge-stress/`
 include status, stage latency and saturation summaries, per-client snapshots,
 phase timings, resource samples, shutdown results, and flush/reopen or
 cloud-cache-loss verification summaries. `ResourceLimit` and `WriteStall` responses are

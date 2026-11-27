@@ -1,7 +1,7 @@
 # Testing
 
-Engine tests live in the root `src/` and `tests/` directories. Tests for Core,
-Table, Storage, and Durability live with their packages under `crates/`.
+Engine tests live in `crates/midge/src/` and `crates/midge/tests/`. Every
+workspace crate keeps its own tests alongside its implementation.
 
 ## Running Tests
 

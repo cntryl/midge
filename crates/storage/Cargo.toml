@@ -6,6 +6,7 @@ rust-version.workspace = true
 description = "Provider-neutral object storage for Midge"
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
 autobenches = false
 
 [lib]

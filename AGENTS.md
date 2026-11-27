@@ -11,7 +11,7 @@ These rules apply to every agent, including delegated agents:
 
 ## Project Structure & Module Organization
 
-Midge is a Rust embedded LSM key-value engine. Core code lives under `src/`, with major subsystems split by responsibility: `storage/` for local/cloud backends, `wal/` for write-ahead logging, `sst/` for table format and readers, `metadata/` for manifests, `runtime/` for actor/event-loop coordination, and `engine/` for the public API. Integration tests live in `tests/`; benchmarks live in `benches/`; design and operations docs live in `docs/`; fuzz targets live in `fuzz/`.
+Midge is a Rust embedded LSM key-value engine. The public engine, runtime, CLI, integration tests, and engine benchmarks live in `crates/midge/`. Shared types and I/O live in `crates/core/`, memtables and SSTs in `crates/table/`, backends in `crates/storage/`, and WAL and manifests in `crates/durability/`. Each crate owns its tests and benchmarks. Design and operations docs live in `docs/`, and fuzz targets live in `fuzz/`.
 
 ## Build, Test, and Development Commands
 
@@ -34,7 +34,7 @@ Never suppress `clippy::too_many_lines` with `#[allow]`, `#[expect]`, configurat
 
 Keep engine tests and test runners in Rust and run them through Cargo. Do not add Python files to this repository. Use `cntryl-tools` as the first choice for additional static analysis rather than adding repository-specific analysis scripts.
 
-All new behavior should include tests. Put public API coverage in `tests/`; use inline `#[cfg(test)] mod tests` for focused internal logic. Use deterministic failpoints and crash/recovery tests for durability-sensitive changes. For cloud, WAL, SST, and manifest changes, prefer TDD regression tests that first demonstrate unsafe deletion, corrupt recovery, stale metadata, or incorrect frontier movement.
+All new behavior should include tests. Put public API coverage in `crates/midge/tests/`; use inline `#[cfg(test)] mod tests` for focused internal logic. Use deterministic failpoints and crash/recovery tests for durability-sensitive changes. For cloud, WAL, SST, and manifest changes, prefer TDD regression tests that first demonstrate unsafe deletion, corrupt recovery, stale metadata, or incorrect frontier movement.
 
 Tests must cover real invariants and observable behavior through the production code paths they protect. Assert the contract and failure outcome, including restart or recovery when relevant. Tests that merely inspect source text, exercise runner bookkeeping, or mirror implementation details are not substitutes for invariant and behavior coverage.
 

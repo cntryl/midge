@@ -33,7 +33,7 @@ engine.shutdown(Duration::from_secs(5))?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The executable canonical example is [examples/documented_quick_start.rs](examples/documented_quick_start.rs).
+The executable canonical example is [the quick-start example](crates/midge/examples/documented_quick_start.rs).
 
 ## Reading paths
 
