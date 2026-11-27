@@ -551,14 +551,19 @@ fn soft_roll_due(
 fn select_newest_version<'a>(
     events: impl Iterator<Item = &'a CompactionEvent>,
 ) -> MidgeResult<Option<&'a CompactionVersion>> {
-    let mut versions: Vec<&CompactionVersion> = events
-        .filter_map(|event| match event {
-            CompactionEvent::Version(version) => Some(version),
-            CompactionEvent::RangeStart(_)
-            | CompactionEvent::RangeEnd(_)
-            | CompactionEvent::Boundary(_) => None,
-        })
-        .collect();
+    let mut points = events.filter_map(|event| match event {
+        CompactionEvent::Version(version) => Some(version),
+        CompactionEvent::RangeStart(_)
+        | CompactionEvent::RangeEnd(_)
+        | CompactionEvent::Boundary(_) => None,
+    });
+    let Some(first) = points.next() else {
+        return Ok(None);
+    };
+    let Some(second) = points.next() else {
+        return Ok(Some(first));
+    };
+    let mut versions: Vec<_> = [first, second].into_iter().chain(points).collect();
     versions.sort_by_key(|version| std::cmp::Reverse(version.seq));
     for pair in versions.windows(2) {
         let (newer, older) = (pair[0], pair[1]);

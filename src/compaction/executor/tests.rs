@@ -767,6 +767,23 @@ mod key_group_reduction {
     }
 
     #[test]
+    fn should_select_the_only_point_version_when_key_group_has_range_events() {
+        // Arrange
+        let events = [
+            CompactionEvent::RangeEnd(cover("a", "k", 8)),
+            CompactionEvent::RangeStart(cover("k", "z", 7)),
+            version_event("k", 4, false, "value"),
+            CompactionEvent::Boundary(b"k".to_vec()),
+        ];
+
+        // Act
+        let selected = selected_seq(&events);
+
+        // Assert
+        assert_eq!(selected.unwrap(), Some(4));
+    }
+
+    #[test]
     fn should_select_highest_sequence_when_key_group_has_several_versions() {
         // Arrange
         let events = [
