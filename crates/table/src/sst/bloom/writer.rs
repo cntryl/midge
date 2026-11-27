@@ -96,6 +96,11 @@ impl BloomWriter {
         Self::new(estimated_keys, DATA_BLOCK_FALSE_POSITIVE_RATE)
     }
 
+    /// Bit-vector bytes for a data-block Bloom filter before it is built.
+    pub(crate) fn data_block_size_bytes(estimated_keys: usize) -> usize {
+        Self::calculate_bit_size(estimated_keys, DATA_BLOCK_FALSE_POSITIVE_RATE).div_ceil(8)
+    }
+
     /// Calculate optimal k: `k_opt` = round((m/n) * ln(2)), clamped to [1, 8]
     fn calculate_optimal_k(num_bits: usize, estimated_keys: usize) -> u8 {
         if estimated_keys == 0 || num_bits == 0 {
@@ -237,6 +242,22 @@ fn usize_to_u32(value: usize) -> u32 {
 mod tests {
     use super::*;
     use crate::sst::bloom::BloomReader;
+
+    #[test]
+    fn should_match_constructed_bloom_sizes_for_data_blocks() {
+        // Arrange
+        let key_counts = [0, 1, 4, 5, 16, 64];
+
+        // Act
+        let estimated = key_counts.map(BloomWriter::data_block_size_bytes);
+
+        // Assert
+        assert_eq!(estimated, [8, 8, 8, 9, 29, 116]);
+        assert_eq!(
+            estimated,
+            key_counts.map(|keys| BloomWriter::for_data_block(keys).size_bytes())
+        );
+    }
 
     #[test]
     fn should_support_insert_lookup_when_zero_items_are_estimated() {
