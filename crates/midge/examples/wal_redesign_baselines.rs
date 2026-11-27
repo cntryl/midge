@@ -345,7 +345,9 @@ impl Campaign<'_> {
 
 fn run() -> ToolResult<bool> {
     let mut options = options()?;
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize()?;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
     let cases = load_cases(&root)?;
     fs::create_dir_all(&options.output)?;
     options.output = options.output.canonicalize()?;

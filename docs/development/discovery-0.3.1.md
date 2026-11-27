@@ -51,7 +51,7 @@ time does not determine logical success.
 
 ## Artifacts and replay
 
-Each run owns a unique directory under `target/discovery-031`, or the directory
+Each run owns a unique directory under `crates/midge/target/discovery-031`, or the directory
 selected by `MIDGE_DISCOVERY_ARTIFACT_DIR`. The driver persists its corpus before
 execution, revision and dirty status, seed, profile, backend variants, operation
 counts, and successful-case counters. Every mismatch fails the campaign and

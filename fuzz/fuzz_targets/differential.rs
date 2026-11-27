@@ -1,1 +1,1 @@
-include!("../../tests/support/differential.rs");
+include!("../../crates/midge/tests/support/differential.rs");

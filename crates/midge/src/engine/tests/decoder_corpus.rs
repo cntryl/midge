@@ -21,7 +21,7 @@ fn retain_seed(target: &str, name: &str, bytes: &[u8]) {
         std::fs::write(directory.join(name), bytes).unwrap();
     } else {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fuzz/corpus")
+            .join("../../fuzz/corpus")
             .join(target)
             .join(name);
         assert_eq!(
@@ -99,7 +99,7 @@ fn retain_real_journal(seed: u64, input: &[u8]) -> MidgeResult<()> {
         return Ok(());
     }
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fuzz/corpus/manifest_journal_replay")
+        .join("../../fuzz/corpus/manifest_journal_replay")
         .join(name);
     let expected = std::fs::read(path)?;
     assert_eq!(input.first(), Some(&0));

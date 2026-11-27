@@ -36,12 +36,12 @@ forbidden_text = [
 warn_lines = 1200
 max_lines = 1600
 allowlist = [
-  "src/metadata/journal.rs",
-  "src/sst/types.rs",
-  "src/storage/cloud/mod.rs",
-  "src/storage/providers/azure.rs",
-  "src/storage/providers/gcs.rs",
-  "src/storage/providers/s3.rs",
-  "src/wal/encoding.rs",
+  "crates/durability/src/metadata/journal.rs",
+  "crates/table/src/sst/types.rs",
+  "crates/storage/src/cloud/mod.rs",
+  "crates/storage/src/providers/azure.rs",
+  "crates/storage/src/providers/gcs.rs",
+  "crates/storage/src/providers/s3.rs",
+  "crates/durability/src/wal/encoding.rs",
 ]
 legacy_allowlist = []

@@ -1,7 +1,7 @@
 # Quick start
 
 This walkthrough uses only the re-exported API and mirrors the executable
-[`documented_quick_start`](../../examples/documented_quick_start.rs) example.
+[`documented_quick_start`](../../crates/midge/examples/documented_quick_start.rs) example.
 
 ```rust
 use std::time::Duration;
