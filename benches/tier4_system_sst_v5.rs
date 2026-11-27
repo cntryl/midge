@@ -376,6 +376,7 @@ fn measure_block_probes(
     metadata(component = "sst_format", scenario = "v5_in_memory_point_decode")
 )]
 fn sst_v5_in_memory_point_lookups(ctx: &mut StressContext) {
+    ctx.parameter("logical_unit", "point_lookup");
     let directory = TempDir::new().expect("create SST block fixture directory");
     let (reader, block) = prepare_data_block(&directory);
     let unique = std::array::from_fn(|index| {
