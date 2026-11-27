@@ -263,6 +263,39 @@ fn cursor_from_versions(mut versions: Vec<CompactionVersion>) -> RawSstVersionCu
 }
 
 #[test]
+fn should_keep_a_single_event_charged_until_its_key_group_drops() -> MidgeResult<()> {
+    // Arrange
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(4096);
+    let cursor = cursor_from_versions(vec![
+        mk_version("a", 1, false, Some("first"), None),
+        mk_version("b", 2, false, Some("next"), None),
+    ]);
+    let mut merge = VersionMergeIterator::new(vec![cursor], budget.clone())?.0;
+    let first = merge.next_event()?.expect("first merge event");
+    let charge = first.retained_bytes();
+    let before = budget.used();
+    let mut seen = 1;
+
+    // Act
+    let group = collect_same_key_events(&mut merge, first, &budget, &mut seen, None)?;
+    let while_held = budget.used();
+
+    // Assert
+    let [event] = group.as_slice() else {
+        panic!("only one event belongs to the first key");
+    };
+    assert_eq!(event.event.key(), b"a");
+    assert_eq!(
+        merge.peek_event().map(CompactionEvent::key),
+        Some(&b"b"[..])
+    );
+    assert_eq!(while_held, before + charge);
+    drop(group);
+    assert_eq!(budget.used(), before);
+    Ok(())
+}
+
+#[test]
 fn should_merge_version_streams_by_key_then_descending_sequence() {
     // Arrange
     let left = vec![
