@@ -4,6 +4,7 @@
 
 use bytes::Bytes;
 use cntryl_midge_durability::wal::encoding::{decode, decode_view, encode, encode_into};
+use cntryl_midge_durability::wal::sequenced::SequencedWalUnit;
 use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
@@ -258,6 +259,45 @@ fn decode_owned_raw_put(ctx: &mut StressContext) {
             }
         },
     );
+}
+
+#[stress(tier = 1, role = "diagnostic", metadata(component = "wal_encoding"))]
+fn size_and_encode_sequenced_batch(ctx: &mut StressContext) {
+    let operation_count = 100_u64;
+    let repetitions = 256;
+    let value = Bytes::from_static(&[b'v'; 128]);
+    let operations = (0..operation_count)
+        .map(|index| {
+            let mut record = WalRecord::new_cf(
+                0,
+                WalOpKind::Put,
+                Bytes::from(format!("{index:016x}")),
+                Some(value.clone()),
+                index + 2,
+            );
+            record.txn_id = Some(1);
+            record
+        })
+        .collect();
+    let batch = SequencedWalUnit {
+        txn_id: 1,
+        begin_sequence: 1,
+        commit_sequence: operation_count + 2,
+        cf_id: 0,
+        operations,
+    };
+    ctx.parameter("records_per_logical_operation", operation_count);
+    ctx.parameter("key_bytes", 16);
+    ctx.parameter("value_bytes", value.len());
+    ctx.parameter("logical_unit", "wal_batch");
+
+    measure_hot_path_batch(ctx, "size_and_encode_sequenced_batch", repetitions, || {
+        for _ in 0..repetitions {
+            let batch = black_box(&batch);
+            black_box(batch.nested_payload_len().expect("size WAL batch"));
+            black_box(batch.encode_record().expect("encode WAL batch"));
+        }
+    });
 }
 
 fn run_roundtrip(ctx: &mut StressContext, scenario: &'static str, record: &WalRecord) {

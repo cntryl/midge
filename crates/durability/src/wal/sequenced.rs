@@ -4,7 +4,7 @@
 //! the nested transaction, then applies the existing outer compression, frame
 //! and CRC encoding without patching compressed bytes.
 
-use super::encoding::TxnBatchEncodeRecord;
+use super::encoding::{self, txn_batch_views, TxnBatchEncodeRecord};
 use super::{WalOpKind, WalRecord};
 use bytes::Bytes;
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
@@ -24,6 +24,7 @@ impl SequencedWalUnit {
         // Raw Bytes, nested payload, compressor output and outer frame can
         // coexist. The final request metadata and coalescing copy are charged
         // too; the reservation stays with the physical request until terminal.
+        // Retain the established descriptor allowance for writer admission.
         let metadata = self.operations.len().saturating_mul(
             std::mem::size_of::<WalRecord>() + std::mem::size_of::<TxnBatchEncodeRecord<'_>>(),
         );
@@ -51,16 +52,16 @@ impl SequencedWalUnit {
     }
 
     pub fn nested_payload_len(&self) -> MidgeResult<usize> {
-        super::encoding::txn_batch_payload_records_encoded_len(&transaction_views(&self.operations))
+        encoding::txn_batch_payload_records_encoded_len(txn_batch_views(&self.operations))
     }
 
     pub fn encode_record(&self) -> MidgeResult<WalRecord> {
-        let payload = super::encoding::encode_txn_batch_payload_records(
+        let payload = encoding::encode_txn_batch_payload_iter(
             self.txn_id,
             self.begin_sequence,
             self.commit_sequence,
             self.cf_id,
-            &transaction_views(&self.operations),
+            txn_batch_views(&self.operations),
         )?;
         Ok(self.transaction_outer(Some(payload)))
     }
@@ -76,20 +77,4 @@ impl SequencedWalUnit {
         outer.txn_id = Some(self.txn_id);
         outer
     }
-}
-
-fn transaction_views(records: &[WalRecord]) -> Vec<TxnBatchEncodeRecord<'_>> {
-    records
-        .iter()
-        .map(|record| TxnBatchEncodeRecord {
-            cf_id: record.cf_id,
-            op: record.op,
-            key: record.key.as_ref(),
-            value: record.value.as_deref(),
-            seq: record.seq,
-            expiration: record.expiration,
-            range_end: record.range_end.as_deref(),
-            txn_id: record.txn_id,
-        })
-        .collect()
 }

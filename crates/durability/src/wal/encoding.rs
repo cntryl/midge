@@ -521,8 +521,23 @@ fn txn_batch_len_prefixed_field_len(value: &[u8]) -> MidgeResult<usize> {
     add_capacity(4, value.len())
 }
 
-pub(crate) fn txn_batch_payload_records_encoded_len(
-    records: &[TxnBatchEncodeRecord<'_>],
+pub(crate) fn txn_batch_views(
+    records: &[WalRecord],
+) -> impl ExactSizeIterator<Item = TxnBatchEncodeRecord<'_>> + Clone {
+    records.iter().map(|record| TxnBatchEncodeRecord {
+        cf_id: record.cf_id,
+        op: record.op,
+        key: record.key.as_ref(),
+        value: record.value.as_deref(),
+        seq: record.seq,
+        expiration: record.expiration,
+        range_end: record.range_end.as_deref(),
+        txn_id: record.txn_id,
+    })
+}
+
+pub(crate) fn txn_batch_payload_records_encoded_len<'a>(
+    records: impl ExactSizeIterator<Item = TxnBatchEncodeRecord<'a>>,
 ) -> MidgeResult<usize> {
     let _ = u32::try_from(records.len()).map_err(|_| {
         MidgeError::InvalidArgument("transaction batch op_count exceeds u32::MAX".into())
@@ -594,20 +609,13 @@ pub fn encode_txn_batch_payload(
     cf_id: u32,
     records: &[WalRecord],
 ) -> MidgeResult<Bytes> {
-    let records: Vec<_> = records
-        .iter()
-        .map(|record| TxnBatchEncodeRecord {
-            cf_id: record.cf_id,
-            op: record.op,
-            key: record.key.as_ref(),
-            value: record.value.as_ref().map(Bytes::as_ref),
-            seq: record.seq,
-            expiration: record.expiration,
-            range_end: record.range_end.as_ref().map(Bytes::as_ref),
-            txn_id: record.txn_id,
-        })
-        .collect();
-    encode_txn_batch_payload_records(txn_id, begin_seq, commit_seq, cf_id, &records)
+    encode_txn_batch_payload_iter(
+        txn_id,
+        begin_seq,
+        commit_seq,
+        cf_id,
+        txn_batch_views(records),
+    )
 }
 
 /// Encode borrowed WAL record views as a nested transaction batch payload.
@@ -625,7 +633,24 @@ pub fn encode_txn_batch_payload_records(
     cf_id: u32,
     records: &[TxnBatchEncodeRecord<'_>],
 ) -> MidgeResult<Bytes> {
-    if records.is_empty() {
+    encode_txn_batch_payload_iter(
+        txn_id,
+        begin_seq,
+        commit_seq,
+        cf_id,
+        records.iter().copied(),
+    )
+}
+
+pub(crate) fn encode_txn_batch_payload_iter<'a>(
+    txn_id: u64,
+    begin_seq: u64,
+    commit_seq: u64,
+    cf_id: u32,
+    records: impl ExactSizeIterator<Item = TxnBatchEncodeRecord<'a>> + Clone,
+) -> MidgeResult<Bytes> {
+    let op_count = records.len();
+    if op_count == 0 {
         return Err(MidgeError::InvalidArgument(
             "transaction batch must contain at least one operation".into(),
         ));
@@ -635,14 +660,14 @@ pub fn encode_txn_batch_payload_records(
             "transaction batch commit sequence must be greater than begin sequence".into(),
         ));
     }
-    let expected_op_count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+    let expected_op_count = u64::try_from(op_count).unwrap_or(u64::MAX);
     if commit_seq - begin_seq - 1 != expected_op_count {
         return Err(MidgeError::InvalidArgument(
             "transaction batch sequence span does not match operation count".into(),
         ));
     }
 
-    let expected_payload_len = txn_batch_payload_records_encoded_len(records)?;
+    let expected_payload_len = txn_batch_payload_records_encoded_len(records.clone())?;
     let mut buf = Vec::with_capacity(expected_payload_len);
     buf.extend_from_slice(&TXN_BATCH_MAGIC);
     buf.push(TXN_BATCH_VERSION);
@@ -650,14 +675,14 @@ pub fn encode_txn_batch_payload_records(
     buf.extend_from_slice(&begin_seq.to_le_bytes());
     buf.extend_from_slice(&commit_seq.to_le_bytes());
     buf.extend_from_slice(
-        &u32::try_from(records.len())
+        &u32::try_from(op_count)
             .map_err(|_| {
                 MidgeError::InvalidArgument("transaction batch op_count exceeds u32::MAX".into())
             })?
             .to_le_bytes(),
     );
 
-    for (index, record) in records.iter().enumerate() {
+    for (index, record) in records.enumerate() {
         if record.op.is_transaction_marker() {
             return Err(MidgeError::InvalidArgument(
                 "transaction batch cannot contain nested transaction markers".into(),
@@ -1464,7 +1489,7 @@ mod tests {
         ];
 
         // Act
-        let expected_len = txn_batch_payload_records_encoded_len(&records).unwrap();
+        let expected_len = txn_batch_payload_records_encoded_len(records.iter().copied()).unwrap();
         let payload = encode_txn_batch_payload_records(42, 10, 13, 7, &records).unwrap();
 
         // Assert
