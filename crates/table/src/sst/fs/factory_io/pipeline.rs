@@ -259,19 +259,19 @@ impl BlockPipeline {
         if restart {
             self.previous_key.clear();
         }
-        let mut encoded = FsSstWriter::encode_pending_entry(&self.previous_key, &entry)?;
+        let mut prepared = FsSstWriter::prepare_pending_entry(&self.previous_key, &entry)?;
         if !self.current_block.is_empty()
             && self
                 .current_block
                 .len()
-                .saturating_add(encoded.len())
+                .saturating_add(prepared.encoded_len())
                 .saturating_add((self.restart_offsets.len() + usize::from(restart) + 1) * 4)
                 > target_block_size
         {
             self.flush_current_block(sink, compression_policy)?;
             self.previous_key.clear();
             continued = false;
-            encoded = FsSstWriter::encode_pending_entry(&self.previous_key, &entry)?;
+            prepared = FsSstWriter::prepare_pending_entry(&self.previous_key, &entry)?;
         }
 
         if self
@@ -297,7 +297,7 @@ impl BlockPipeline {
         if self.current_first_key.is_none() {
             self.current_first_key = Some(entry.key.clone());
         }
-        self.current_block.extend_from_slice(&encoded);
+        prepared.append_to(&mut self.current_block);
         self.current_block_keys.push(entry.key.clone());
         self.previous_key.clone_from(&entry.key);
         self.smallest_sequence = Some(
@@ -477,14 +477,14 @@ impl FsSstWriter {
         }
     }
 
-    pub(super) fn encode_pending_entry(
+    pub(super) fn prepare_pending_entry<'a>(
         previous_key: &[u8],
-        entry: &PendingEntry,
-    ) -> MidgeResult<Vec<u8>> {
+        entry: &'a PendingEntry,
+    ) -> MidgeResult<crate::sst::encoding::PreparedV5Entry<'a>> {
         let entry_type = Self::writable_entry_type(entry.op_type)?;
         let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
         let key_delta = &entry.key[shared_len as usize..];
-        crate::sst::encoding::encode_v5(
+        crate::sst::encoding::prepare_v5(
             key_delta,
             shared_len,
             entry.value.as_deref(),

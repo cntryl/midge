@@ -19,6 +19,53 @@ fn unique_reader(directory: &tempfile::TempDir) -> MidgeResult<SstFileIo> {
 }
 
 #[test]
+fn should_preserve_exact_v5_bytes_when_crossing_a_full_block_boundary() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let fs = cntryl_midge_core::io::real::test_root(directory.path());
+    let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096)
+        .with_compression_policy(CompressionPolicy::None);
+    let mut writer = factory.create()?;
+    let large_value = [b'x'; 3843];
+    let path = directory.path().join("exact-block-cut.sst");
+
+    // Act
+    for sequence in (3..=18).rev() {
+        writer.add_sorted_with_meta(b"prefix-a", Some(b""), sequence, EntryType::Put, None)?;
+    }
+    writer.add_sorted_with_meta(b"prefix-a", None, 2, EntryType::Delete, Some(7))?;
+    writer.add_sorted_with_meta(b"prefix-a", Some(&large_value), 1, EntryType::Put, None)?;
+    writer.add_sorted_with_meta(b"prefix-b", Some(b"v"), 1, EntryType::Insert, None)?;
+    crate::sst::fs::finish_writer_to_path(writer, &path)?;
+    let reader = SstFileIo::open("exact-block-cut.sst", fs)?;
+    let index = reader.index_entries()?;
+
+    // Assert: first key, fifteen shared keys, a continued restart, then the full block.
+    let mut expected_first = b"\0\x08\0\x12\0\0\0\0\0\0\0\0prefix-a".to_vec();
+    for sequence in (3..=17_u64).rev() {
+        expected_first.extend_from_slice(b"\x08\0\0");
+        expected_first.extend_from_slice(&sequence.to_le_bytes());
+        expected_first.push(0);
+    }
+    expected_first.extend_from_slice(b"\0\x08\0\x02\0\0\0\0\0\0\0\x82\x07\0\0\0\0\0\0\0prefix-a");
+    expected_first.extend_from_slice(b"\x08\0\x83\x1e\x01\0\0\0\0\0\0\0\0");
+    expected_first.extend_from_slice(&large_value);
+    expected_first.extend_from_slice(b"\0\0\0\0\xc8\0\0\x80\x02\0\0\0");
+    let expected_second = b"\0\x08\x01\x01\0\0\0\0\0\0\0\x01prefix-bv\0\0\0\0\x01\0\0\0";
+    assert_eq!(index.len(), 2);
+    assert_eq!(expected_first.len(), 4096);
+    assert_eq!(
+        reader.read_block(&index.handle(0))?.as_ref(),
+        expected_first
+    );
+    assert_eq!(
+        reader.read_block(&index.handle(1))?.as_ref(),
+        expected_second
+    );
+    Ok(())
+}
+
+#[test]
 fn should_bound_point_decoding_to_one_restart_interval_after_binary_search() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;

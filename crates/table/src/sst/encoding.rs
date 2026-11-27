@@ -67,38 +67,88 @@ pub fn encode_v5(
     entry_type: EntryType,
     expiration: Option<u64>,
 ) -> MidgeResult<Vec<u8>> {
-    let (key_len, value_len) = checked_lengths(key_delta.len(), value.map_or(0, <[u8]>::len))?;
-    let capacity = varint_len(u32::from(shared_len))
+    let entry = prepare_v5(
+        key_delta, shared_len, value, sequence, entry_type, expiration,
+    )?;
+    let mut encoded = Vec::new();
+    entry.append_to(&mut encoded);
+    Ok(encoded)
+}
+
+/// Validated entry fields and their exact length for the writer's block-cut decision.
+#[derive(Debug)]
+pub(crate) struct PreparedV5Entry<'a> {
+    key_delta: &'a [u8],
+    value: &'a [u8],
+    shared_len: u32,
+    key_len: u32,
+    value_len: u32,
+    sequence: u64,
+    flags: u8,
+    expiration: Option<u64>,
+    encoded_len: usize,
+}
+
+impl PreparedV5Entry<'_> {
+    pub(crate) fn encoded_len(&self) -> usize {
+        self.encoded_len
+    }
+
+    pub(crate) fn append_to(self, block: &mut Vec<u8>) {
+        block.reserve(self.encoded_len);
+        put_varint(self.shared_len, block);
+        put_varint(self.key_len, block);
+        put_varint(self.value_len, block);
+        block.extend_from_slice(&self.sequence.to_le_bytes());
+        block.push(self.flags);
+        if let Some(expiration) = self.expiration {
+            block.extend_from_slice(&expiration.to_le_bytes());
+        }
+        block.extend_from_slice(self.key_delta);
+        block.extend_from_slice(self.value);
+    }
+}
+
+pub(crate) fn prepare_v5<'a>(
+    key_delta: &'a [u8],
+    shared_len: u16,
+    value: Option<&'a [u8]>,
+    sequence: u64,
+    entry_type: EntryType,
+    expiration: Option<u64>,
+) -> MidgeResult<PreparedV5Entry<'a>> {
+    let value = value.unwrap_or_default();
+    let (key_len, value_len) = checked_lengths(key_delta.len(), value.len())?;
+    let shared_len = u32::from(shared_len);
+    let header_len = varint_len(shared_len)
         + varint_len(key_len)
         + varint_len(value_len)
         + 8
         + 1
         + expiration.map_or(0, |_| 8);
-    let capacity = capacity
+    let encoded_len = header_len
         .checked_add(key_delta.len())
         .and_then(|n| n.checked_add(value_len as usize))
         .ok_or_else(|| {
             MidgeError::ResourceLimit("encoded SST entry length exceeds address space".into())
         })?;
-    let mut encoded = Vec::with_capacity(capacity);
-    put_varint(u32::from(shared_len), &mut encoded);
-    put_varint(key_len, &mut encoded);
-    put_varint(value_len, &mut encoded);
-    encoded.extend_from_slice(&sequence.to_le_bytes());
-    encoded.push(
-        entry_type as u8
-            | if expiration.is_some() {
-                EXPIRATION_PRESENT
-            } else {
-                0
-            },
-    );
-    if let Some(expiration) = expiration {
-        encoded.extend_from_slice(&expiration.to_le_bytes());
-    }
-    encoded.extend_from_slice(key_delta);
-    encoded.extend_from_slice(value.unwrap_or_default());
-    Ok(encoded)
+    let flags = entry_type as u8
+        | if expiration.is_some() {
+            EXPIRATION_PRESENT
+        } else {
+            0
+        };
+    Ok(PreparedV5Entry {
+        key_delta,
+        value,
+        shared_len,
+        key_len,
+        value_len,
+        sequence,
+        flags,
+        expiration,
+        encoded_len,
+    })
 }
 
 #[cfg(any(test, feature = "internal-testing"))]
