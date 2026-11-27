@@ -76,6 +76,10 @@ impl BloomWriter {
     #[must_use]
     pub fn new(estimated_keys: usize, false_positive_rate: f64) -> Self {
         let num_bits = Self::calculate_bit_size(estimated_keys, false_positive_rate);
+        Self::with_bit_size(estimated_keys, num_bits)
+    }
+
+    fn with_bit_size(estimated_keys: usize, num_bits: usize) -> Self {
         let num_bytes = num_bits.div_ceil(8);
         let k = Self::calculate_optimal_k(num_bits, estimated_keys);
 
@@ -93,12 +97,26 @@ impl BloomWriter {
     /// eight, so `k` clamps to 8 and every released reader can decode it.
     #[must_use]
     pub fn for_data_block(estimated_keys: usize) -> Self {
-        Self::new(estimated_keys, DATA_BLOCK_FALSE_POSITIVE_RATE)
+        Self::with_bit_size(estimated_keys, Self::data_block_bit_size(estimated_keys))
     }
 
     /// Bit-vector bytes for a data-block Bloom filter before it is built.
     pub(crate) fn data_block_size_bytes(estimated_keys: usize) -> usize {
-        Self::calculate_bit_size(estimated_keys, DATA_BLOCK_FALSE_POSITIVE_RATE).div_ceil(8)
+        Self::data_block_bit_size(estimated_keys).div_ceil(8)
+    }
+
+    fn data_block_bit_size(estimated_keys: usize) -> usize {
+        let rounded_bits = Self::rounded_bit_size(estimated_keys, DATA_BLOCK_FALSE_POSITIVE_RATE);
+        // At 0.1%, a clamped u32 key count needs fewer than 2^36 bits. The
+        // rounded count is exactly representable, and a 32-bit usize must
+        // still saturate at its maximum, as the decimal parse did.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the fixed rate gives a nonnegative integral count with intentional usize saturation"
+        )]
+        let num_bits = rounded_bits as usize;
+        num_bits.max(64)
     }
 
     /// Calculate optimal k: `k_opt` = round((m/n) * ln(2)), clamped to [1, 8]
@@ -133,9 +151,6 @@ impl BloomWriter {
         self.key_count += 1;
     }
 
-    /// Calculate optimal bit size using standard bloom filter formula:
-    /// m = -n * ln(p) / ln(2)^2
-    /// where n = number of items, p = false positive rate, m = number of bits
     fn calculate_bit_size(n: usize, p: f64) -> usize {
         if n == 0 {
             // Keep the empty filter structurally valid. A zero-bit filter
@@ -143,14 +158,18 @@ impl BloomWriter {
             return 64;
         }
 
-        let ln_p = p.ln();
-        let ln_2_sq = 2.0_f64.ln().powi(2);
-        let m = -f64::from(usize_to_u32(n)) * ln_p / ln_2_sq;
-        m.ceil()
+        Self::rounded_bit_size(n, p)
             .to_string()
             .parse::<usize>()
             .unwrap_or(usize::MAX)
             .max(64)
+    }
+
+    /// Round up the standard Bloom filter bit count, `-n * ln(p) / ln(2)^2`.
+    fn rounded_bit_size(n: usize, p: f64) -> f64 {
+        let ln_p = p.ln();
+        let ln_2_sq = 2.0_f64.ln().powi(2);
+        (-f64::from(usize_to_u32(n)) * ln_p / ln_2_sq).ceil()
     }
 
     /// Finalize and return the bloom filter reader
@@ -257,6 +276,25 @@ mod tests {
             estimated,
             key_counts.map(|keys| BloomWriter::for_data_block(keys).size_bytes())
         );
+    }
+
+    #[test]
+    fn should_keep_the_existing_bit_count_when_sizing_fixed_rate_filters() {
+        // Arrange
+        let u32_limit = u64_to_usize(u64::from(u32::MAX));
+        let key_counts = (0..=4096).chain([u32_limit / 15, u32_limit / 14, u32_limit, usize::MAX]);
+
+        for keys in key_counts {
+            // Act
+            let bits = BloomWriter::data_block_bit_size(keys);
+
+            // Assert
+            assert_eq!(
+                bits,
+                BloomWriter::calculate_bit_size(keys, DATA_BLOCK_FALSE_POSITIVE_RATE),
+                "key count {keys}"
+            );
+        }
     }
 
     #[test]
