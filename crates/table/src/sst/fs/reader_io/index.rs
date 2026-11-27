@@ -169,15 +169,15 @@ impl SstFileIo {
         Some(first_candidate..=last_candidate)
     }
 
-    pub(super) fn candidate_data_blocks(
+    pub(super) fn candidate_data_blocks<'a>(
         &self,
-        index: &BlockIndex,
+        index: &'a BlockIndex,
         key: &[u8],
-    ) -> Vec<(usize, BlockHandle)> {
-        self.candidate_block_indices(index, key)
-            .map_or_else(Vec::new, |range| {
-                range.map(|idx| (idx, index.handle(idx))).collect()
-            })
+    ) -> impl ExactSizeIterator<Item = (usize, BlockHandle)> + 'a {
+        let blocks = self
+            .candidate_block_indices(index, key)
+            .map_or(0..0, |range| *range.start()..*range.end() + 1);
+        blocks.map(|idx| (idx, index.handle(idx)))
     }
 
     pub(super) fn read_cached_data_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
