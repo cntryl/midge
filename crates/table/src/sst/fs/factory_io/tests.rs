@@ -914,7 +914,7 @@ fn should_reject_merge_entry_when_adding_sst_entries() -> MidgeResult<()> {
 }
 
 #[test]
-fn should_reject_merge_entry_when_encoding_pending_sst_entry() {
+fn should_reject_merge_entry_when_preparing_pending_sst_entry() {
     // Arrange
     let entry = PendingEntry {
         key: b"key".to_vec(),
@@ -925,7 +925,7 @@ fn should_reject_merge_entry_when_encoding_pending_sst_entry() {
     };
 
     // Act
-    let result = FsSstWriter::encode_pending_entry(b"", &entry);
+    let result = FsSstWriter::prepare_pending_entry(b"", &entry);
 
     // Assert
     assert!(
