@@ -205,6 +205,8 @@ struct BlockEntryDecoder {
     data_end: Option<usize>,
     restart_count: usize,
     next_restart: usize,
+    next_restart_offset: usize,
+    restart_continues_key: bool,
     entries_in_interval: usize,
     skip_initial_continuation: bool,
 }
@@ -212,12 +214,14 @@ struct BlockEntryDecoder {
 impl BlockEntryDecoder {
     fn at_restart(block: &Bytes, restart: usize) -> MidgeResult<Self> {
         let layout = crate::sst::data_block::DataBlockLayout::read(block)?;
-        let (offset, _) = layout.restart(restart)?;
+        let (offset, continued) = layout.restart(restart)?;
         Ok(Self {
             offset,
             data_end: Some(layout.data_end),
             restart_count: layout.restart_count,
             next_restart: restart,
+            next_restart_offset: offset,
+            restart_continues_key: continued,
             skip_initial_continuation: restart > 0,
             ..Self::default()
         })
@@ -253,18 +257,13 @@ impl BlockEntryDecoder {
         if self.offset >= data_end {
             return Ok(None);
         }
-        let restart = if self.next_restart < self.restart_count {
-            let (offset, continued) = self.restart_at(block, self.next_restart)?;
-            if self.offset > offset {
-                return Err(MidgeError::Corruption(
-                    "restart offset is inside an SST entry".into(),
-                ));
-            }
-            (self.offset == offset).then_some(continued)
-        } else {
-            None
-        };
-        if restart.is_some() {
+        if self.offset > self.next_restart_offset {
+            return Err(MidgeError::Corruption(
+                "restart offset is inside an SST entry".into(),
+            ));
+        }
+        let at_restart = self.offset == self.next_restart_offset;
+        if at_restart {
             if self.entries_in_interval != 0
                 && self.entries_in_interval != crate::sst::data_block::RESTART_INTERVAL
             {
@@ -273,7 +272,6 @@ impl BlockEntryDecoder {
                 ));
             }
             self.entries_in_interval = 0;
-            self.next_restart += 1;
         } else if self.entries_in_interval == crate::sst::data_block::RESTART_INTERVAL {
             return Err(MidgeError::Corruption("missing SST restart entry".into()));
         }
@@ -282,20 +280,28 @@ impl BlockEntryDecoder {
             self.offset,
             format_version,
         )?;
-        if let Some(continued) = restart {
+        if at_restart {
             if entry.shared_len != 0
                 || (!self.skip_initial_continuation
-                    && continued != (self.offset > 0 && self.previous_key == entry.key_delta))
+                    && self.restart_continues_key
+                        != (self.offset > 0 && self.previous_key == entry.key_delta))
             {
                 return Err(MidgeError::Corruption(
                     "invalid independent SST restart key".into(),
                 ));
             }
             self.skip_initial_continuation = false;
+            // The block is immutable throughout decoding. Its data end marks
+            // the last interval, where no further restart can be reached.
+            self.next_restart += 1;
+            (self.next_restart_offset, self.restart_continues_key) =
+                if self.next_restart < self.restart_count {
+                    self.restart_at(block, self.next_restart)?
+                } else {
+                    (data_end, false)
+                };
         }
-        if self.next_restart < self.restart_count
-            && next_offset > self.restart_at(block, self.next_restart)?.0
-        {
+        if next_offset > self.next_restart_offset {
             return Err(MidgeError::Corruption(
                 "SST entry crosses a restart offset".into(),
             ));

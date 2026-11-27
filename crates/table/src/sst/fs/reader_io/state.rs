@@ -223,9 +223,10 @@ impl SstFileIo {
         let (restart, probes) = layout.seek_interval(key)?;
         let mut decoder = BlockEntryDecoder::at_restart(block_data, restart)?;
         let mut interval = restart;
+        let mut interval_end = layout.interval_end(interval)?;
         let mut entries_decoded = probes as u64;
         loop {
-            if decoder.offset == layout.interval_end(interval)? {
+            if decoder.offset == interval_end {
                 let next_interval = interval + 1;
                 if next_interval == layout.restart_count {
                     return Ok((entries_decoded, false));
@@ -235,6 +236,7 @@ impl SstFileIo {
                     return Ok((entries_decoded, true));
                 }
                 interval = next_interval;
+                interval_end = layout.interval_end(interval)?;
             }
             let Some(entry) =
                 decoder.next(block_data, self.format_version, None, "point decoder key")?
