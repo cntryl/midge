@@ -102,11 +102,13 @@ parity claim. Performance evidence records absolute results for an exact source
 SHA; the absolute matrix does not block 0.5.0 publication. See
 [the baseline procedure](baseline-procedure.md).
 
-Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`,
-with a single `profile` dropdown defaulting to `standard`. All jobs use Ubuntu
-ARM runners. Tier 4 includes both the 25 system scenarios and 48 YCSB A–F
-scenarios, with one scenario per job. Tiers 1–3 run one registered target per
-job. Tier 5 retains its nine workload cases; Tier 6 retains its five.
+Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`, on
+GitHub-hosted Ubuntu runners. The `profile` dropdown defaults to `standard`.
+Tiers 1–3 run one Cargo benchmark target per job. Tiers 4–6 run one workload per
+job. Tiers 2 and 4 also support dispatching a single named workload.
+Use **Benchmark Source Overlay** when a historical Tier 2 or Tier 4 checkout
+needs a benchmark file from a second commit. Select the tier, target, and
+workload, then supply the benchmark file's commit SHA in `benchmark_ref`.
 
 | Profile | Tiers 1–3 native harness | Tier 4 scenario | Tier 5/6 workload |
 | --- | --- | --- | --- |
@@ -114,11 +116,11 @@ job. Tier 5 retains its nine workload cases; Tier 6 retains its five.
 | `standard` | `default` | 10 minutes | 10 minutes |
 | `extended` | `lab` | 60 minutes | 60 minutes |
 
-The native harness controls sample counts and timing for Tiers 1–3. Tiers 4–6
-use one native smoke-profile sample without native warmups, with the selected
-measurement window or workload duration. These single samples establish
-execution and correctness, not a statistical performance baseline. Scheduled
-Tier 5/6 campaigns use `extended` (one hour).
+Tiers 2 and 4 expose measured and warmup sample counts and an optional
+`require_quiet_env` gate for performance qualification. Tier 4's extended
+profile and all Tier 5/6 profiles run one measured sample without a native
+warmup. Use those single samples to assess execution and correctness. Scheduled
+Tier 5/6 campaigns run for one hour.
 
 YCSB, streaming and backpressure keep one engine through the selected measured
 window. Fixed-count system cases repeat complete bounded cycles, retaining each
@@ -128,15 +130,15 @@ footprints of completed cycles. Smoke keeps the original timing boundaries and
 workload warmups. Tier 4 maps the `extended` selection to its internal `full`
 profile name.
 
-Tiers 5 and 6 use a GitHub Actions Sqrzl service container with the same image
-and settings as `compose.yml`. GitHub manages its lifecycle; no workflow step
-starts, waits for, or stops Sqrzl. All benchmarks run directly through Cargo,
-and native reports and workload artifacts are uploaded even after failure.
+Tiers 5 and 6 call the same stress benchmark job. Cloud workloads wait for
+the Sqrzl service container to report readiness.
+The container's request budget accommodates concurrent SST validation during
+recovery. All workflows run benchmarks through Cargo and attempt to upload
+reports and workload artifacts from `target/bench-reports/` even after failure.
 
-The former checkpoint campaign modes and investigation dispatch are retired
-from these workflows. Their specialized source-pair, construction-smoke and
-readback procedures below and in the campaign documents describe historical
-evidence; ordinary tier runs do not qualify those campaigns.
+The former checkpoint campaign modes are retired. The specialized source-pair,
+construction-smoke, and readback procedures below and in the campaign documents
+describe historical qualification evidence.
 
 For a direct Tier 4 standard run, supply both the workload profile and the
 matching native duration:

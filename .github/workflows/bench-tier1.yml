@@ -9,6 +9,10 @@ on:
         options: [smoke, standard, extended]
         default: standard
 
+env:
+  STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
+  MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
+
 permissions:
   contents: read
 
@@ -24,18 +28,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        bench:
-          - tier1_hotpath_api
-          - tier1_hotpath_bloom
-          - tier1_hotpath_block_cache
-          - tier1_hotpath_iterator
-          - tier1_hotpath_memtable
-          - tier1_hotpath_sst
-          - tier1_hotpath_trie
-          - tier1_hotpath_wal
-          - tier1_hotpath_keyed_group_commit
-          - tier1_hotpath_compression
-          - tier1_hotpath_event_loop
+        include:
+          - bench: tier1_hotpath_api
+            package: cntryl-midge
+          - bench: tier1_hotpath_bloom
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_block_cache
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_iterator
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_memtable
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_sst
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_trie
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_wal
+            package: cntryl-midge-durability
+          - bench: tier1_hotpath_keyed_group_commit
+            package: cntryl-midge
+          - bench: tier1_hotpath_compression
+            package: cntryl-midge-core
+            features: internal-testing
+          - bench: tier1_hotpath_event_loop
+            package: cntryl-midge
 
     env:
       CARGO_INCREMENTAL: "0"
@@ -50,14 +66,12 @@ jobs:
         run: rustup update stable
 
       - name: Run benchmarks
-        run: cargo bench --locked --bench '${{ matrix.bench }}'
+        run: cargo bench --locked -p '${{ matrix.package }}' --features '${{ matrix.features }}' --bench '${{ matrix.bench }}'
 
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier1-${{ matrix.bench }}-${{ github.sha }}
-          path: |
-            crates/midge/target/stress/**
-            crates/midge/target/midge-stress/**
-          if-no-files-found: ignore
+          path: target/bench-reports/
+          if-no-files-found: warn

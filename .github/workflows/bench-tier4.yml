@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: Measurement window (short smoke, 10m standard, 60m extended)
+        description: Measurement window (short smoke, 10m standard, one 60m extended sample)
         type: choice
         options: [smoke, standard, extended]
         default: standard
@@ -25,20 +25,32 @@ on:
         description: Source branch or commit SHA to benchmark (blank uses the selected workflow ref)
         type: string
         default: ""
-      benchmark_ref:
-        description: Optional ref supplying the same benchmark source when it is absent from source_ref
-        type: string
-        default: ""
       samples:
-        description: Measured samples per workload
+        description: Measured samples per workload for smoke and standard
         type: choice
         options: [5, 10]
         default: "5"
       warmup_samples:
-        description: Warmup samples per workload
+        description: Warmup samples per workload for smoke and standard
         type: choice
         options: [1, 2]
         default: "1"
+      require_quiet_env:
+        description: Fail on host noise when qualifying performance measurements
+        type: boolean
+        default: false
+
+env:
+  # Extended runs fit one hour-long sample within a hosted job.
+  MIDGE_BENCH_PROFILE: ${{ inputs.profile == 'extended' && 'full' || inputs.profile }}
+  STRESS_PROFILE: smoke
+  STRESS_SAMPLE_DURATION_MS: ${{ inputs.profile == 'smoke' && '10' || inputs.profile == 'extended' && '3600000' || '600000' }}
+  STRESS_TIMEOUT_SECS: ${{ inputs.profile == 'standard' && '8100' || '4500' }}
+  STRESS_SAMPLES: ${{ inputs.profile == 'extended' && '1' || inputs.samples }}
+  STRESS_WARMUP_SAMPLES: ${{ inputs.profile == 'extended' && '0' || inputs.warmup_samples }}
+  STRESS_REQUIRE_QUIET_ENV: ${{ inputs.require_quiet_env }}
+  STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
+  MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
 
 permissions:
   contents: read
@@ -50,7 +62,7 @@ concurrency:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: ${{ inputs.profile == 'standard' && 150 || 90 }}
     if: inputs.run_mode == 'full'
 
     strategy:
@@ -208,11 +220,6 @@ jobs:
 
     env:
       CARGO_INCREMENTAL: "0"
-      # Tier 4 calls its one-hour window "full" internally.
-      MIDGE_BENCH_PROFILE: ${{ inputs.profile == 'extended' && 'full' || inputs.profile }}
-      STRESS_PROFILE: smoke
-      STRESS_SAMPLE_DURATION_MS: ${{ inputs.profile == 'smoke' && '10' || inputs.profile == 'extended' && '3600000' || '600000' }}
-      STRESS_TIMEOUT_SECS: ${{ inputs.profile == 'smoke' && '900' || inputs.profile == 'extended' && '4500' || '1500' }}
 
     steps:
       - name: Checkout repository
@@ -224,22 +231,20 @@ jobs:
         run: rustup update stable
 
       - name: Run benchmarks
-        run: cargo bench --locked --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}' --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
+        run: cargo bench --locked --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}' --samples "$STRESS_SAMPLES" --warmup-samples "$STRESS_WARMUP_SAMPLES" --no-progress
 
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier4-${{ matrix.workload }}-${{ github.sha }}
-          path: |
-            crates/midge/target/stress/**
-            crates/midge/target/midge-stress/**
-          if-no-files-found: ignore
+          path: target/bench-reports/
+          if-no-files-found: warn
 
   targeted:
     if: inputs.run_mode == 'targeted'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: ${{ inputs.profile == 'standard' && 150 || 90 }}
     env:
       CARGO_INCREMENTAL: "0"
       BENCH_NAME: ${{ inputs.bench }}
@@ -251,24 +256,6 @@ jobs:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
 
-      - name: Install benchmark source overlay
-        if: inputs.benchmark_ref != ''
-        env:
-          BENCH_NAME: ${{ inputs.bench }}
-          BENCHMARK_SOURCE_REF: ${{ inputs.benchmark_ref }}
-        run: |
-          set -euo pipefail
-          [[ "$BENCH_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]
-          [[ "$BENCHMARK_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
-          git fetch origin "$BENCHMARK_SOURCE_REF"
-          git show "${BENCHMARK_SOURCE_REF}:crates/midge/benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/${BENCH_NAME}.rs" 2>/dev/null ||
-            git show "${BENCHMARK_SOURCE_REF}:benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/${BENCH_NAME}.rs"
-          cp "$RUNNER_TEMP/${BENCH_NAME}.rs" "crates/midge/benches/${BENCH_NAME}.rs"
-          if ! grep -Fq "name = \"${BENCH_NAME}\"" crates/midge/Cargo.toml; then
-            printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
-              "$BENCH_NAME" "$BENCH_NAME" >> crates/midge/Cargo.toml
-          fi
-
       - name: Update Rust to stable
         run: rustup update stable
 
@@ -279,14 +266,12 @@ jobs:
           uptime
 
       - name: Run targeted benchmark
-        run: cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
+        run: cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples "$STRESS_SAMPLES" --warmup-samples "$STRESS_WARMUP_SAMPLES" --no-progress
 
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier4-${{ inputs.workload }}-${{ inputs.source_ref || github.sha }}
-          path: |
-            crates/midge/target/stress/**
-            crates/midge/target/midge-stress/**
-          if-no-files-found: ignore
+          path: target/bench-reports/
+          if-no-files-found: warn

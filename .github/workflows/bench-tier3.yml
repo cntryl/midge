@@ -9,6 +9,10 @@ on:
         options: [smoke, standard, extended]
         default: standard
 
+env:
+  STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
+  MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
+
 permissions:
   contents: read
 
@@ -51,7 +55,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier3-${{ matrix.bench }}-${{ github.sha }}
-          path: |
-            crates/midge/target/stress/**
-            crates/midge/target/midge-stress/**
-          if-no-files-found: ignore
+          path: target/bench-reports/
+          if-no-files-found: warn

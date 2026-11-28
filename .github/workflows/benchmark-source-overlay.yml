@@ -1,0 +1,129 @@
+name: Benchmark Source Overlay
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Measurement profile (Tier 4 windows are short smoke, 10m standard, and 60m extended)
+        type: choice
+        options: [smoke, standard, extended]
+        default: standard
+      tier:
+        description: Benchmark tier
+        type: choice
+        options: ['2', '4']
+        required: true
+      bench:
+        description: Cargo benchmark target
+        type: string
+        required: true
+      workload:
+        description: cntryl-stress workload name
+        type: string
+        required: true
+      source_ref:
+        description: Source branch or commit SHA to benchmark (blank uses the selected workflow ref)
+        type: string
+        default: ""
+      benchmark_ref:
+        description: Commit SHA supplying the benchmark source
+        type: string
+        required: true
+      samples:
+        description: Measured samples per workload except for Tier 4 extended
+        type: choice
+        options: [5, 10]
+        default: "5"
+      warmup_samples:
+        description: Warmup samples per workload except for Tier 4 extended
+        type: choice
+        options: [1, 2]
+        default: "1"
+      require_quiet_env:
+        description: Fail on host noise when qualifying performance measurements
+        type: boolean
+        default: false
+
+env:
+  STRESS_REQUIRE_QUIET_ENV: ${{ inputs.require_quiet_env }}
+  STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
+  MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.tier == '2' && 30 || inputs.profile == 'standard' && 150 || 90 }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      BENCHMARK_SOURCE_REF: ${{ inputs.benchmark_ref }}
+      BENCH_NAME: ${{ inputs.bench }}
+      WORKLOAD_NAME: ${{ inputs.workload }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Validate benchmark overlay inputs
+        run: |
+          if [[ ! "$BENCH_NAME" =~ ^[a-zA-Z0-9_-]+$ || ! "$BENCHMARK_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::An overlay requires a Cargo benchmark name and a 40-character commit SHA."
+            exit 1
+          fi
+
+      - name: Fetch benchmark overlay commit
+        run: git fetch origin "$BENCHMARK_SOURCE_REF"
+
+      - name: Restore benchmark overlay source
+        working-directory: ${{ hashFiles('crates/midge/Cargo.toml') != '' && 'crates/midge' || '.' }}
+        run: |
+          git show "FETCH_HEAD:crates/midge/benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/benchmark-overlay.rs" 2>/dev/null ||
+            git show "FETCH_HEAD:benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/benchmark-overlay.rs"
+          mv "$RUNNER_TEMP/benchmark-overlay.rs" "benches/${BENCH_NAME}.rs"
+
+      - name: Register benchmark overlay target
+        working-directory: ${{ hashFiles('crates/midge/Cargo.toml') != '' && 'crates/midge' || '.' }}
+        run: |
+          if ! grep -Fq "name = \"${BENCH_NAME}\"" Cargo.toml; then
+            printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
+              "$BENCH_NAME" "$BENCH_NAME" >> Cargo.toml
+          fi
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Capture benchmark environment
+        run: |
+          rustc --version --verbose
+          uname -a
+          uptime
+
+      - name: Run Tier 2 benchmark
+        if: inputs.tier == '2'
+        env:
+          STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'extended' && 'lab' || 'default' }}
+        run: cargo bench --locked --workspace --features internal-testing --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress
+
+      - name: Run Tier 4 benchmark
+        if: inputs.tier == '4'
+        env:
+          # Extended runs fit one hour-long sample within a hosted job.
+          MIDGE_BENCH_PROFILE: ${{ inputs.profile == 'extended' && 'full' || inputs.profile }}
+          STRESS_PROFILE: smoke
+          STRESS_SAMPLE_DURATION_MS: ${{ inputs.profile == 'smoke' && '10' || inputs.profile == 'extended' && '3600000' || '600000' }}
+          STRESS_TIMEOUT_SECS: ${{ inputs.profile == 'standard' && '8100' || '4500' }}
+          STRESS_SAMPLES: ${{ inputs.profile == 'extended' && '1' || inputs.samples }}
+          STRESS_WARMUP_SAMPLES: ${{ inputs.profile == 'extended' && '0' || inputs.warmup_samples }}
+        run: cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples "$STRESS_SAMPLES" --warmup-samples "$STRESS_WARMUP_SAMPLES" --no-progress
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier${{ inputs.tier }}-overlay-${{ inputs.workload }}-${{ inputs.source_ref || github.sha }}
+          path: target/bench-reports/
+          if-no-files-found: warn

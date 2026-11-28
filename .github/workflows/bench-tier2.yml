@@ -25,10 +25,6 @@ on:
         description: Source branch or commit SHA to benchmark (blank uses the selected workflow ref)
         type: string
         default: ""
-      benchmark_ref:
-        description: Optional ref supplying the same benchmark source when it is absent from source_ref
-        type: string
-        default: ""
       samples:
         description: Measured samples per workload
         type: choice
@@ -39,6 +35,15 @@ on:
         type: choice
         options: [1, 2]
         default: "1"
+      require_quiet_env:
+        description: Fail on host noise when qualifying performance measurements
+        type: boolean
+        default: false
+
+env:
+  STRESS_REQUIRE_QUIET_ENV: ${{ inputs.require_quiet_env }}
+  STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
+  MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
 
 permissions:
   contents: read
@@ -56,17 +61,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        bench:
-          - tier2_subsystem_block_cache
-          - tier2_subsystem_bloom_build
-          - tier2_subsystem_compression
-          - tier2_subsystem_range_scan_cache
-          - tier2_subsystem_iterator_multi_sst
-          - tier2_subsystem_memtable_rotate
-          - tier2_subsystem_read_amplification
-          - tier2_subsystem_event_loop
-          - tier2_subsystem_transaction_latency
-          - tier2_subsystem_durability_commit_latency
+        include:
+          - bench: tier2_subsystem_block_cache
+            package: cntryl-midge-table
+          - bench: tier2_subsystem_bloom_build
+            package: cntryl-midge-table
+          - bench: tier2_subsystem_compression
+            package: cntryl-midge-core
+            features: internal-testing
+          - bench: tier2_subsystem_range_scan_cache
+            package: cntryl-midge-table
+          - bench: tier2_subsystem_iterator_multi_sst
+            package: cntryl-midge
+          - bench: tier2_subsystem_memtable_rotate
+            package: cntryl-midge-table
+          - bench: tier2_subsystem_read_amplification
+            package: cntryl-midge
+          - bench: tier2_subsystem_event_loop
+            package: cntryl-midge
+          - bench: tier2_subsystem_transaction_latency
+            package: cntryl-midge
+          - bench: tier2_subsystem_durability_commit_latency
+            package: cntryl-midge
 
     env:
       CARGO_INCREMENTAL: "0"
@@ -89,18 +105,15 @@ jobs:
           uptime
 
       - name: Run benchmarks
-        run: cargo bench --locked --bench '${{ matrix.bench }}' -- --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
+        run: cargo bench --locked -p '${{ matrix.package }}' --features '${{ matrix.features }}' --bench '${{ matrix.bench }}' -- --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress
 
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier2-${{ matrix.bench }}-${{ github.sha }}
-          path: |
-            crates/midge/target/stress/**
-            crates/midge/target/midge-stress/**
-          if-no-files-found: ignore
-
+          path: target/bench-reports/
+          if-no-files-found: warn
 
   targeted:
     if: inputs.run_mode == 'targeted'
@@ -111,31 +124,12 @@ jobs:
       STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'extended' && 'lab' || 'default' }}
       BENCH_NAME: ${{ inputs.bench }}
       WORKLOAD_NAME: ${{ inputs.workload }}
-      BENCHMARK_SOURCE_REF: ${{ inputs.benchmark_ref }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
-
-      - name: Install benchmark source overlay
-        if: inputs.benchmark_ref != ''
-        env:
-          BENCH_NAME: ${{ inputs.bench }}
-          BENCHMARK_SOURCE_REF: ${{ inputs.benchmark_ref }}
-        run: |
-          set -euo pipefail
-          [[ "$BENCH_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]
-          [[ "$BENCHMARK_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
-          git fetch origin "$BENCHMARK_SOURCE_REF"
-          git show "${BENCHMARK_SOURCE_REF}:crates/midge/benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/${BENCH_NAME}.rs" 2>/dev/null ||
-            git show "${BENCHMARK_SOURCE_REF}:benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/${BENCH_NAME}.rs"
-          cp "$RUNNER_TEMP/${BENCH_NAME}.rs" "crates/midge/benches/${BENCH_NAME}.rs"
-          if ! grep -Fq "name = \"${BENCH_NAME}\"" crates/midge/Cargo.toml; then
-            printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
-              "$BENCH_NAME" "$BENCH_NAME" >> crates/midge/Cargo.toml
-          fi
 
       - name: Update Rust to stable
         run: rustup update stable
@@ -147,14 +141,12 @@ jobs:
           uptime
 
       - name: Run targeted benchmark
-        run: cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
+        run: cargo bench --locked --workspace --features internal-testing --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress
 
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier2-${{ inputs.workload }}-${{ inputs.source_ref || github.sha }}
-          path: |
-            crates/midge/target/stress/**
-            crates/midge/target/midge-stress/**
-          if-no-files-found: ignore
+          path: target/bench-reports/
+          if-no-files-found: warn
