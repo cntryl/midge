@@ -226,12 +226,17 @@ fn should_clear_aggregate_memtable_pressure_when_local_writers_go_idle() -> Midg
 
 #[test]
 fn should_clear_aggregate_memtable_pressure_when_cloud_writers_go_idle() -> MidgeResult<()> {
+    // Arrange
     let directory = tempfile::tempdir()?;
-    verify_idle_aggregate_pressure(
-        OpenOptions::cloud_simulated(directory.path(), "bucket", "aggregate-pressure")
-            .local_storage_budget(128 * 1024 * 1024),
-        WriteOptions::cloud_strict(),
-    )
+    let options = OpenOptions::cloud_simulated(directory.path(), "bucket", "aggregate-pressure")
+        .local_storage_budget(128 * 1024 * 1024);
+
+    // Act
+    let outcome = verify_idle_aggregate_pressure(options, WriteOptions::cloud_strict());
+
+    // Assert
+    outcome.expect("cloud writes should resume and acknowledged values should survive reopen");
+    Ok(())
 }
 
 fn verify_idle_aggregate_pressure(
