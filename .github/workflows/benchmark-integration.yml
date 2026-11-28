@@ -1,6 +1,8 @@
 name: Benchmark Integration
 
 on:
+  schedule:
+    - cron: "31 13 * * 4"
   workflow_dispatch:
     inputs:
       profile:
@@ -26,7 +28,7 @@ on:
 env:
   CARGO_INCREMENTAL: "0"
   STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'full' && 'lab' || 'default' }}
-  STRESS_REQUIRE_QUIET_ENV: ${{ inputs.require_quiet_env }}
+  STRESS_REQUIRE_QUIET_ENV: ${{ inputs.require_quiet_env && 'true' || 'false' }}
   STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
   MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
 
@@ -40,7 +42,7 @@ concurrency:
 jobs:
   integration:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.profile == 'standard' && 150 || 90 }}
+    timeout-minutes: ${{ (inputs.profile || 'standard') == 'standard' && 150 || 90 }}
 
     strategy:
       fail-fast: false
@@ -217,12 +219,12 @@ jobs:
 
     env:
       # Full runs fit one hour-long sample within a hosted job.
-      MIDGE_BENCH_PROFILE: ${{ inputs.profile }}
+      MIDGE_BENCH_PROFILE: ${{ inputs.profile || 'standard' }}
       STRESS_PROFILE: smoke
       STRESS_SAMPLE_DURATION_MS: ${{ inputs.profile == 'smoke' && '10' || inputs.profile == 'full' && '3600000' || '600000' }}
-      STRESS_TIMEOUT_SECS: ${{ inputs.profile == 'standard' && '8100' || '4500' }}
-      STRESS_SAMPLES: ${{ inputs.profile == 'full' && '1' || inputs.samples }}
-      STRESS_WARMUP_SAMPLES: ${{ inputs.profile == 'full' && '0' || inputs.warmup_samples }}
+      STRESS_TIMEOUT_SECS: ${{ (inputs.profile || 'standard') == 'standard' && '8100' || '4500' }}
+      STRESS_SAMPLES: ${{ inputs.profile == 'full' && '1' || inputs.samples || '5' }}
+      STRESS_WARMUP_SAMPLES: ${{ inputs.profile == 'full' && '0' || inputs.warmup_samples || '1' }}
 
     steps:
       - name: Checkout repository

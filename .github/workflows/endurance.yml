@@ -38,5 +38,5 @@ jobs:
     with:
       bench: tier5_stress_workloads
       workload: ${{ matrix.workload }}
-      profile: ${{ inputs.profile || 'full' }}
+      profile: ${{ inputs.profile || 'standard' }}
       artifact_name: bench-endurance-${{ matrix.workload }}-${{ github.sha }}

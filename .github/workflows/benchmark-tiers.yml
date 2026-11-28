@@ -27,14 +27,15 @@ on:
         description: Fail on host noise when qualifying performance measurements
         type: boolean
         default: false
+  schedule:
+    - cron: "17 2 * * *"
 
 env:
   CARGO_INCREMENTAL: "0"
   STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'full' && 'lab' || 'default' }}
-  STRESS_REQUIRE_QUIET_ENV: ${{ inputs.require_quiet_env }}
+  STRESS_REQUIRE_QUIET_ENV: ${{ inputs.require_quiet_env && 'true' || 'false' }}
   STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
   MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
-
 permissions:
   contents: read
 
@@ -44,7 +45,7 @@ concurrency:
 
 jobs:
   tier1:
-    if: inputs.tier == 'all' || inputs.tier == 'tier1'
+    if: github.event_name == 'schedule' || inputs.tier == 'all' || inputs.tier == 'tier1'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -102,7 +103,7 @@ jobs:
           if-no-files-found: warn
 
   tier2:
-    if: inputs.tier == 'all' || inputs.tier == 'tier2'
+    if: github.event_name == 'schedule' || inputs.tier == 'all' || inputs.tier == 'tier2'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -155,7 +156,7 @@ jobs:
           uptime
 
       - name: Run benchmark
-        run: cargo bench --locked -p '${{ matrix.package }}' --features '${{ matrix.features }}' --bench '${{ matrix.bench }}' -- --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress
+        run: cargo bench --locked -p '${{ matrix.package }}' --features '${{ matrix.features }}' --bench '${{ matrix.bench }}' -- --samples '${{ inputs.samples || '5' }}' --warmup-samples '${{ inputs.warmup_samples || '1' }}' --no-progress
 
       - name: Upload benchmark reports
         if: always()
@@ -166,7 +167,7 @@ jobs:
           if-no-files-found: warn
 
   tier3:
-    if: inputs.tier == 'all' || inputs.tier == 'tier3'
+    if: github.event_name == 'schedule' || inputs.tier == 'all' || inputs.tier == 'tier3'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

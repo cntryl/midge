@@ -9,7 +9,7 @@ on:
         options: [smoke, standard, full]
         default: standard
   schedule:
-    - cron: "23 5 1 * *"
+    - cron: "23 9 2 * *"
 
 permissions:
   contents: read

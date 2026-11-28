@@ -106,12 +106,12 @@ Use these GitHub Actions workflows on Ubuntu runners:
 
 | Workflow | Workloads | Trigger |
 | --- | --- | --- |
-| **Benchmark Tiers 1–3** (`benchmark-tiers.yml`) | Select one tier or all three. One Cargo target per job. | Manual |
-| **Benchmark Integration** (`benchmark-integration.yml`) | One full-engine scenario per job. | Manual |
+| **Benchmark Tiers 1–3** (`benchmark-tiers.yml`) | Select one tier or all three. One Cargo target per job. | Manual or daily |
+| **Benchmark Integration** (`benchmark-integration.yml`) | One full-engine scenario per job. | Manual or weekly |
 | **Benchmark Endurance** (`endurance.yml`) | One sustained pressure workload per job. | Manual or weekly |
 | **Benchmark Soak** (`soak.yml`) | One mixed local or cloud workload per job. | Manual or monthly |
 
-Manual dispatch defaults to `standard`. Scheduled Endurance and Soak runs use `full`.
+Manual dispatch defaults to `standard`. Scheduled Tiers 1–3, Integration, and Endurance runs use `standard`. Scheduled Soak uses `full`.
 
 | Profile | Tiers 1–3 native harness | Integration scenario | Endurance and Soak workload |
 | --- | --- | --- | --- |
