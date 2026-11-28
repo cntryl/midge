@@ -1,4 +1,4 @@
-name: Benchmark Tier 6 Endurance
+name: Benchmark Endurance
 
 on:
   workflow_dispatch:
@@ -9,13 +9,13 @@ on:
         options: [smoke, standard, full]
         default: standard
   schedule:
-    - cron: "23 5 1 * *"
+    - cron: "17 5 * * 2"
 
 permissions:
   contents: read
 
 concurrency:
-  group: bench-tier6-${{ github.ref }}
+  group: bench-endurance-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -24,14 +24,19 @@ jobs:
       fail-fast: false
       matrix:
         workload:
-          - tier6_mixed_workload_local
-          - tier6_mixed_workload_s3
-          - tier6_mixed_workload_azure
-          - tier6_mixed_workload_gcs_xml
-          - tier6_mixed_workload_gcs_json
+          - tier5_multi_family_hot_cold_local
+          - tier5_write_heavy_local
+          - tier5_read_heavy_local
+          - tier5_balanced_local
+          - tier5_many_small_transactions_local
+          - tier5_mixed_transaction_sizes_local
+          - tier5_write_pressure_s3
+          - tier5_write_pressure_azure
+          - tier5_write_pressure_gcs_xml
+          - tier5_write_pressure_gcs_json
     uses: ./.github/workflows/run-stress-benchmark.yml
     with:
-      bench: tier6_mixed_workload_soak
+      bench: tier5_stress_workloads
       workload: ${{ matrix.workload }}
       profile: ${{ inputs.profile || 'full' }}
-      artifact_name: bench-tier6-${{ matrix.workload }}-${{ github.sha }}
+      artifact_name: bench-endurance-${{ matrix.workload }}-${{ github.sha }}
