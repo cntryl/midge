@@ -208,7 +208,7 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
     for secret in secrets {
         assert!(
             !logs.contains(secret),
-            "startup tracing leaked configured credential {secret:?}: {logs}"
+            "startup tracing leaked a configured credential"
         );
     }
     assert!(logs.contains("https://s3.example"));
