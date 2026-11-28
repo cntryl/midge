@@ -230,6 +230,11 @@ jobs:
       - name: Update Rust to stable
         run: rustup update stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-cntryl-midge
+
       - name: Run benchmarks
         run: cargo bench --locked --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}' --samples "$STRESS_SAMPLES" --warmup-samples "$STRESS_WARMUP_SAMPLES" --no-progress
 
@@ -258,6 +263,11 @@ jobs:
 
       - name: Update Rust to stable
         run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-cntryl-midge
 
       - name: Capture benchmark environment
         run: |

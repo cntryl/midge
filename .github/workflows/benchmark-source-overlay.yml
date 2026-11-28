@@ -96,6 +96,11 @@ jobs:
       - name: Update Rust to stable
         run: rustup update stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ inputs.tier == '2' && 'bench-release-workspace' || 'bench-release-cntryl-midge' }}
+
       - name: Capture benchmark environment
         run: |
           rustc --version --verbose

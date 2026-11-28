@@ -65,6 +65,11 @@ jobs:
       - name: Update Rust to stable
         run: rustup update stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-${{ matrix.package }}
+
       - name: Run benchmarks
         run: cargo bench --locked -p '${{ matrix.package }}' --features '${{ matrix.features }}' --bench '${{ matrix.bench }}'
 

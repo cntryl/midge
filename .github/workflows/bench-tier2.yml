@@ -98,6 +98,11 @@ jobs:
       - name: Update Rust to stable
         run: rustup update stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-${{ matrix.package }}
+
       - name: Capture benchmark environment
         run: |
           rustc --version --verbose
@@ -133,6 +138,11 @@ jobs:
 
       - name: Update Rust to stable
         run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-workspace
 
       - name: Capture benchmark environment
         run: |
