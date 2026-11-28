@@ -76,7 +76,7 @@ statistical claim. Emulator costs do not qualify production-provider latency.
 Use the existing reusable workflow on the committed branch:
 
 ```sh
-gh workflow run bench-tier5.yml --repo cntryl/midge --ref BRANCH \
+gh workflow run saturation.yml --repo cntryl/midge --ref BRANCH \
   -f profile=standard -f investigation=comparisons
 ```
 

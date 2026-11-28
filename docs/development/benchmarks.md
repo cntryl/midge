@@ -102,41 +102,52 @@ parity claim. Performance evidence records absolute results for an exact source
 SHA; the absolute matrix does not block 0.5.0 publication. See
 [the baseline procedure](baseline-procedure.md).
 
-Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`,
-with a single `profile` dropdown defaulting to `standard`. All jobs use Ubuntu
-ARM runners. Tier 4 includes both the 25 system scenarios and 48 YCSB A–F
-scenarios, with one scenario per job. Tiers 1–3 run one registered target per
-job. Tier 5 retains its nine workload cases; Tier 6 retains its five.
+Use these GitHub Actions workflows on Ubuntu runners:
+
+| Workflow | Workloads | Trigger |
+| --- | --- | --- |
+| **Benchmark Tiers 1–4** (`benchmark-tiers.yml`) | Select one tier or all four. Tiers 1–3 run one Cargo target per job. Tier 4 runs one workload per job. | Manual |
+| **Benchmark Tier 5 Saturation** (`saturation.yml`) | One saturation workload per job | Manual or weekly |
+| **Benchmark Tier 6 Endurance** (`endurance.yml`) | One soak workload per job | Manual or monthly |
+
+Manual dispatch defaults to `standard`. Scheduled Tier 5 and 6 runs use `full`.
 
 | Profile | Tiers 1–3 native harness | Tier 4 scenario | Tier 5/6 workload |
 | --- | --- | --- | --- |
-| `smoke` | `smoke` | Original short window or complete system cycle | 60 seconds |
+| `smoke` | `smoke` | Short window or complete system cycle | 60 seconds |
 | `standard` | `default` | 10 minutes | 10 minutes |
-| `extended` | `lab` | 60 minutes | 60 minutes |
+| `full` | `lab` | 60 minutes | 60 minutes |
 
-The native harness controls sample counts and timing for Tiers 1–3. Tiers 4–6
-use one native smoke-profile sample without native warmups, with the selected
-measurement window or workload duration. These single samples establish
-execution and correctness, not a statistical performance baseline. Scheduled
-Tier 5/6 campaigns use `extended` (one hour).
+The first workflow exposes sample counts for Tiers 2 and 4 and an optional
+`require_quiet_env` measurement gate. Tier 4 full runs and all Tier 5 and 6
+profiles use one measured sample without a native warmup.
+
+For benchmarks with dedicated setup, use the direct procedures for
+[checkpoint write amplification](checkpoint-write-amplification.md),
+[bounded compaction qualification](bounded-compaction-qualification.md), and the
+provider-backed durability lag diagnostic (`tier5_hybrid_durability_lag` with
+`--features stress-soak` and Sqrzl for cloud cases).
+
+Use **Benchmark Source Overlay** when a historical Tier 2 or Tier 4 checkout
+needs a benchmark file from a second commit. Select the tier, target, and
+workload, then supply the benchmark file's commit SHA in `benchmark_ref`.
 
 YCSB, streaming and backpressure keep one engine through the selected measured
 window. Fixed-count system cases repeat complete bounded cycles, retaining each
 cycle's checks; their long-run clock includes setup and teardown and can exceed
 the window by the final cycle. Their SST footprint observations sum the final
 footprints of completed cycles. Smoke keeps the original timing boundaries and
-workload warmups. Tier 4 maps the `extended` selection to its internal `full`
-profile name.
+workload warmups.
 
-Tiers 5 and 6 use a GitHub Actions Sqrzl service container with the same image
-and settings as `compose.yml`. GitHub manages its lifecycle; no workflow step
-starts, waits for, or stops Sqrzl. All benchmarks run directly through Cargo,
-and native reports and workload artifacts are uploaded even after failure.
+Tiers 5 and 6 call the same stress benchmark job. Cloud workloads wait for
+the Sqrzl service container to report readiness.
+The container's request budget accommodates concurrent SST validation during
+recovery. All workflows run benchmarks through Cargo and attempt to upload
+reports and workload artifacts from `target/bench-reports/` even after failure.
 
-The former checkpoint campaign modes and investigation dispatch are retired
-from these workflows. Their specialized source-pair, construction-smoke and
-readback procedures below and in the campaign documents describe historical
-evidence; ordinary tier runs do not qualify those campaigns.
+The former checkpoint campaign modes are retired. The specialized source-pair,
+construction-smoke, and readback procedures below and in the campaign documents
+describe historical qualification evidence.
 
 For a direct Tier 4 standard run, supply both the workload profile and the
 matching native duration:

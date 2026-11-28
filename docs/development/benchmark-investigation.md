@@ -1,7 +1,7 @@
 # Tier 4–6 measurement and profiling
 
 > Historical campaign procedure: the simplified tier workflows accept only
-> `profile=smoke|standard|extended`. The checkpoint modes, investigation input,
+> `profile=smoke|standard|full`. The checkpoint modes, investigation input,
 > and specialized workflow/readback tooling referenced here are no longer
 > available through those workflows. Existing evidence retains its original
 > qualification limits.
@@ -137,7 +137,7 @@ The registered Tier 5 workflow can dispatch the reusable investigation before
 the new workflow exists on the default branch:
 
 ```sh
-gh workflow run bench-tier5.yml --ref BRANCH \
+gh workflow run saturation.yml --ref BRANCH \
   -f profile=standard -f investigation=all
 ```
 

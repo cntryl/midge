@@ -1,0 +1,87 @@
+name: Run stress benchmark
+
+on:
+  workflow_call:
+    inputs:
+      bench:
+        type: string
+        required: true
+      workload:
+        type: string
+        required: true
+      profile:
+        type: string
+        required: true
+      artifact_name:
+        type: string
+        required: true
+
+env:
+  STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
+  MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    services:
+      sqrzl:
+        # Local workloads do not need an emulator.
+        image: >-
+          ${{
+            !endsWith(inputs.workload, '_local') && 'ghcr.io/sqrzl/sqrzl-emulator:latest'
+            || ''
+          }}
+        ports:
+          - 9000:9000
+          - 9001:9001
+        env:
+          SQRZL_BLOBS_PATH: /app/blobs
+          SQRZL_ACCESS_KEY_ID: admin
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+          # Startup can issue 32 concurrent SST HEADs. Leave room for lease
+          # and WAL traffic. Sqrzl reserves 128 MiB of budget per request.
+          SQRZL_MAX_INFLIGHT_REQUESTS: "64"
+          SQRZL_MAX_INFLIGHT_BYTES: "8589934592"
+
+    env:
+      BENCH_NAME: ${{ inputs.bench }}
+      WORKLOAD_NAME: ${{ inputs.workload }}
+      CARGO_INCREMENTAL: "0"
+      SQRZL_SECRET_ACCESS_KEY: easy-peasy
+      STRESS_PROFILE: smoke
+      STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
+      # Scheduled campaigns retain the one-hour duration.
+      MIDGE_STRESS_DURATION_SECS: ${{ inputs.profile == 'smoke' && '60' || inputs.profile == 'standard' && '600' || '3600' }}
+      STRESS_TIMEOUT_SECS: ${{ inputs.profile == 'smoke' && '960' || inputs.profile == 'standard' && '1500' || '4500' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-stress-soak
+
+      - name: Wait for Sqrzl readiness
+        if: ${{ !endsWith(inputs.workload, '_local') }}
+        run: curl --fail --silent --show-error --retry 15 --retry-all-errors --retry-delay 2 --max-time 5 http://127.0.0.1:9000/healthz
+
+      - name: Run benchmarks
+        run: cargo bench --locked --features stress-soak --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}"
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: target/bench-reports/
+          if-no-files-found: warn

@@ -1,0 +1,37 @@
+name: Benchmark Tier 6 Endurance
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Workload duration (60s smoke, 600s standard, 3600s full)
+        type: choice
+        options: [smoke, standard, full]
+        default: standard
+  schedule:
+    - cron: "23 5 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-tier6-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        workload:
+          - tier6_mixed_workload_local
+          - tier6_mixed_workload_s3
+          - tier6_mixed_workload_azure
+          - tier6_mixed_workload_gcs_xml
+          - tier6_mixed_workload_gcs_json
+    uses: ./.github/workflows/run-stress-benchmark.yml
+    with:
+      bench: tier6_mixed_workload_soak
+      workload: ${{ matrix.workload }}
+      profile: ${{ inputs.profile || 'full' }}
+      artifact_name: bench-tier6-${{ matrix.workload }}-${{ github.sha }}
