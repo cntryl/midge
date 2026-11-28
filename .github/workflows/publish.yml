@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Publish cntryl-midge to crates.io
+    name: Publish Midge workspace to crates.io
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -33,10 +33,10 @@ jobs:
         with:
           shared-key: "publish"
 
-      - name: Read crate version from Cargo.toml
+      - name: Read workspace version from Cargo.toml
         id: crate
         run: |
-          version="$(cargo metadata --no-deps --format-version 1 --locked | jq -er '.packages[] | select(.name == "cntryl-midge") | .version')"
+          version="$(cargo metadata --no-deps --format-version 1 --locked | jq -er '[.packages[].version] | unique | if length == 1 then .[0] else error("workspace package versions differ") end')"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Check crate
@@ -49,10 +49,10 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
-      - name: Publish cntryl-midge to crates.io
+      - name: Publish workspace crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish --locked -p cntryl-midge
+        run: cargo publish --workspace --locked
 
       - name: Tag published version
         env:
