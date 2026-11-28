@@ -285,12 +285,10 @@ impl EventLoop {
                 frozen_count = frozen_count.saturating_add(self.try_auto_freeze(candidate.cf_id));
             }
         }
-        if rule == crate::runtime::state::EventualFlush::WalBytes
-            && self.actors.cloud_coordinator.hybrid_storage.is_none()
-        {
-            if let Some(cf_id) = self.state.aggregate_pressure_flush_family(&attempted_cfs) {
-                frozen_count = frozen_count.saturating_add(self.try_auto_freeze(cf_id));
-            }
+        // Resident pressure can stall admission even when cloud staging and
+        // WAL gaps are below their flush thresholds.
+        if let Some(cf_id) = self.state.aggregate_pressure_flush_family(&attempted_cfs) {
+            frozen_count = frozen_count.saturating_add(self.try_auto_freeze(cf_id));
         }
         self.schedule_next_flush_worker();
         self.drain_inline_flush_worker();
