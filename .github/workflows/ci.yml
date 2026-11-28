@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   workflow_call:
   schedule:
-    - cron: "41 3 * * 3"
+    - cron: "41 3 * * *"
   push:
     branches: [develop, main]
   pull_request:
@@ -17,7 +17,7 @@ env:
   CARGO_INCREMENTAL: "0"
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && '-scheduled' || '' }}
   cancel-in-progress: true
 
 jobs:

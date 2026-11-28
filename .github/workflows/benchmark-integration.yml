@@ -1,0 +1,250 @@
+name: Benchmark Integration
+
+on:
+  schedule:
+    - cron: "31 13 * * 4"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Measurement intensity (smoke, standard, full)
+        type: choice
+        options: [smoke, standard, full]
+        default: standard
+      samples:
+        description: Measured samples per workload
+        type: choice
+        options: [5, 10]
+        default: "5"
+      warmup_samples:
+        description: Warmup samples per workload
+        type: choice
+        options: [1, 2]
+        default: "1"
+      require_quiet_env:
+        description: Fail on host noise when qualifying performance measurements
+        type: boolean
+        default: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'full' && 'lab' || 'default' }}
+  STRESS_REQUIRE_QUIET_ENV: ${{ inputs.require_quiet_env && 'true' || 'false' }}
+  STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
+  MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-integration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ (inputs.profile || 'standard') == 'standard' && 150 || 90 }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bench: tier4_streaming_workload
+            workload: tier4_streaming_local
+          - bench: tier4_streaming_workload
+            workload: tier4_streaming_cloud
+          - bench: tier4_system_compaction_grandparent_cuts
+            workload: tier4_compaction_grandparent_cuts
+          - bench: tier4_system_compaction_grandparent_cuts
+            workload: tier4_compaction_grandparent_cuts_three_level_policy_on
+          - bench: tier4_system_compaction_grandparent_cuts
+            workload: tier4_compaction_grandparent_cuts_three_level_policy_off
+          - bench: tier4_system_sst_footprint
+            workload: tier4_system_sst_footprint
+          - bench: tier4_system_sst_v5
+            workload: tier4_system_sst_v5
+            features: internal-testing
+          - bench: tier4_system_sst_v5
+            workload: sst_v5_in_memory_point_lookups
+            features: internal-testing
+          - bench: tier4_system_compaction_backpressure
+            workload: tier4_compaction_write_backpressure_cloud_simulated
+          - bench: tier4_system_compaction_backpressure
+            workload: tier4_compaction_write_backpressure_local
+          - bench: tier4_system_compaction_backpressure
+            workload: tier4_compaction_time_ordered_ingest_write_amplification
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_repeated
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_structured
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_mixed
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_prefix_random_tail
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_low_cardinality
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_repeated
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_structured
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_mixed
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_prefix_random_tail
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_low_cardinality
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_repeated
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_structured
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_mixed
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_prefix_random_tail
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_low_cardinality
+          - bench: tier4_system_local_throughput_regression
+            workload: memory
+          - bench: tier4_system_local_throughput_regression
+            workload: local
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_cloud_inventory_10k
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_replay_unflushed_local
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_reopen_after_flush_local
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_reopen_after_flush_cloud
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_reopen_after_compaction_local
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_reopen_after_compaction_cloud
+          - bench: tier4_system_strict_group_commit
+            workload: tier4_complete_local_strict_group_commit
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_memory_1_client
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_memory_16_clients
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_memory_64_clients
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_local_64_clients
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_cloud_64_clients
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_hybrid_16_clients
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_local_1_client
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_local_16_clients
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_local_64_clients
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_cloud_1_client
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_cloud_16_clients
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_cloud_64_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_memory_1_client
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_memory_16_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_memory_64_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_local_1_client
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_local_16_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_local_64_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_cloud_1_client
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_cloud_16_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_cloud_64_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_hybrid_1_client
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_hybrid_16_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_hybrid_64_clients
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_local_1_client
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_local_16_clients
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_local_64_clients
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_cloud_1_client
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_cloud_16_clients
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_cloud_64_clients
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_local_1_client
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_local_16_clients
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_local_64_clients
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_cloud_1_client
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_cloud_16_clients
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_cloud_64_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_memory_1_client
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_memory_16_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_memory_64_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_local_1_client
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_local_16_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_local_64_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_cloud_1_client
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_cloud_16_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_cloud_64_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_hybrid_1_client
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_hybrid_16_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_hybrid_64_clients
+
+    env:
+      # Full runs fit one hour-long sample within a hosted job.
+      MIDGE_BENCH_PROFILE: ${{ inputs.profile || 'standard' }}
+      STRESS_PROFILE: smoke
+      STRESS_SAMPLE_DURATION_MS: ${{ inputs.profile == 'smoke' && '10' || inputs.profile == 'full' && '3600000' || '600000' }}
+      STRESS_TIMEOUT_SECS: ${{ (inputs.profile || 'standard') == 'standard' && '8100' || '4500' }}
+      STRESS_SAMPLES: ${{ inputs.profile == 'full' && '1' || inputs.samples || '5' }}
+      STRESS_WARMUP_SAMPLES: ${{ inputs.profile == 'full' && '0' || inputs.warmup_samples || '1' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-cntryl-midge
+
+      - name: Run benchmark
+        run: cargo bench --locked --features '${{ matrix.features }}' --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}' --samples "$STRESS_SAMPLES" --warmup-samples "$STRESS_WARMUP_SAMPLES" --no-progress
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-integration-${{ matrix.workload }}-${{ github.sha }}
+          path: target/bench-reports/
+          if-no-files-found: warn
