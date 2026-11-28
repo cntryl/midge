@@ -1,5 +1,7 @@
 //! Tier 5 concurrency sweeps for the former Midge Destroyer workloads.
 
+#[path = "bench_support/multi_family_pressure.rs"]
+mod multi_family_pressure;
 #[path = "bench_support/stress_scenarios.rs"]
 mod stress_scenarios;
 
@@ -12,6 +14,11 @@ const BALANCED_CLIENTS: [usize; 4] = [1, 4, 8, 16];
 const SMALL_TX_CLIENTS: [usize; 4] = [1, 4, 16, 32];
 const MIXED_TX_CLIENTS: [usize; 3] = [1, 4, 8];
 const CLOUD_CLIENTS: [usize; 3] = [1, 2, 4];
+
+#[stress(tier = 5, role = "diagnostic")]
+fn tier5_multi_family_hot_cold_local(ctx: &mut StressContext) {
+    multi_family_pressure::run(ctx, stress_scenarios::case_duration(5));
+}
 
 #[stress(tier = 5, role = "diagnostic")]
 fn tier5_write_heavy_local(ctx: &mut StressContext) {

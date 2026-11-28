@@ -1374,7 +1374,7 @@ fn verify_database(
     );
 }
 
-fn case_duration(tier: u8) -> Duration {
+pub(super) fn case_duration(tier: u8) -> Duration {
     let key = if tier == 5 {
         "MIDGE_TIER5_DURATION_SECS"
     } else {
