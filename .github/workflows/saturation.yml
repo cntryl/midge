@@ -1,12 +1,12 @@
-name: Benchmark Tier 5
+name: Benchmark Tier 5 Saturation
 
 on:
   workflow_dispatch:
     inputs:
       profile:
-        description: Workload duration (60s smoke, 600s standard, 3600s extended)
+        description: Workload duration (60s smoke, 600s standard, 3600s full)
         type: choice
-        options: [smoke, standard, extended]
+        options: [smoke, standard, full]
         default: standard
   schedule:
     - cron: "17 5 * * 2"
@@ -38,5 +38,5 @@ jobs:
     with:
       bench: tier5_stress_workloads
       workload: ${{ matrix.workload }}
-      profile: ${{ inputs.profile || 'extended' }}
+      profile: ${{ inputs.profile || 'full' }}
       artifact_name: bench-tier5-${{ matrix.workload }}-${{ github.sha }}

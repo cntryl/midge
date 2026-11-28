@@ -1,20 +1,25 @@
-name: Benchmark Tier 4
+name: Benchmark Tiers 1–4
 
 on:
   workflow_dispatch:
     inputs:
-      profile:
-        description: Measurement window (short smoke, 10m standard, one 60m extended sample)
+      tier:
+        description: Benchmark tier to run
         type: choice
-        options: [smoke, standard, extended]
+        options: [all, tier1, tier2, tier3, tier4]
+        default: all
+      profile:
+        description: Measurement intensity (smoke, standard, full)
+        type: choice
+        options: [smoke, standard, full]
         default: standard
       samples:
-        description: Measured samples per workload for smoke and standard
+        description: Measured samples per workload
         type: choice
         options: [5, 10]
         default: "5"
       warmup_samples:
-        description: Warmup samples per workload for smoke and standard
+        description: Warmup samples per workload
         type: choice
         options: [1, 2]
         default: "1"
@@ -24,13 +29,8 @@ on:
         default: false
 
 env:
-  # Extended runs fit one hour-long sample within a hosted job.
-  MIDGE_BENCH_PROFILE: ${{ inputs.profile == 'extended' && 'full' || inputs.profile }}
-  STRESS_PROFILE: smoke
-  STRESS_SAMPLE_DURATION_MS: ${{ inputs.profile == 'smoke' && '10' || inputs.profile == 'extended' && '3600000' || '600000' }}
-  STRESS_TIMEOUT_SECS: ${{ inputs.profile == 'standard' && '8100' || '4500' }}
-  STRESS_SAMPLES: ${{ inputs.profile == 'extended' && '1' || inputs.samples }}
-  STRESS_WARMUP_SAMPLES: ${{ inputs.profile == 'extended' && '0' || inputs.warmup_samples }}
+  CARGO_INCREMENTAL: "0"
+  STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'full' && 'lab' || 'default' }}
   STRESS_REQUIRE_QUIET_ENV: ${{ inputs.require_quiet_env }}
   STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/bench-reports/stress
   MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/bench-reports/midge-stress
@@ -39,11 +39,170 @@ permissions:
   contents: read
 
 concurrency:
-  group: bench-tier4-${{ github.ref }}
+  group: benchmark-tiers-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  bench:
+  tier1:
+    if: inputs.tier == 'all' || inputs.tier == 'tier1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bench: tier1_hotpath_api
+            package: cntryl-midge
+          - bench: tier1_hotpath_bloom
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_block_cache
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_iterator
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_memtable
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_sst
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_trie
+            package: cntryl-midge-table
+          - bench: tier1_hotpath_wal
+            package: cntryl-midge-durability
+          - bench: tier1_hotpath_keyed_group_commit
+            package: cntryl-midge
+          - bench: tier1_hotpath_compression
+            package: cntryl-midge-core
+            features: internal-testing
+          - bench: tier1_hotpath_event_loop
+            package: cntryl-midge
+
+    steps:
+      - &checkout
+        name: Checkout repository
+        uses: actions/checkout@v7
+
+      - &install_rust
+        name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-${{ matrix.package }}
+
+      - name: Run benchmark
+        run: cargo bench --locked -p '${{ matrix.package }}' --features '${{ matrix.features }}' --bench '${{ matrix.bench }}'
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier1-${{ matrix.bench }}-${{ github.sha }}
+          path: target/bench-reports/
+          if-no-files-found: warn
+
+  tier2:
+    if: inputs.tier == 'all' || inputs.tier == 'tier2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bench: tier2_subsystem_block_cache
+            package: cntryl-midge-table
+          - bench: tier2_subsystem_bloom_build
+            package: cntryl-midge-table
+          - bench: tier2_subsystem_compression
+            package: cntryl-midge-core
+            features: internal-testing
+          - bench: tier2_subsystem_range_scan_cache
+            package: cntryl-midge-table
+          - bench: tier2_subsystem_iterator_multi_sst
+            package: cntryl-midge
+          - bench: tier2_subsystem_memtable_rotate
+            package: cntryl-midge-table
+          - bench: tier2_subsystem_read_amplification
+            package: cntryl-midge
+          - bench: tier2_subsystem_event_loop
+            package: cntryl-midge
+          - bench: tier2_subsystem_transaction_latency
+            package: cntryl-midge
+          - bench: tier2_subsystem_durability_commit_latency
+            package: cntryl-midge
+          - bench: tier2_subsystem_baseline_matrix
+            package: cntryl-midge
+          - bench: tier2_subsystem_compaction
+            package: cntryl-midge
+          - bench: tier2_subsystem_hybrid_durability_lag
+            package: cntryl-midge
+
+    steps:
+      - *checkout
+
+      - *install_rust
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-${{ matrix.package }}
+
+      - name: Capture benchmark environment
+        run: |
+          rustc --version --verbose
+          uname -a
+          uptime
+
+      - name: Run benchmark
+        run: cargo bench --locked -p '${{ matrix.package }}' --features '${{ matrix.features }}' --bench '${{ matrix.bench }}' -- --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier2-${{ matrix.bench }}-${{ github.sha }}
+          path: target/bench-reports/
+          if-no-files-found: warn
+
+  tier3:
+    if: inputs.tier == 'all' || inputs.tier == 'tier3'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        bench:
+          - tier3_system_engine
+          - tier3_system_mvcc
+          - tier3_system_sst
+          - tier3_system_scan
+          - tier3_system_lifecycle
+
+    steps:
+      - *checkout
+
+      - *install_rust
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-release-cntryl-midge
+
+      - name: Run benchmark
+        run: cargo bench --locked --bench '${{ matrix.bench }}'
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier3-${{ matrix.bench }}-${{ github.sha }}
+          path: target/bench-reports/
+          if-no-files-found: warn
+
+  tier4:
+    if: inputs.tier == 'all' || inputs.tier == 'tier4'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.profile == 'standard' && 150 || 90 }}
 
@@ -55,6 +214,22 @@ jobs:
             workload: tier4_streaming_local
           - bench: tier4_streaming_workload
             workload: tier4_streaming_cloud
+          - bench: tier4_system_compaction_grandparent_cuts
+            workload: tier4_compaction_grandparent_cuts
+          - bench: tier4_system_compaction_grandparent_cuts
+            workload: tier4_compaction_grandparent_cuts_three_level_policy_on
+          - bench: tier4_system_compaction_grandparent_cuts
+            workload: tier4_compaction_grandparent_cuts_three_level_policy_off
+          - bench: tier4_system_sst_footprint
+            workload: tier4_system_sst_footprint
+          - bench: tier4_system_sst_v5
+            workload: tier4_system_sst_v5
+            features: internal-testing
+          - bench: tier4_system_sst_v5
+            workload: sst_v5_in_memory_point_lookups
+            features: internal-testing
+          - bench: tier4_system_compaction_backpressure
+            workload: tier4_compaction_write_backpressure_cloud_simulated
           - bench: tier4_system_compaction_backpressure
             workload: tier4_compaction_write_backpressure_local
           - bench: tier4_system_compaction_backpressure
@@ -93,6 +268,10 @@ jobs:
             workload: memory
           - bench: tier4_system_local_throughput_regression
             workload: local
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_cloud_inventory_10k
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_replay_unflushed_local
           - bench: tier4_system_recovery_throughput
             workload: tier4_recovery_reopen_after_flush_local
           - bench: tier4_system_recovery_throughput
@@ -201,24 +380,26 @@ jobs:
             workload: tier4_ycsb_f_hybrid_64_clients
 
     env:
-      CARGO_INCREMENTAL: "0"
+      # Full runs fit one hour-long sample within a hosted job.
+      MIDGE_BENCH_PROFILE: ${{ inputs.profile }}
+      STRESS_PROFILE: smoke
+      STRESS_SAMPLE_DURATION_MS: ${{ inputs.profile == 'smoke' && '10' || inputs.profile == 'full' && '3600000' || '600000' }}
+      STRESS_TIMEOUT_SECS: ${{ inputs.profile == 'standard' && '8100' || '4500' }}
+      STRESS_SAMPLES: ${{ inputs.profile == 'full' && '1' || inputs.samples }}
+      STRESS_WARMUP_SAMPLES: ${{ inputs.profile == 'full' && '0' || inputs.warmup_samples }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
+      - *checkout
 
-      - name: Update Rust to stable
-        run: rustup update stable
+      - *install_rust
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: bench-release-cntryl-midge
 
-      - name: Run benchmarks
-        run: cargo bench --locked --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}' --samples "$STRESS_SAMPLES" --warmup-samples "$STRESS_WARMUP_SAMPLES" --no-progress
+      - name: Run benchmark
+        run: cargo bench --locked --features '${{ matrix.features }}' --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}' --samples "$STRESS_SAMPLES" --warmup-samples "$STRESS_WARMUP_SAMPLES" --no-progress
 
       - name: Upload benchmark reports
         if: always()

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: Measurement profile (Tier 4 windows are short smoke, 10m standard, and 60m extended)
+        description: Measurement profile (Tier 4 windows are short smoke, 10m standard, and 60m full)
         type: choice
-        options: [smoke, standard, extended]
+        options: [smoke, standard, full]
         default: standard
       tier:
         description: Benchmark tier
@@ -30,12 +30,12 @@ on:
         type: string
         required: true
       samples:
-        description: Measured samples per workload except for Tier 4 extended
+        description: Measured samples per workload except for Tier 4 full
         type: choice
         options: [5, 10]
         default: "5"
       warmup_samples:
-        description: Warmup samples per workload except for Tier 4 extended
+        description: Warmup samples per workload except for Tier 4 full
         type: choice
         options: [1, 2]
         default: "1"
@@ -110,19 +110,19 @@ jobs:
       - name: Run Tier 2 benchmark
         if: inputs.tier == '2'
         env:
-          STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'extended' && 'lab' || 'default' }}
+          STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'full' && 'lab' || 'default' }}
         run: cargo bench --locked --workspace --features internal-testing --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress
 
       - name: Run Tier 4 benchmark
         if: inputs.tier == '4'
         env:
-          # Extended runs fit one hour-long sample within a hosted job.
-          MIDGE_BENCH_PROFILE: ${{ inputs.profile == 'extended' && 'full' || inputs.profile }}
+          # Full runs fit one hour-long sample within a hosted job.
+          MIDGE_BENCH_PROFILE: ${{ inputs.profile }}
           STRESS_PROFILE: smoke
-          STRESS_SAMPLE_DURATION_MS: ${{ inputs.profile == 'smoke' && '10' || inputs.profile == 'extended' && '3600000' || '600000' }}
+          STRESS_SAMPLE_DURATION_MS: ${{ inputs.profile == 'smoke' && '10' || inputs.profile == 'full' && '3600000' || '600000' }}
           STRESS_TIMEOUT_SECS: ${{ inputs.profile == 'standard' && '8100' || '4500' }}
-          STRESS_SAMPLES: ${{ inputs.profile == 'extended' && '1' || inputs.samples }}
-          STRESS_WARMUP_SAMPLES: ${{ inputs.profile == 'extended' && '0' || inputs.warmup_samples }}
+          STRESS_SAMPLES: ${{ inputs.profile == 'full' && '1' || inputs.samples }}
+          STRESS_WARMUP_SAMPLES: ${{ inputs.profile == 'full' && '0' || inputs.warmup_samples }}
         run: cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples "$STRESS_SAMPLES" --warmup-samples "$STRESS_WARMUP_SAMPLES" --no-progress
 
       - name: Upload benchmark reports

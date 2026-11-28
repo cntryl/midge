@@ -102,33 +102,42 @@ parity claim. Performance evidence records absolute results for an exact source
 SHA; the absolute matrix does not block 0.5.0 publication. See
 [the baseline procedure](baseline-procedure.md).
 
-Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`, on
-GitHub-hosted Ubuntu runners. The `profile` dropdown defaults to `standard`.
-Tiers 1–3 run one Cargo benchmark target per job. Tiers 4–6 run one workload per
-job.
-Use **Benchmark Source Overlay** when a historical Tier 2 or Tier 4 checkout
-needs a benchmark file from a second commit. Select the tier, target, and
-workload, then supply the benchmark file's commit SHA in `benchmark_ref`.
+Use these GitHub Actions workflows on Ubuntu runners:
+
+| Workflow | Workloads | Trigger |
+| --- | --- | --- |
+| **Benchmark Tiers 1–4** (`benchmark-tiers.yml`) | Select one tier or all four. Tiers 1–3 run one Cargo target per job. Tier 4 runs one workload per job. | Manual |
+| **Benchmark Tier 5 Saturation** (`saturation.yml`) | One saturation workload per job | Manual or weekly |
+| **Benchmark Tier 6 Endurance** (`endurance.yml`) | One soak workload per job | Manual or monthly |
+
+Manual dispatch defaults to `standard`. Scheduled Tier 5 and 6 runs use `full`.
 
 | Profile | Tiers 1–3 native harness | Tier 4 scenario | Tier 5/6 workload |
 | --- | --- | --- | --- |
-| `smoke` | `smoke` | Original short window or complete system cycle | 60 seconds |
+| `smoke` | `smoke` | Short window or complete system cycle | 60 seconds |
 | `standard` | `default` | 10 minutes | 10 minutes |
-| `extended` | `lab` | 60 minutes | 60 minutes |
+| `full` | `lab` | 60 minutes | 60 minutes |
 
-Tiers 2 and 4 expose measured and warmup sample counts and an optional
-`require_quiet_env` gate for performance qualification. Tier 4's extended
-profile and all Tier 5/6 profiles run one measured sample without a native
-warmup. Use those single samples to assess execution and correctness. Scheduled
-Tier 5/6 campaigns run for one hour.
+The first workflow exposes sample counts for Tiers 2 and 4 and an optional
+`require_quiet_env` measurement gate. Tier 4 full runs and all Tier 5 and 6
+profiles use one measured sample without a native warmup.
+
+For benchmarks with dedicated setup, use the direct procedures for
+[checkpoint write amplification](checkpoint-write-amplification.md),
+[bounded compaction qualification](bounded-compaction-qualification.md), and the
+provider-backed durability lag diagnostic (`tier5_hybrid_durability_lag` with
+`--features stress-soak` and Sqrzl for cloud cases).
+
+Use **Benchmark Source Overlay** when a historical Tier 2 or Tier 4 checkout
+needs a benchmark file from a second commit. Select the tier, target, and
+workload, then supply the benchmark file's commit SHA in `benchmark_ref`.
 
 YCSB, streaming and backpressure keep one engine through the selected measured
 window. Fixed-count system cases repeat complete bounded cycles, retaining each
 cycle's checks; their long-run clock includes setup and teardown and can exceed
 the window by the final cycle. Their SST footprint observations sum the final
 footprints of completed cycles. Smoke keeps the original timing boundaries and
-workload warmups. Tier 4 maps the `extended` selection to its internal `full`
-profile name.
+workload warmups.
 
 Tiers 5 and 6 call the same stress benchmark job. Cloud workloads wait for
 the Sqrzl service container to report readiness.
