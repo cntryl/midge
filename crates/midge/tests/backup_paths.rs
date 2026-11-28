@@ -212,7 +212,7 @@ fn should_reject_windows_case_alias_before_mutation() {
 fn should_enforce_path_isolation_when_using_relative_cloud_simulated_paths() {
     // Arrange
     let cwd = std::env::current_dir().unwrap();
-    let directory = tempfile::tempdir_in(cwd.join("target")).unwrap();
+    let directory = tempfile::tempdir_in(cwd.join("tests")).unwrap();
     let source = directory.path().join("source");
     let mut engine = Engine::open(
         OpenOptions::cloud_simulated(&source, "bucket", "prefix")
@@ -257,7 +257,7 @@ fn should_enforce_path_isolation_when_using_relative_cloud_simulated_paths() {
 fn should_reject_drive_relative_overlap_before_creating_parent() {
     // Arrange
     let cwd = std::env::current_dir().unwrap();
-    let directory = tempfile::tempdir_in(cwd.join("target")).unwrap();
+    let directory = tempfile::tempdir_in(cwd.join("tests")).unwrap();
     let source = directory.path().join("source");
     let mut engine = open(&source);
     let relative = source.strip_prefix(&cwd).unwrap().join("new-parent/backup");

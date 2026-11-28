@@ -78,6 +78,6 @@ jobs:
         with:
           name: bench-tier5-${{ matrix.workload }}-${{ github.sha }}
           path: |
-            target/stress/**
-            target/midge-stress/**
+            crates/midge/target/stress/**
+            crates/midge/target/midge-stress/**
           if-no-files-found: ignore

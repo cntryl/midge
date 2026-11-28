@@ -97,8 +97,8 @@ jobs:
         with:
           name: bench-tier2-${{ matrix.bench }}-${{ github.sha }}
           path: |
-            target/stress/**
-            target/midge-stress/**
+            crates/midge/target/stress/**
+            crates/midge/target/midge-stress/**
           if-no-files-found: ignore
 
 
@@ -129,11 +129,12 @@ jobs:
           [[ "$BENCH_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]
           [[ "$BENCHMARK_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
           git fetch origin "$BENCHMARK_SOURCE_REF"
-          git show "${BENCHMARK_SOURCE_REF}:benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/${BENCH_NAME}.rs"
-          cp "$RUNNER_TEMP/${BENCH_NAME}.rs" "benches/${BENCH_NAME}.rs"
-          if ! grep -Fq "name = \"${BENCH_NAME}\"" Cargo.toml; then
+          git show "${BENCHMARK_SOURCE_REF}:crates/midge/benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/${BENCH_NAME}.rs" 2>/dev/null ||
+            git show "${BENCHMARK_SOURCE_REF}:benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/${BENCH_NAME}.rs"
+          cp "$RUNNER_TEMP/${BENCH_NAME}.rs" "crates/midge/benches/${BENCH_NAME}.rs"
+          if ! grep -Fq "name = \"${BENCH_NAME}\"" crates/midge/Cargo.toml; then
             printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
-              "$BENCH_NAME" "$BENCH_NAME" >> Cargo.toml
+              "$BENCH_NAME" "$BENCH_NAME" >> crates/midge/Cargo.toml
           fi
 
       - name: Update Rust to stable
@@ -154,6 +155,6 @@ jobs:
         with:
           name: bench-tier2-${{ inputs.workload }}-${{ inputs.source_ref || github.sha }}
           path: |
-            target/stress/**
-            target/midge-stress/**
+            crates/midge/target/stress/**
+            crates/midge/target/midge-stress/**
           if-no-files-found: ignore

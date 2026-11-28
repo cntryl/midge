@@ -1,22 +1,10 @@
-[package]
-name = "cntryl-midge"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-description = "A high-performance embedded key-value database with LSM-tree storage"
-license.workspace = true
-repository.workspace = true
-autobenches = false
-readme = "README.md"
-keywords = ["database", "kv", "lsm", "embedded", "storage"]
-categories = ["database-implementations"]
-
 [workspace]
-members = ["crates/core", "crates/table", "crates/storage", "crates/durability"]
+members = ["crates/core", "crates/durability", "crates/midge", "crates/storage", "crates/table"]
+default-members = ["crates/midge"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
@@ -24,10 +12,10 @@ repository = "https://github.com/cntryl/midge"
 
 [workspace.dependencies]
 # Keep version requirements for these path dependencies aligned with workspace.package.version.
-cntryl-midge-core = { version = "=0.6.1", path = "crates/core" }
-cntryl-midge-durability = { version = "=0.6.1", path = "crates/durability", default-features = false }
-cntryl-midge-storage = { version = "=0.6.1", path = "crates/storage", default-features = false }
-cntryl-midge-table = { version = "=0.6.1", path = "crates/table" }
+cntryl-midge-core = { version = "=0.6.2", path = "crates/core" }
+cntryl-midge-durability = { version = "=0.6.2", path = "crates/durability", default-features = false }
+cntryl-midge-storage = { version = "=0.6.2", path = "crates/storage", default-features = false }
+cntryl-midge-table = { version = "=0.6.2", path = "crates/table" }
 
 arc-swap = "1.9"
 base64 = "0.23"
@@ -58,285 +46,11 @@ uuid = { version = "1.29", features = ["v4"] }
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
-[lib]
-bench = false
-
-[[bin]]
-name = "midge"
-bench = false
-
 # `panic = "unwind"` (the default) stays: worker panics are isolated with
 # `catch_unwind` so they fence the writer instead of aborting the process.
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
-[dependencies]
-cntryl-midge-core.workspace = true
-cntryl-midge-durability.workspace = true
-cntryl-midge-storage.workspace = true
-cntryl-midge-table.workspace = true
-
-arc-swap.workspace = true
-bytes.workspace = true
-chrono.workspace = true
-crc32c.workspace = true
-crossbeam.workspace = true
-dashmap.workspace = true
-fail = { workspace = true, optional = true }
-hex.workspace = true
-# Optional global allocator; see `docs/operations/performance-tuning.md`
-mimalloc = { version = "0.1", optional = true }
-parking_lot.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-sysinfo = "0.40"
-tempfile.workspace = true
-tracing.workspace = true
-uuid.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-winapi.workspace = true
-
-[dev-dependencies]
-base64.workspace = true
-cntryl-stress.workspace = true
-crc32fast = "1.5"
-hdrhistogram = "7.6"
-hmac.workspace = true
-md5.workspace = true
-num_cpus = "1.17"
-proptest.workspace = true
-rand.workspace = true
-reqwest.workspace = true
-rmp-serde.workspace = true
-sha1.workspace = true
-tracing-subscriber.workspace = true
-xxhash-rust.workspace = true
-# Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
-# they can reach implementation internals through `cntryl_midge::__internal`
-# without those modules being public API for downstream consumers.
-cntryl-midge = { path = ".", default-features = false, features = ["internal-testing"] }
-
-[features]
-default = ["cloud-all"]
-failpoints = [
-    "dep:fail",
-    "cntryl-midge-core/failpoints",
-    "cntryl-midge-table/failpoints",
-    "cntryl-midge-storage/failpoints",
-    "cntryl-midge-durability/failpoints",
-]
-# Installs mimalloc as the global allocator of the `midge` binary. The library
-# never installs an allocator; embedding applications choose their own.
-alloc-mimalloc = ["dep:mimalloc"]
-telemetry = ["cloud-common", "cntryl-midge-core/telemetry"]
-telemetry-otlp = ["telemetry", "cntryl-midge-core/telemetry-otlp"]
-
-# Cloud storage backends, enabled by default for current deployment profiles.
-cloud-common = ["cntryl-midge-storage/cloud-common", "cntryl-midge-durability/cloud-common"]
-# Request signing shared by every provider. Not a backend by itself.
-cloud-signing = ["cloud-common", "cntryl-midge-storage/cloud-signing"]
-cloud-aws = ["cloud-signing", "cntryl-midge-storage/cloud-aws"]
-cloud-azure = ["cloud-signing", "cntryl-midge-storage/cloud-azure"]
-cloud-gcp = ["cloud-signing", "cntryl-midge-storage/cloud-gcp"]
-cloud-oci = ["cloud-signing", "cntryl-midge-storage/cloud-oci"]
-cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci", "cntryl-midge-durability/cloud-all"]
-
-# Test and benchmark only. Never enable these from a downstream crate.
-# Exposes `cntryl_midge::__internal` for this crate's own tests, benches and
-# fuzz targets; nothing behind it is stable API.
-internal-testing = [
-    "cntryl-midge-core/internal-testing",
-    "cntryl-midge-table/internal-testing",
-    "cntryl-midge-storage/internal-testing",
-    "cntryl-midge-durability/internal-testing",
-]
-sqrzl-tests = ["cntryl-midge-storage/sqrzl-tests"]
-stress-soak = ["cloud-all"]
-checkpoint-bench = ["internal-testing"]
-# Enables the #908 admission configuration in the Tier 4 compaction
-# backpressure benchmark; without it the row runs with hard stalls only.
-candidate-write-backpressure-bench = []
-
-# Fault injection is run explicitly and serially because failpoints are
-# process-global. Broad test selections must not run this target.
-[[test]]
-name = "fault_injection"
-test = false
-required-features = ["failpoints"]
-
-# Exploratory measurement example; not a public engine configuration surface.
-[[example]]
-name = "benchmark_investigation"
-required-features = ["internal-testing"]
-
-[[example]]
-name = "checkpoint_campaign_readback"
-required-features = ["internal-testing"]
-
-# Tier 1
-[[bench]]
-name = "tier1_hotpath_api"
-harness = false
-
-[[bench]]
-name = "tier1_hotpath_keyed_group_commit"
-harness = false
-
-[[bench]]
-name = "tier1_hotpath_event_loop"
-harness = false
-
-# Tier 2
-[[bench]]
-name = "tier2_subsystem_iterator_multi_sst"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_read_amplification"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_event_loop"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_transaction_latency"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_durability_commit_latency"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_hybrid_durability_lag"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_baseline_matrix"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_compaction"
-harness = false
-
-# Tier 3
-[[bench]]
-name = "tier3_system_engine"
-harness = false
-
-[[bench]]
-name = "tier3_system_mvcc"
-harness = false
-
-[[bench]]
-name = "tier3_system_sst"
-harness = false
-
-[[bench]]
-name = "tier3_system_scan"
-harness = false
-
-[[bench]]
-name = "tier3_system_lifecycle"
-harness = false
-
-# Tier 4
-[[bench]]
-name = "tier4_system_checkpoint_write_amplification"
-harness = false
-required-features = ["checkpoint-bench"]
-
-[[bench]]
-name = "tier4_system_local_throughput_regression"
-harness = false
-
-[[bench]]
-name = "tier4_system_strict_group_commit"
-harness = false
-
-[[bench]]
-name = "tier4_system_compression_policy"
-harness = false
-
-[[bench]]
-name = "tier4_ycsb_workload_a"
-harness = false
-
-[[bench]]
-name = "tier4_system_compaction_backpressure"
-harness = false
-
-[[bench]]
-name = "tier4_system_compaction_grandparent_cuts"
-harness = false
-
-[[bench]]
-name = "tier4_system_sst_v5"
-harness = false
-required-features = ["internal-testing"]
-
-[[bench]]
-name = "tier4_system_sst_footprint"
-harness = false
-
-[[bench]]
-name = "tier4_ycsb_workload_b"
-harness = false
-
-[[bench]]
-name = "tier4_ycsb_workload_c"
-harness = false
-
-[[bench]]
-name = "tier4_ycsb_workload_d"
-harness = false
-
-[[bench]]
-name = "tier4_ycsb_workload_e"
-harness = false
-
-[[bench]]
-name = "tier4_ycsb_workload_f"
-harness = false
-
-[[bench]]
-name = "tier4_streaming_workload"
-harness = false
-
-[[bench]]
-name = "tier4_system_recovery_throughput"
-harness = false
-
-[[bench]]
-name = "tier4_bounded_compaction_qualification"
-harness = false
-required-features = ["failpoints"]
-
-# Tiers 5 and 6 are opt-in, long-running stress campaigns. The required
-# feature keeps ordinary `cargo bench` from starting a soak accidentally.
-[[bench]]
-name = "tier5_stress_workloads"
-harness = false
-required-features = ["stress-soak"]
-
-[[bench]]
-name = "tier5_hybrid_durability_lag"
-harness = false
-required-features = ["stress-soak"]
-
-[[bench]]
-name = "tier6_mixed_workload_soak"
-harness = false
-required-features = ["stress-soak"]
-
-[lints]
-workspace = true
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(midge_loom)'] }

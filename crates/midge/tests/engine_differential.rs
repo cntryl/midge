@@ -58,8 +58,8 @@ fn should_preserve_compaction_contract_when_replaying_expiration_regression_seed
 #[test]
 fn should_reach_every_step_kind_given_the_corpus_seeds_when_replayed() {
     // Arrange
-    let corpus =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/engine_differential");
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/corpus/engine_differential");
     let mut seeds: Vec<_> = std::fs::read_dir(&corpus)
         .expect("corpus directory")
         .map(|entry| entry.expect("corpus entry").path())

@@ -2,7 +2,7 @@
 
 The stable package-facing surface is the set of types re-exported at the crate
 root. The [Rust API documentation](https://docs.rs/cntryl-midge) and executable
-[quick-start example](../../examples/documented_quick_start.rs) are the most
+[quick-start example](../../crates/midge/examples/documented_quick_start.rs) are the most
 precise references.
 
 ## Open and close

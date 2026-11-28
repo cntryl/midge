@@ -1,9 +1,6 @@
 # Midge documentation
 
-This documentation describes Midge `0.6.1`, an embedded Rust LSM key-value
-engine with MSRV Rust `1.97`. It is the current 0.x contract, not a promise of
-long-term API or persisted-format stability. Cloud-backed storage is supported
-pre-1.0 and uses self-contained Sqrzl qualification.
+Midge is an embedded Rust LSM key-value engine. See the [support matrix](development/support-matrix.md) for the supported toolchain, features, and storage modes.
 
 ## Start here
 
@@ -17,8 +14,8 @@ pre-1.0 and uses self-contained Sqrzl qualification.
 ## By audience
 
 - Operations: [operator runbook](operations/operator-runbook.md), [storage verification](user-guides/verification.md), [cloud setup](operations/cloud-setup.md), [troubleshooting](user-guides/troubleshooting.md).
-- Storage contributors: [architecture](development/architecture.md), [system invariant catalog and gap analysis](development/invariant-catalog.md), [storage invariants](development/storage-invariants.md), [recovery](development/recovery-internals.md), [testing](development/testing.md), [cloud qualification](development/cloud-qualification-policy.md), [0.5.0 roadmap](development/roadmap-0.5.0.md).
+- Storage contributors: [architecture](development/architecture.md), [system invariant catalog and gap analysis](development/invariant-catalog.md), [storage invariants](development/storage-invariants.md), [recovery](development/recovery-internals.md), [testing](development/testing.md), [cloud qualification](development/cloud-qualification-policy.md).
 - Release evidence: [support matrix](development/support-matrix.md), [format compatibility](development/format-compatibility.md), [release policy](development/release-policy.md), [release checklist](operations/release-checklist.md), [performance baseline procedure](development/baseline-procedure.md).
 
 The root [README](../README.md) is the package-facing entry point. Rust API
-documentation and `examples/documented_quick_start.rs` are API authority.
+documentation and [the quick-start example](../crates/midge/examples/documented_quick_start.rs) are API authority.

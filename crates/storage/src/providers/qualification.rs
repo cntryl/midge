@@ -3,7 +3,7 @@
 //! These tests intentionally assume Sqrzl is already running. Start it with:
 //! `docker compose up -d sqrzl`
 //! then run with the feature enabled, for example:
-//! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1`
+//! `cargo test -p cntryl-midge-storage --lib --features sqrzl-tests providers::qualification -- --test-threads=1`
 
 use super::build_cloud_storage;
 use crate::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};

@@ -1166,8 +1166,8 @@ mod memory_mode_isolation {
     #[test]
     fn should_not_create_filesystem_artifacts_when_memory_mode() {
         // Arrange: snapshot the crate root before the engine runs, so the
-        // assertion actually inspects the filesystem instead of trusting a
-        // comment.
+        // assertion ignores setup of the shared scratch directory by other tests.
+        std::fs::create_dir_all("target/tmp").expect("create shared scratch directory");
         let entries_before = crate_root_top_level_entries();
 
         let opts = opts_for_mode("memory");
