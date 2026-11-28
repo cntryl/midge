@@ -152,7 +152,7 @@ Use `MIDGE_BENCH_PROFILE=full`, `--sample-duration-ms 3600000` and
 keep their existing short Tier 4 windows. A fixed-cycle case rejects a native
 measurement shorter than its selected standard/full window.
 
-The old Destroyer scenarios now live in the opt-in `stress-soak` bench targets.
+Midge's adversarial workloads use the opt-in `stress-soak` bench targets.
 The feature gates both Tier 5 and Tier 6, so a plain `cargo bench` cannot start
 an hours-long run. Local Tier 5 runs use one hour per workload/backend
 concurrency sweep; Tier 6 uses one hour per composite soak. Short smoke runs
@@ -162,6 +162,18 @@ positive value. Sqrzl protocol cases use the local emulator at
 those protocol surfaces and do not claim live-provider capacity. Namespace
 setup reads `SQRZL_SECRET_ACCESS_KEY`, which must match the Sqrzl credentials;
 the benchmark workflows set it for their local emulator jobs.
+
+The Tier 5 hot/cold workload sweeps 1, 4, and 16 hot column families alongside
+one read-only family. Writers overwrite the same two keys in each family in
+a single synced transaction. Concurrent readers check family identity,
+monotonic visibility, and agreement between point reads and scans within one
+snapshot. Each stage checks the last acknowledged generation after reopen.
+
+```sh
+MIDGE_TIER5_DURATION_SECS=9 cargo bench --features stress-soak \
+  --bench tier5_stress_workloads -- --workload tier5_multi_family_hot_cold_local \
+  --profile smoke --no-progress-timeout-secs 60 --timeout-secs 180
+```
 
 Tier 5/6 workflows set a 60-second `cntryl-stress` no-progress watchdog.
 Only successful client operations advance workload progress; retryable
