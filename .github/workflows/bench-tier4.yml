@@ -8,23 +8,6 @@ on:
         type: choice
         options: [smoke, standard, extended]
         default: standard
-      run_mode:
-        description: Run the full Tier 4 matrix or one named benchmark workload
-        type: choice
-        options: [full, targeted]
-        default: full
-      bench:
-        description: Cargo benchmark target for targeted mode
-        type: string
-        default: ""
-      workload:
-        description: cntryl-stress workload name for targeted mode
-        type: string
-        default: ""
-      source_ref:
-        description: Source branch or commit SHA to benchmark (blank uses the selected workflow ref)
-        type: string
-        default: ""
       samples:
         description: Measured samples per workload for smoke and standard
         type: choice
@@ -56,14 +39,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: bench-tier4-${{ github.ref }}-${{ inputs.run_mode == 'targeted' && github.run_id || 'matrix' }}
+  group: bench-tier4-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   bench:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.profile == 'standard' && 150 || 90 }}
-    if: inputs.run_mode == 'full'
 
     strategy:
       fail-fast: false
@@ -243,45 +225,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier4-${{ matrix.workload }}-${{ github.sha }}
-          path: target/bench-reports/
-          if-no-files-found: warn
-
-  targeted:
-    if: inputs.run_mode == 'targeted'
-    runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.profile == 'standard' && 150 || 90 }}
-    env:
-      CARGO_INCREMENTAL: "0"
-      BENCH_NAME: ${{ inputs.bench }}
-      WORKLOAD_NAME: ${{ inputs.workload }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.source_ref || github.sha }}
-          persist-credentials: false
-
-      - name: Update Rust to stable
-        run: rustup update stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: bench-release-cntryl-midge
-
-      - name: Capture benchmark environment
-        run: |
-          rustc --version --verbose
-          uname -a
-          uptime
-
-      - name: Run targeted benchmark
-        run: cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples "$STRESS_SAMPLES" --warmup-samples "$STRESS_WARMUP_SAMPLES" --no-progress
-
-      - name: Upload benchmark reports
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: bench-tier4-${{ inputs.workload }}-${{ inputs.source_ref || github.sha }}
           path: target/bench-reports/
           if-no-files-found: warn

@@ -105,7 +105,7 @@ SHA; the absolute matrix does not block 0.5.0 publication. See
 Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`, on
 GitHub-hosted Ubuntu runners. The `profile` dropdown defaults to `standard`.
 Tiers 1–3 run one Cargo benchmark target per job. Tiers 4–6 run one workload per
-job. Tiers 2 and 4 also support dispatching a single named workload.
+job.
 Use **Benchmark Source Overlay** when a historical Tier 2 or Tier 4 checkout
 needs a benchmark file from a second commit. Select the tier, target, and
 workload, then supply the benchmark file's commit SHA in `benchmark_ref`.
